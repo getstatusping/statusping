@@ -25,13 +25,15 @@ export interface DayOutage {
 
 function outagesOn(incidents: IncidentView[], from: number, to: number, now: number, monitorName: string | null = null): DayOutage[] {
   return incidents
-    .filter((i) => i.startedAt < to && (i.resolvedAt ?? now) > from)
+    .filter((i) => i.severity === 'outage' && i.startedAt < to && (i.resolvedAt ?? now) > from)
     .map((i) => ({ monitorName, reason: i.reason, detail: i.detail, startedAt: i.startedAt, resolvedAt: i.resolvedAt }))
 }
 
 export interface IncidentView {
   id: number
   reason: IncidentReason
+  /** Warnings are informational and never contribute to downtime or monitor state. */
+  severity: 'outage' | 'warning'
   detail: string | null
   startedAt: number
   resolvedAt: number | null
@@ -44,6 +46,8 @@ export interface MonitorView {
   bars: DayBar[]
   uptime90: number | null
   uptime24h: number | null
+  /** Currently active non-outage incidents, shown as amber monitor warnings. */
+  warnings: IncidentView[]
 }
 
 export interface StatusData {
@@ -52,6 +56,7 @@ export interface StatusData {
   groups: { name: string; monitors: MonitorView[] }[]
   counts: Record<Status, number>
   openIncidents: (IncidentView & { monitorId: string; monitorName: string })[]
+  openWarnings: (IncidentView & { monitorId: string; monitorName: string })[]
 }
 
 interface MonitorRow {
@@ -62,6 +67,7 @@ interface MonitorRow {
 function downSecondsBetween(incidents: IncidentView[], from: number, to: number, now: number): number {
   let total = 0
   for (const i of incidents) {
+    if (i.severity !== 'outage') continue
     const start = Math.max(i.startedAt, from)
     const end = Math.min(i.resolvedAt ?? now, to)
     if (end > start) total += end - start
@@ -89,8 +95,8 @@ export async function loadStatusData(deps: Deps, now: number, monitorIds?: reado
   const [rows, states, incidentRows, tick] = await Promise.all([
     db.all<MonitorRow>(`SELECT id, created_at FROM monitors WHERE paused = 0`),
     db.all<MonitorStateRow>(`SELECT * FROM monitor_state`),
-    db.all<{ id: number; monitor_id: string; reason: IncidentReason; detail: string | null; started_at: number; resolved_at: number | null }>(
-      `SELECT id, monitor_id, reason, detail, started_at, resolved_at FROM incidents
+    db.all<{ id: number; monitor_id: string; reason: IncidentReason; severity: 'outage' | 'warning'; detail: string | null; started_at: number; resolved_at: number | null }>(
+      `SELECT id, monitor_id, reason, severity, detail, started_at, resolved_at FROM incidents
        WHERE resolved_at IS NULL OR resolved_at >= ? ORDER BY started_at`,
       [since],
     ),
@@ -101,7 +107,7 @@ export async function loadStatusData(deps: Deps, now: number, monitorIds?: reado
   const incidentsBy = new Map<string, IncidentView[]>()
   for (const r of incidentRows) {
     const list = incidentsBy.get(r.monitor_id) ?? []
-    list.push({ id: r.id, reason: r.reason, detail: r.detail, startedAt: r.started_at, resolvedAt: r.resolved_at })
+    list.push({ id: r.id, reason: r.reason, severity: r.severity, detail: r.detail, startedAt: r.started_at, resolvedAt: r.resolved_at })
     incidentsBy.set(r.monitor_id, list)
   }
 
@@ -109,6 +115,7 @@ export async function loadStatusData(deps: Deps, now: number, monitorIds?: reado
   const counts: Record<Status, number> = { new: 0, up: 0, late: 0, down: 0, paused: 0 }
   const groups: StatusData['groups'] = []
   const openIncidents: StatusData['openIncidents'] = []
+  const openWarnings: StatusData['openWarnings'] = []
 
   const wanted = monitorIds ? new Set(monitorIds) : null
   for (const monitor of config.monitors) {
@@ -129,7 +136,13 @@ export async function loadStatusData(deps: Deps, now: number, monitorIds?: reado
       })
     }
     counts[state.status]++
-    for (const i of incidents) if (i.resolvedAt === null) openIncidents.push({ ...i, monitorId: monitor.id, monitorName: monitor.name })
+    const warnings = incidents.filter((i) => i.severity === 'warning' && i.resolvedAt === null)
+    for (const i of incidents) {
+      if (i.resolvedAt !== null) continue
+      const open = { ...i, monitorId: monitor.id, monitorName: monitor.name }
+      if (i.severity === 'warning') openWarnings.push(open)
+      else openIncidents.push(open)
+    }
     let group = groups.find((g) => g.name === monitor.group)
     if (!group) groups.push((group = { name: monitor.group, monitors: [] }))
     group.monitors.push({
@@ -139,9 +152,10 @@ export async function loadStatusData(deps: Deps, now: number, monitorIds?: reado
       bars,
       uptime90: uptimeBetween(incidents, createdAt, since, now, now).uptime,
       uptime24h: uptimeBetween(incidents, createdAt, now - DAY, now, now).uptime,
+      warnings,
     })
   }
-  return { now, lastTickAt: tick, groups, counts, openIncidents }
+  return { now, lastTickAt: tick, groups, counts, openIncidents, openWarnings }
 }
 
 export type RunResult = 'success' | 'failed' | 'running' | 'hung' | 'unfinished' | 'log'
@@ -237,8 +251,8 @@ export async function loadMonitorDetail(deps: Deps, id: string, now: number): Pr
           `SELECT tick_at, results_json FROM tick_results WHERE results_json <> '[]' ORDER BY tick_at DESC LIMIT 180`,
         )
       : Promise.resolve([]),
-    deps.db.all<{ id: number; reason: IncidentReason; detail: string | null; started_at: number; resolved_at: number | null }>(
-      `SELECT id, reason, detail, started_at, resolved_at FROM incidents WHERE monitor_id = ? ORDER BY started_at DESC LIMIT 20`,
+    deps.db.all<{ id: number; reason: IncidentReason; severity: 'outage' | 'warning'; detail: string | null; started_at: number; resolved_at: number | null }>(
+      `SELECT id, reason, severity, detail, started_at, resolved_at FROM incidents WHERE monitor_id = ? ORDER BY started_at DESC LIMIT 20`,
       [id],
     ),
   ])
@@ -256,6 +270,7 @@ export async function loadMonitorDetail(deps: Deps, id: string, now: number): Pr
     incidents: incidents.map((r) => ({
       id: r.id,
       reason: r.reason,
+      severity: r.severity,
       detail: r.detail,
       startedAt: r.started_at,
       resolvedAt: r.resolved_at,

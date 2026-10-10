@@ -1,7 +1,7 @@
 import type { Db, SqlValue, Statement } from './db/types.ts'
 
 export type Status = 'new' | 'up' | 'late' | 'down' | 'paused'
-export type IncidentReason = 'missed' | 'failed' | 'hung' | 'check_failed'
+export type IncidentReason = 'missed' | 'failed' | 'hung' | 'check_failed' | 'ssl_expiring' | 'domain_expiring'
 
 export interface MonitorStateRow {
   monitor_id: string
@@ -92,13 +92,13 @@ export async function applyTransition(db: Db, t: Transition): Promise<boolean> {
       sql: `INSERT INTO incidents (monitor_id, reason, detail, started_at)
             SELECT ?, ?, ?, ?
             WHERE ${guard.sql}
-              AND NOT EXISTS (SELECT 1 FROM incidents WHERE monitor_id = ? AND resolved_at IS NULL)`,
+              AND NOT EXISTS (SELECT 1 FROM incidents WHERE monitor_id = ? AND resolved_at IS NULL AND severity = 'outage')`,
       params: [t.monitorId, t.reason ?? 'missed', truncate(t.detail ?? null, 1000), t.at, ...guard.params, t.monitorId],
     })
   } else if (t.to) {
     statements.push({
       sql: `UPDATE incidents SET resolved_at = ?
-            WHERE monitor_id = ? AND resolved_at IS NULL AND ${guard.sql}`,
+            WHERE monitor_id = ? AND resolved_at IS NULL AND severity = 'outage' AND ${guard.sql}`,
       params: [t.at, t.monitorId, ...guard.params],
     })
   }

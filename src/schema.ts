@@ -72,6 +72,19 @@ export const MIGRATIONS: string[][] = [
       UNIQUE (incident_id, event, sink)
     )`,
   ],
+  [
+    `ALTER TABLE incidents ADD COLUMN severity TEXT NOT NULL DEFAULT 'outage' CHECK (severity IN ('outage', 'warning'))`,
+    `CREATE TABLE IF NOT EXISTS expiry_checks (
+      monitor_id TEXT NOT NULL,
+      kind TEXT NOT NULL CHECK (kind IN ('ssl', 'domain')),
+      expires_at INTEGER,
+      checked_at INTEGER NOT NULL,
+      error TEXT,
+      PRIMARY KEY (monitor_id, kind)
+    )`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS incidents_one_open_per_reason
+      ON incidents(monitor_id, reason) WHERE resolved_at IS NULL`,
+  ],
 ]
 
 export const SCHEMA_VERSION = MIGRATIONS.length

@@ -8,6 +8,7 @@ import {
   resolveConfigEnv,
 } from './config.ts'
 import type { Db } from './db/types.ts'
+import type { CertificateExpiryProvider } from './expiry/types.ts'
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error'
 export type Logger = (level: LogLevel, message: string, data?: Record<string, unknown>) => void
@@ -20,6 +21,8 @@ export interface Deps {
   /** monitor id → ping token (secret), from the PING_TOKENS env var. */
   pingTokens: Record<string, string>
   fetch: typeof fetch
+  /** Optional runtime-native certificate provider. Workers intentionally omit this. */
+  certificateExpiry?: CertificateExpiryProvider
   log: Logger
   /** Runs a promise after the response is sent where the platform supports it. */
   waitUntil?: (p: Promise<unknown>) => void
@@ -31,6 +34,7 @@ export interface CreateDepsOptions {
   getEnv: EnvGetter
   fetch?: typeof fetch
   log?: Logger
+  certificateExpiry?: CertificateExpiryProvider
 }
 
 export const consoleLogger: Logger = (level, message, data) => {
@@ -53,6 +57,7 @@ export function createDeps(opts: CreateDepsOptions): Deps {
     pingTokens: parsePingTokens(opts.getEnv('PING_TOKENS')),
     // Bind: Workers throw "Illegal invocation" when fetch is called detached from globalThis.
     fetch: opts.fetch ?? fetch.bind(globalThis),
+    certificateExpiry: opts.certificateExpiry,
     log: opts.log ?? consoleLogger,
   }
 }

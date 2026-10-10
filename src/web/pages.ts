@@ -46,6 +46,8 @@ const REASON_LABEL: Record<IncidentView['reason'], string> = {
   failed: 'Reported failure',
   hung: 'Hung job',
   check_failed: 'Check failed',
+  ssl_expiring: 'Certificate expiring',
+  domain_expiring: 'Domain expiring',
 }
 
 const pct = (u: number | null) => (u === null ? '—' : `${(Math.floor(u * 10000) / 100).toFixed(2)}%`)
@@ -160,6 +162,12 @@ const INCIDENT_TITLE: Record<IncidentView['reason'], string> = {
   failed: 'reported a failure',
   hung: 'didn’t finish',
   check_failed: 'is down',
+  ssl_expiring: 'has a certificate expiring soon',
+  domain_expiring: 'has a domain registration expiring soon',
+}
+
+function warningTitle(i: IncidentView & { monitorName: string }): string {
+  return `${i.monitorName} ${INCIDENT_TITLE[i.reason]}`
 }
 
 /**
@@ -192,6 +200,24 @@ function statusBanner(data: StatusData, ctx: PageCtx): Html {
           </article>`,
         )}</div>`
       : ''}
+  </section>`
+}
+
+/** Amber warnings are deliberately separate from availability: an expiring certificate is not downtime. */
+function warningBanner(data: StatusData, ctx: PageCtx): Html | '' {
+  if (!data.openWarnings.length) return ''
+  const { fields, timezone: tz } = ctx
+  const count = data.openWarnings.length
+  return html`<section class="status warning" role="status">
+    <div class="status-head"><span class="status-icon warning" aria-hidden="true">${raw(ICON_TRIANGLE_FILLED)}</span><h2>${count === 1 ? 'A monitoring warning needs attention' : `${count} monitoring warnings need attention`}</h2></div>
+    <div class="status-incidents warning-incidents">${data.openWarnings.map(
+      (i) => html`<article class="incident warning-incident">
+        <div class="incident-title"><span class="status-icon warning" aria-hidden="true">${raw(ICON_TRIANGLE_FILLED)}</span>
+          <a href="${ctx.base}/m/${enc(i.monitorId)}">${warningTitle(i)}</a></div>
+        ${fields.has('errors') && i.detail ? html`<p class="incident-body">${i.detail}</p>` : ''}
+        <p class="incident-meta">Warning<span aria-hidden="true">·</span>Started ${when(i.startedAt, data.now, tz, 'since')}</p>
+      </article>`,
+    )}</div>
   </section>`
 }
 
@@ -395,6 +421,7 @@ function monitorRow(view: MonitorView, ctx: PageCtx, now: number): Html {
       <span class="dot ${state.status}" aria-hidden="true"></span>
       <a class="mon-name" href="${ctx.base}/m/${enc(monitor.id)}">${monitor.name}</a>
       <span class="pill ${state.status}">${STATUS_LABEL[state.status]}</span>
+      ${view.warnings.length ? html`<span class="pill warning">Warning</span>` : ''}
     </div>
     ${ctx.fields.has('uptime') ? bars(view, { fields: ctx.fields, tz: ctx.timezone, now }) : ''}
   </li>`
@@ -407,6 +434,7 @@ export function statusPage(data: StatusData, ctx: PageCtx): Html {
     ctx.page.title,
     html`${pageSwitcher(ctx, ctx.page.title)}
     ${statusBanner(data, ctx)}
+    ${warningBanner(data, ctx)}
     ${data.groups.length === 0 ? html`<p class="muted">No monitors on this page yet.</p>` : ''}
     ${data.groups.map(
       (g) => html`<section class="card">
@@ -572,14 +600,24 @@ export function monitorPage(d: MonitorDetail, ctx: PageCtx & { now: number }): H
   }
   if (fields.has('errors') && state.last_error) facts.push(['Last error', state.last_error])
 
+  const warnings = d.view.warnings.length
+    ? html`<section class="card warning-panel" aria-label="Active warnings">
+        <h2><span class="status-icon warning" aria-hidden="true">${raw(ICON_TRIANGLE_FILLED)}</span>Active warnings</h2>
+        <ul class="warning-list">${d.view.warnings.map(
+          (i) => html`<li><strong>${REASON_LABEL[i.reason]}</strong>${fields.has('errors') && i.detail ? html`<span class="muted"> · ${i.detail}</span>` : ''}<span class="warning-meta">Since ${when(i.startedAt, now, tz, 'since')}</span></li>`,
+        )}</ul>
+      </section>`
+    : ''
+
+  const outages = d.incidents.filter((i) => i.severity === 'outage')
   const incidents = fields.has('incidents')
     ? html`<section class="card">
         <h2>Incidents</h2>
-        ${d.incidents.length === 0
+        ${outages.length === 0
           ? html`<p class="muted">No incidents recorded.</p>`
           : html`<div class="scroll"><table>
               <thead><tr><th>Started</th><th>Reason</th>${fields.has('errors') ? html`<th>Detail</th>` : ''}<th class="num">Duration</th></tr></thead>
-              <tbody>${d.incidents.map(
+              <tbody>${outages.map(
                 (i) => html`<tr>
                   <td class="nowrap">${when(i.startedAt, now, tz, 'datetime')}</td>
                   <td class="nowrap">${REASON_LABEL[i.reason]}</td>
@@ -655,7 +693,7 @@ export function monitorPage(d: MonitorDetail, ctx: PageCtx & { now: number }): H
       <dl class="facts">${facts.map(([k, v]) => html`<div><dt>${k}</dt><dd>${v}</dd></div>`)}</dl>
       ${fields.has('uptime') ? bars(d.view, { fields, tz, now }) : ''}
     </section>
-    ${incidents}${pings}${checks}`,
+    ${warnings}${incidents}${pings}${checks}`,
     ctx,
     { refresh: true },
   )

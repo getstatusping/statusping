@@ -132,6 +132,28 @@ describe('HTTP routes (no sign-in configured)', () => {
     expect(body).toContain('We’re not aware of any issues affecting our systems.')
   })
 
+  it('shows expiry warnings in amber without changing availability or uptime', async () => {
+    const { app } = await setup()
+    const now = Math.floor(Date.now() / 1000)
+    await db.run(
+      `INSERT INTO incidents (monitor_id, reason, severity, detail, started_at) VALUES (?, ?, ?, ?, ?)`,
+      ['site', 'ssl_expiring', 'warning', 'certificate expires in 7 days: internal.example', now],
+    )
+
+    const status = await (await app.request('/')).text()
+    expect(status).toContain('We’re fully operational')
+    expect(status).toContain('A monitoring warning needs attention')
+    expect(status).toContain('Site has a certificate expiring soon')
+    expect(status).not.toContain('<span class="pill down">Down</span>')
+    expect(status).not.toContain('internal.example')
+
+    const detail = await (await app.request('/pages/status/m/site')).text()
+    expect(detail).toContain('Active warnings')
+    expect(detail).toContain('Certificate expiring')
+    expect(detail).not.toContain('internal.example')
+    expect(detail).not.toContain('<span class="pill down">Ongoing</span>')
+  })
+
   it('JSON API follows the page fields', async () => {
     const { app } = await setup()
     const json = (await (await app.request('/api/status')).json()) as {

@@ -33,11 +33,11 @@ const APP_STYLES = `
 /* ── Status banner ──────────────────────────────────────────────────────────── */
 .status { --tone: var(--success); margin-bottom: 24px; overflow: hidden; border: 1px solid color-mix(in oklab, var(--tone) 55%, var(--border));
   border-radius: var(--radius); background: var(--card); color: var(--card-foreground); }
-.status.down { --tone: var(--destructive); } .status.late { --tone: var(--warning); }
+.status.down { --tone: var(--destructive); } .status.late, .status.warning { --tone: var(--warning); }
 .status-head { display: flex; align-items: center; gap: 12px; padding: 16px 20px; background: color-mix(in oklab, var(--tone) 18%, var(--card)); }
 .status-head h2 { margin: 0; font-size: 18px; font-weight: 500; letter-spacing: -0.01em; color: var(--foreground); }
 .status-icon { display: inline-flex; flex: none; color: var(--tone); --status-icon-fg: var(--card); }
-.status-icon.down { color: var(--destructive); } .status-icon.late { color: var(--warning); }
+.status-icon.down { color: var(--destructive); } .status-icon.late, .status-icon.warning { color: var(--warning); }
 .status-body { margin: 0; padding: 14px 20px; font-size: 15px; }
 .status .stale-warning { padding: 0 20px 14px; margin: 14px 0 0; }
 .status-chips { display: flex; flex-wrap: wrap; gap: 8px; padding: 16px 20px; border-bottom: 1px solid var(--border); }
@@ -54,12 +54,15 @@ const APP_STYLES = `
 .incident-body { margin: 6px 0 0 28px; font-size: 15px; line-height: 1.55; color: var(--foreground); overflow-wrap: anywhere; }
 .incident-meta { display: flex; flex-wrap: wrap; gap: 0 8px; margin: 8px 0 0 28px; font-size: 14px; color: var(--muted-foreground); }
 .stale-warning { font-size: 14px; color: var(--destructive); }
+.warning-incidents { border-top: 1px solid color-mix(in oklab, var(--warning) 30%, var(--border)); }
+.warning-incident { background: color-mix(in oklab, var(--warning) 8%, var(--muted)); }
 
 .mons > li + li { border-top: 1px solid var(--border); margin-top: 16px; padding-top: 16px; }
 .mon-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
 .mon-name { font-weight: 500; color: var(--foreground); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--muted-foreground); }
 .dot.up { background: var(--success); } .dot.down { background: var(--destructive); } .dot.late { background: var(--warning); }
+.pill.warning::before { background: var(--warning); }
 
 /* Uptime bars */
 .bars { display: flex; gap: 2px; height: 32px; }
@@ -89,6 +92,12 @@ const APP_STYLES = `
 .facts dt { font-size: 13px; color: var(--muted-foreground); }
 .facts dd { margin: 2px 0 0; font-weight: 500; overflow-wrap: anywhere; }
 .detail { font-size: 13px; color: var(--muted-foreground); overflow-wrap: anywhere; }
+.warning-panel { border-color: color-mix(in oklab, var(--warning) 55%, var(--border)); background: color-mix(in oklab, var(--warning) 5%, var(--card)); }
+.warning-panel h2 { display: flex; align-items: center; gap: 8px; }
+.warning-panel h2 .status-icon svg { width: 18px; height: 18px; }
+.warning-list { display: grid; gap: 8px; margin: 0; padding-left: 20px; }
+.warning-list li { overflow-wrap: anywhere; }
+.warning-meta { display: block; margin-top: 2px; font-size: 13px; color: var(--muted-foreground); }
 
 /* Response-time chart (shadcn area-chart conventions, status colours) */
 .chart-stats { margin: -6px 0 20px; font-size: 13px; color: var(--muted-foreground); }

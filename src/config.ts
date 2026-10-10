@@ -97,6 +97,10 @@ export interface HttpMonitorInput extends MonitorBase {
   invertKeyword?: boolean
   /** Consecutive failed checks tolerated before marking down. Default 0. */
   retries?: number
+  /** Certificate-expiry warnings. Enabled by default for HTTPS monitors; set false to disable. */
+  sslExpiry?: false | { warnDays?: number[] }
+  /** Domain-registration expiry warnings. Disabled unless configured. */
+  domainExpiry?: { warnDays?: number[] }
 }
 
 export type MonitorInput = PushMonitorInput | HttpMonitorInput
@@ -266,6 +270,10 @@ export interface HttpMonitor extends NormalizedBase {
   keyword: string | null
   invertKeyword: boolean
   retries: number
+  /** Days before expiry which open an amber certificate warning. */
+  sslWarnDays: number[] | null
+  /** Days before expiry which open an amber domain-registration warning. */
+  domainWarnDays: number[] | null
 }
 export type Monitor = PushMonitor | HttpMonitor
 
@@ -334,6 +342,16 @@ function parseStatusRanges(input: number[] | string | undefined): [number, numbe
     }
     return [lo!, hi ?? lo!]
   })
+}
+
+function normalizeWarnDays(input: number[] | undefined, fallback: number[], where: string, fail: (message: string) => void): number[] {
+  const days = input ?? fallback
+  if (!Array.isArray(days) || days.some((day) => !Number.isInteger(day) || day <= 0)) {
+    fail(`${where}.warnDays must be an array of positive whole days`)
+    return []
+  }
+  if (new Set(days).size !== days.length) fail(`${where}.warnDays must not contain duplicates`)
+  return [...days].sort((a, b) => b - a)
 }
 
 export function normalizeConfig(config: StatusPingConfig): NormalizedConfig {
@@ -487,6 +505,15 @@ export function normalizeConfig(config: StatusPingConfig): NormalizedConfig {
           if (interval < 60 || interval % 60 !== 0) fail('interval must be a whole number of minutes')
           const timeout = parseDuration(input.timeout ?? 10, 'timeout')
           if (timeout < 1 || timeout > 30) fail('timeout must be between 1s and 30s')
+          let sslWarnDays: number[] | null = null
+          if (input.sslExpiry !== false && url?.protocol === 'https:') {
+            sslWarnDays = normalizeWarnDays(input.sslExpiry?.warnDays, [14, 7, 1], 'sslExpiry', fail)
+          } else if (input.sslExpiry && url?.protocol !== 'https:') {
+            fail('sslExpiry is only supported for https URLs')
+          }
+          const domainWarnDays = input.domainExpiry
+            ? normalizeWarnDays(input.domainExpiry.warnDays, [30, 7], 'domainExpiry', fail)
+            : null
           monitors.push({
             ...base,
             kind: 'http',
@@ -500,6 +527,8 @@ export function normalizeConfig(config: StatusPingConfig): NormalizedConfig {
             keyword: input.keyword ?? null,
             invertKeyword: input.invertKeyword ?? false,
             retries: Math.max(0, Math.floor(input.retries ?? 0)),
+            sslWarnDays,
+            domainWarnDays,
           })
         } else {
           fail(`unknown kind "${(input as { kind: string }).kind}"`)
