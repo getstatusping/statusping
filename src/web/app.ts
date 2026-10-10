@@ -20,6 +20,7 @@ import { acknowledgePage, type PageCtx, messagePage, monitorPage, statusPage } f
 import { confirmSubscription, consumeSubscribeLimit, dispatchSubscriberOutbox, enqueueAnnouncement, startSubscription, unsubscribe } from '../subscribers.ts'
 import { refreshAdminConfig } from '../deps.ts'
 import { mountAdminRoutes } from '../admin/routes.ts'
+import { consumePingRateLimit } from '../rate-limit.ts'
 
 const STALE_TICK_SECONDS = 180
 const PUBLIC_MAX_AGE = 30
@@ -97,13 +98,17 @@ export function createApp(deps: Deps): Hono {
       body = text ? text.slice(0, MAX_PING_BODY) : null
     }
     const now = nowSeconds()
+    const ip = deps.clientIp(c.req.raw)
+    if (ip && !(await consumePingRateLimit(deps.db, ip, now, config.limits.pingPerIpPerMinute))) {
+      return c.text('Too many requests', 429, { 'cache-control': 'no-store', 'retry-after': String(60 - (now % 60)) })
+    }
     const outcome = await handlePing(
       deps,
       c.req.param('token') ?? '',
       signal,
       {
         body,
-        ip: c.req.header('cf-connecting-ip') ?? c.req.header('x-forwarded-for')?.split(',')[0]?.trim() ?? null,
+        ip,
         userAgent: c.req.header('user-agent') ?? null,
       },
       now,

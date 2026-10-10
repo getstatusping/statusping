@@ -205,6 +205,15 @@ export const MIGRATIONS: string[][] = [
     )`,
     `CREATE INDEX IF NOT EXISTS admin_csrf_expires ON admin_csrf(expires_at)`,
   ],
+  [
+    `CREATE TABLE IF NOT EXISTS ping_rate_limits (
+      ip TEXT NOT NULL,
+      window_at INTEGER NOT NULL,
+      count INTEGER NOT NULL,
+      PRIMARY KEY (ip, window_at)
+    )`,
+    `CREATE INDEX IF NOT EXISTS ping_rate_limits_window ON ping_rate_limits(window_at)`,
+  ],
 ]
 
 export const SCHEMA_VERSION = MIGRATIONS.length

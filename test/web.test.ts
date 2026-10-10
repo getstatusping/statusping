@@ -4,6 +4,7 @@ import { tick } from '../src/tick.ts'
 import { createApp } from '../src/web/app.ts'
 import { loadStatusData } from '../src/web/data.ts'
 import { APP_VERSION } from '../src/version.ts'
+import { normalizeClientIp } from '../src/rate-limit.ts'
 import { type CountingDb, TEST_TOKENS, createTestDb, fakeFetch, makeDeps, testConfig } from './helpers.ts'
 
 describe('HTTP routes (no sign-in configured)', () => {
@@ -11,12 +12,13 @@ describe('HTTP routes (no sign-in configured)', () => {
   let close: () => Promise<void>
   afterEach(async () => close?.())
 
-  const setup = async (opts: { env?: Record<string, string>; config?: StatusPingConfig } = {}) => {
+  const setup = async (opts: { env?: Record<string, string>; config?: StatusPingConfig; clientIp?: (request: Request) => string | null } = {}) => {
     ;({ db, close } = await createTestDb('libsql'))
     const f = fakeFetch((c) => (c.url.startsWith('https://site.test') ? new Response('ok') : new Response('{}')))
     const deps = makeDeps(db, { fetch: f.fn, env: opts.env, config: opts.config })
+    if (opts.clientIp) deps.clientIp = opts.clientIp
     await tick(deps)
-    return { app: createApp(deps), deps, f }
+    return { app: createApp(deps), deps, f, db }
   }
 
   it('ping endpoints: GET/POST, start, exit codes, 404 and 400', async () => {
@@ -32,6 +34,25 @@ describe('HTTP routes (no sign-in configured)', () => {
     )
     expect(pings.map((p) => p.kind)).toEqual(['success', 'start', 'fail'])
     expect(pings[2]).toMatchObject({ body: 'disk full', exit_code: 1 })
+  })
+
+  it('durably rate limits /ping by an adapter-supplied, sanitized client IP', async () => {
+    const config = testConfig({ limits: { pingPerIpPerMinute: 2 } })
+    const { app, db } = await setup({
+      config,
+      clientIp: (request) => normalizeClientIp(request.headers.get('cf-connecting-ip')),
+    })
+    const url = `/ping/${TEST_TOKENS.heartbeat}`
+    const first = () => app.request(url, { headers: { 'cf-connecting-ip': '203.0.113.7' } })
+    expect((await first()).status).toBe(200)
+    expect((await first()).status).toBe(200)
+    const limited = await first()
+    expect(limited.status).toBe(429)
+    expect(limited.headers.get('retry-after')).toMatch(/^\d+$/)
+    // A spoof-looking value is rejected by the resolver, so it does not make an
+    // unbounded database key or accidentally share a real caller's bucket.
+    expect((await app.request(url, { headers: { 'cf-connecting-ip': '203.0.113.8, evil' } })).status).toBe(200)
+    expect(await db.first<{ count: number }>(`SELECT count FROM ping_rate_limits WHERE ip = ?`, ['203.0.113.7'])).toEqual({ count: 2 })
   })
 
   it('creates, updates, presents, and page-scopes manual announcements', async () => {

@@ -14,6 +14,7 @@ import type { ConfirmationProbe } from './confirmation.ts'
 import type { CloudflareEmailSender } from './notify/sinks.ts'
 import { loadAdminConfig, seedAdminConfig } from './admin/service.ts'
 import { validateAdminConfig } from './admin/security.ts'
+import { normalizeClientIp } from './rate-limit.ts'
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error'
 export type Logger = (level: LogLevel, message: string, data?: Record<string, unknown>) => void
@@ -43,6 +44,8 @@ export interface Deps {
   log: Logger
   /** Runs a promise after the response is sent where the platform supports it. */
   waitUntil?: (p: Promise<unknown>) => void
+  /** Adapter-owned resolver. Core never trusts forwarding headers itself. */
+  clientIp: (request: Request) => string | null
 }
 
 export interface CreateDepsOptions {
@@ -56,6 +59,7 @@ export interface CreateDepsOptions {
   confirmationProbe?: ConfirmationProbe
   location?: string
   cloudflareEmail?: CloudflareEmailSender
+  clientIp?: (request: Request) => string | null
 }
 
 export const consoleLogger: Logger = (level, message, data) => {
@@ -92,6 +96,7 @@ export function createDeps(opts: CreateDepsOptions): Deps {
     confirmationProbe: opts.confirmationProbe,
     location: opts.location,
     cloudflareEmail: opts.cloudflareEmail,
+    clientIp: opts.clientIp ?? (() => null),
     log: opts.log ?? consoleLogger,
   }
 }

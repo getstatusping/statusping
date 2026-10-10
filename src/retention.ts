@@ -44,6 +44,8 @@ export async function runRetention(deps: Deps, now: number): Promise<void> {
       params: [RETENTION.pingsKeepMax, RETENTION.pingsKeepMin, now - RETENTION.pingsMaxAge],
     },
     { sql: `DELETE FROM notifications WHERE created_at < ?`, params: [now - RETENTION.notifications] },
+    // Fixed-rate windows are only useful for a few minutes; this bounds cardinality from rotating IPs.
+    { sql: `DELETE FROM ping_rate_limits WHERE window_at < ?`, params: [now - 2 * 86_400] },
     {
       sql: `DELETE FROM incidents WHERE resolved_at IS NOT NULL AND resolved_at < ?`,
       params: [now - RETENTION.incidents],

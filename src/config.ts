@@ -298,6 +298,8 @@ export interface StatusPingConfig {
     tickBudgetMs?: number
     /** Maximum additional regional confirmation probes started in one tick. Default 6. */
     maxConfirmationsPerTick?: number
+    /** Maximum accepted /ping requests from one client IP per fixed minute. Default 60. */
+    pingPerIpPerMinute?: number
   }
   /** Enable the database-backed browser admin. Off by default: config-as-code remains authoritative. */
   admin?: boolean
@@ -462,7 +464,7 @@ export interface NormalizedConfig {
   subscribers: SubscriberConfigInput | null
   monitors: Monitor[]
   peer: { pingUrl: Secret | null; heartbeatMonitor: string | null; healthMonitor: string | null }
-  limits: { maxChecksPerTick: number; tickBudgetMs: number; maxConfirmationsPerTick: number }
+  limits: { maxChecksPerTick: number; tickBudgetMs: number; maxConfirmationsPerTick: number; pingPerIpPerMinute: number }
   access: NormalizedAccess | null
   pages: NormalizedPage[]
   home: string | null
@@ -865,10 +867,15 @@ export function normalizeConfig(config: StatusPingConfig): NormalizedConfig {
   if (!Number.isInteger(maxConfirmationsPerTick) || maxConfirmationsPerTick < 1 || maxConfirmationsPerTick > 35) {
     problems.push('limits.maxConfirmationsPerTick must be a whole number from 1 to 35')
   }
+  const pingPerIpPerMinute = config.limits?.pingPerIpPerMinute ?? 60
+  if (!Number.isInteger(pingPerIpPerMinute) || pingPerIpPerMinute < 1 || pingPerIpPerMinute > 10_000) {
+    problems.push('limits.pingPerIpPerMinute must be a whole number from 1 to 10000')
+  }
   const limits = {
     maxChecksPerTick: config.limits?.maxChecksPerTick ?? 35,
     tickBudgetMs: config.limits?.tickBudgetMs ?? 20_000,
     maxConfirmationsPerTick: config.limits?.maxConfirmationsPerTick ?? 6,
+    pingPerIpPerMinute,
   }
 
   const access = normalizeAccess(config.access, problems)

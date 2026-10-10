@@ -12,6 +12,7 @@ import { createApp } from '../../src/web/app.ts'
 import { cloudflareTcpConnect } from './tcp.ts'
 import { cloudflareEmailSender } from './email.ts'
 import { cloudflareConfirmationProbe, RegionalProbe, type DurableObjectNamespaceLike } from './confirmation.ts'
+import { normalizeClientIp } from '../../src/rate-limit.ts'
 
 interface Env {
   DB: D1DatabaseLike
@@ -47,6 +48,7 @@ function init(env: Env) {
       tcpConnect: cloudflareTcpConnect,
       confirmationProbe: env.REGIONAL_PROBE ? cloudflareConfirmationProbe(env.REGIONAL_PROBE) : undefined,
       cloudflareEmail: cloudflareEmailSender(env.SEND_EMAIL, typeof env.STATUSPING_EMAIL_FROM === 'string' ? env.STATUSPING_EMAIL_FROM : undefined),
+      clientIp: (request) => normalizeClientIp(request.headers.get('cf-connecting-ip')),
     })
     instance = { deps, app: createApp(deps) }
     cached.set(env, instance)
