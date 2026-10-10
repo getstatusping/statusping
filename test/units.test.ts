@@ -138,6 +138,75 @@ describe('config validation', () => {
   })
 })
 
+describe('maintenance-window configuration', () => {
+  it('normalizes one-off and recurring windows with stable monitor ordering', () => {
+    const config = normalizeConfig(testConfig({
+      maintenance: [
+        {
+          title: '  Database upgrade  ',
+          monitors: ['site', 'backup-db'],
+          start: '2026-11-02T01:00Z',
+          end: '2026-11-02T03:00Z',
+        },
+        {
+          title: 'Weekly platform work',
+          monitors: '*',
+          schedule: '0 2 * * 0',
+          tz: 'America/Los_Angeles',
+          duration: '1h30m',
+          excludeFromUptime: false,
+        },
+      ],
+    }))
+
+    expect(config.maintenance).toEqual([
+      {
+        kind: 'one-off',
+        title: 'Database upgrade',
+        monitors: ['backup-db', 'site'],
+        excludeFromUptime: true,
+        start: sec('2026-11-02T01:00:00Z'),
+        end: sec('2026-11-02T03:00:00Z'),
+      },
+      {
+        kind: 'recurring',
+        title: 'Weekly platform work',
+        monitors: ['backup-db', 'heartbeat', 'site'],
+        excludeFromUptime: false,
+        schedule: '0 2 * * 0',
+        tz: 'America/Los_Angeles',
+        duration: 5400,
+      },
+    ])
+  })
+
+  it('reports maintenance shape, references, timestamps, and recurring schedule problems', () => {
+    const config = testConfig({
+      maintenance: [
+        { title: '', monitors: ['missing', 'missing'], start: '2026-02-30T01:00Z', end: '2026-02-30T00:00Z' },
+        { title: 'Confused', monitors: '*', start: '2026-11-02T01:00Z', end: '2026-11-02T03:00Z', schedule: '0 2 * * 0', duration: '1h' },
+        { title: 'Bad recurring', monitors: [], schedule: 'not cron', tz: 'No/Such_Zone', duration: '0s', excludeFromUptime: 'yes' as unknown as boolean },
+      ],
+    })
+    try {
+      normalizeConfig(config)
+      expect.unreachable()
+    } catch (error) {
+      const problems = (error as ConfigError).problems.join('\n')
+      expect(problems).toContain('maintenance[0].title: must be a non-empty string')
+      expect(problems).toContain('maintenance[0].monitors: unknown monitor "missing"')
+      expect(problems).toContain('maintenance[0].monitors: duplicate monitor "missing"')
+      expect(problems).toContain('maintenance[0].start: must be a real calendar date')
+      expect(problems).toContain('maintenance[1]: must define either start/end or schedule/duration, not both')
+      expect(problems).toContain('maintenance[2].monitors: must be "*" or a non-empty array of monitor ids')
+      expect(problems).toContain('maintenance[2].tz: unknown timezone "No/Such_Zone"')
+      expect(problems).toContain('maintenance[2].schedule: invalid cron expression "not cron"')
+      expect(problems).toContain('maintenance[2].duration must be greater than 0s')
+      expect(problems).toContain('maintenance[2].excludeFromUptime: must be a boolean')
+    }
+  })
+})
+
 describe('JSON configuration', () => {
   it('parses env JSON and validates it through the same normalizer', () => {
     const source = testConfig()

@@ -3,7 +3,7 @@ import type { Viewer } from '../auth/viewer.ts'
 import type { DetailField, Monitor, NormalizedPage } from '../config.ts'
 import type { Status } from '../state.ts'
 import { formatDuration, formatDurationLong } from '../util/time.ts'
-import { type DayBar, type IncidentView, type MonitorDetail, type MonitorView, type RunView, type StatusData, groupRuns } from './data.ts'
+import { type DayBar, type IncidentView, type MaintenanceView, type MonitorDetail, type MonitorView, type RunView, type StatusData, groupRuns } from './data.ts'
 import { STYLES } from './styles.ts'
 
 type Html = ReturnType<typeof html>
@@ -168,6 +168,32 @@ const INCIDENT_TITLE: Record<IncidentView['reason'], string> = {
 
 function warningTitle(i: IncidentView & { monitorName: string }): string {
   return `${i.monitorName} ${INCIDENT_TITLE[i.reason]}`
+}
+
+function maintenanceSummary(window: MaintenanceView, tz: string): Html {
+  const monitors = window.monitorNames.length === 1 ? window.monitorNames[0] : `${window.monitorNames.length} monitors`
+  return html`<article class="maintenance-item">
+    <div><strong>${window.title}</strong><span class="maintenance-monitors">${monitors}</span></div>
+    <div class="maintenance-time">${timeRange(window.start, window.end, tz)}</div>
+  </article>`
+}
+
+/** Planned work is independent of availability: it is always visible, even when an outage overlaps it. */
+function maintenanceBanners(data: StatusData, ctx: PageCtx): Html | '' {
+  if (!data.activeMaintenance.length && !data.upcomingMaintenance.length) return ''
+  const active = data.activeMaintenance.length
+    ? html`<section class="maintenance-banner active" aria-label="Maintenance in progress">
+        <div class="maintenance-heading"><span class="maintenance-icon" aria-hidden="true">●</span><h2>Maintenance in progress</h2></div>
+        <div class="maintenance-list">${data.activeMaintenance.map((window) => maintenanceSummary(window, ctx.timezone))}</div>
+      </section>`
+    : ''
+  const upcoming = data.upcomingMaintenance.length
+    ? html`<section class="maintenance-banner upcoming" aria-label="Upcoming maintenance">
+        <div class="maintenance-heading"><span class="maintenance-icon" aria-hidden="true">●</span><h2>Upcoming maintenance</h2><span class="maintenance-note">Next 7 days</span></div>
+        <div class="maintenance-list">${data.upcomingMaintenance.map((window) => maintenanceSummary(window, ctx.timezone))}</div>
+      </section>`
+    : ''
+  return html`${active}${upcoming}`
 }
 
 /**
@@ -381,18 +407,21 @@ const MAX_POP_ITEMS = 5
 function bar(b: DayBar, index: number, total: number, o: BarOpts): Html {
   const summary = b.uptime === null ? 'no data' : `${o.label === 'worst' ? 'worst ' : ''}${pct(b.uptime)}`
   const edge = index < total * 0.2 ? 'pop-l' : index > total * 0.8 ? 'pop-r' : ''
+  const maintenance = b.maintenance.length
+  const maintenanceText = maintenance ? `${maintenance} planned maintenance window${maintenance === 1 ? '' : 's'}` : ''
   if (!b.downSeconds) {
     // Healthy / no-data days: a small popover too. tabindex=-1 → opens on hover or tap, but
     // doesn't add 90 stops per monitor to keyboard Tab navigation.
     const text = b.uptime === null ? 'No data' : '100% uptime · No downtime'
-    return html`<span class="bar ${barClass(b)}" tabindex="-1" aria-label="${dayLabel(b.day)}: ${text}"><span class="pop ${edge}" role="tooltip"><span class="pop-head"><strong>${dayLabel(b.day)}</strong></span><span class="pop-sub">${text}</span></span></span>`
+    return html`<span class="bar ${barClass(b)}${maintenance ? ' maintenance' : ''}" tabindex="-1" aria-label="${dayLabel(b.day)}: ${text}${maintenance ? ` · ${maintenanceText}` : ''}"><span class="pop ${edge}" role="tooltip"><span class="pop-head"><strong>${dayLabel(b.day)}</strong></span><span class="pop-sub">${text}</span>${maintenance ? html`<span class="pop-maintenance">${maintenanceText}</span>` : ''}</span></span>`
   }
   const items = o.fields.has('incidents') ? b.outages.slice(0, MAX_POP_ITEMS) : []
   const more = o.fields.has('incidents') ? b.outages.length - items.length : 0
-  return html`<span class="bar ${barClass(b)}" tabindex="0" aria-label="${dayLabel(b.day)}: ${summary}, ${formatDuration(b.downSeconds)} down">
+  return html`<span class="bar ${barClass(b)}${maintenance ? ' maintenance' : ''}" tabindex="0" aria-label="${dayLabel(b.day)}: ${summary}, ${formatDuration(b.downSeconds)} down${maintenance ? ` · ${maintenanceText}` : ''}">
     <span class="pop ${edge}" role="tooltip">
       <span class="pop-head"><strong>${dayLabel(b.day)}</strong><span class="pop-total">${formatDuration(b.downSeconds)} down</span></span>
       <span class="pop-sub">${summary}${b.outages.length ? ` · ${b.outages.length} outage${b.outages.length === 1 ? '' : 's'}` : ''}</span>
+      ${maintenance ? html`<span class="pop-maintenance">${maintenanceText}</span>` : ''}
       ${items.length
         ? html`<span class="pop-list">${items.map(
             (i) => html`<span class="pop-item">
@@ -416,11 +445,12 @@ function bars(view: MonitorView, o: Omit<BarOpts, 'label'>): Html {
 
 function monitorRow(view: MonitorView, ctx: PageCtx, now: number): Html {
   const { monitor, state } = view
+  const inMaintenance = view.maintenance.length > 0
   return html`<li class="mon">
     <div class="mon-head">
-      <span class="dot ${state.status}" aria-hidden="true"></span>
+      <span class="dot ${inMaintenance ? 'maintenance' : state.status}" aria-hidden="true"></span>
       <a class="mon-name" href="${ctx.base}/m/${enc(monitor.id)}">${monitor.name}</a>
-      <span class="pill ${state.status}">${STATUS_LABEL[state.status]}</span>
+      <span class="pill ${inMaintenance ? 'maintenance' : state.status}">${inMaintenance ? 'Maintenance' : STATUS_LABEL[state.status]}</span>
       ${view.warnings.length ? html`<span class="pill warning">Warning</span>` : ''}
     </div>
     ${ctx.fields.has('uptime') ? bars(view, { fields: ctx.fields, tz: ctx.timezone, now }) : ''}
@@ -435,6 +465,7 @@ export function statusPage(data: StatusData, ctx: PageCtx): Html {
     html`${pageSwitcher(ctx, ctx.page.title)}
     ${statusBanner(data, ctx)}
     ${warningBanner(data, ctx)}
+    ${maintenanceBanners(data, ctx)}
     ${data.groups.length === 0 ? html`<p class="muted">No monitors on this page yet.</p>` : ''}
     ${data.groups.map(
       (g) => html`<section class="card">
@@ -600,6 +631,13 @@ export function monitorPage(d: MonitorDetail, ctx: PageCtx & { now: number }): H
   }
   if (fields.has('errors') && state.last_error) facts.push(['Last error', state.last_error])
 
+  const maintenance = d.view.maintenance.length
+    ? html`<section class="maintenance-banner active monitor-maintenance" aria-label="Maintenance in progress">
+        <div class="maintenance-heading"><span class="maintenance-icon" aria-hidden="true">●</span><h2>Maintenance in progress</h2></div>
+        <div class="maintenance-list">${d.view.maintenance.map((window) => maintenanceSummary(window, tz))}</div>
+      </section>`
+    : ''
+
   const warnings = d.view.warnings.length
     ? html`<section class="card warning-panel" aria-label="Active warnings">
         <h2><span class="status-icon warning" aria-hidden="true">${raw(ICON_TRIANGLE_FILLED)}</span>Active warnings</h2>
@@ -693,7 +731,7 @@ export function monitorPage(d: MonitorDetail, ctx: PageCtx & { now: number }): H
       <dl class="facts">${facts.map(([k, v]) => html`<div><dt>${k}</dt><dd>${v}</dd></div>`)}</dl>
       ${fields.has('uptime') ? bars(d.view, { fields, tz, now }) : ''}
     </section>
-    ${warnings}${incidents}${pings}${checks}`,
+    ${maintenance}${warnings}${incidents}${pings}${checks}`,
     ctx,
     { refresh: true },
   )

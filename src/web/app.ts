@@ -233,6 +233,24 @@ export function createApp(deps: Deps): Hono {
       generatedAt: data.now,
       lastTickAt: data.lastTickAt,
       counts: data.counts,
+      maintenance: {
+        active: data.activeMaintenance.map((window) => ({
+          title: window.title,
+          start: window.start,
+          end: window.end,
+          recurring: window.recurring,
+          monitors: window.monitorIds,
+          excludeFromUptime: window.excludeFromUptime,
+        })),
+        upcoming: data.upcomingMaintenance.map((window) => ({
+          title: window.title,
+          start: window.start,
+          end: window.end,
+          recurring: window.recurring,
+          monitors: window.monitorIds,
+          excludeFromUptime: window.excludeFromUptime,
+        })),
+      },
       monitors: data.groups.flatMap((g) =>
         g.monitors.map((m) => ({
           id: m.monitor.id,
@@ -241,6 +259,7 @@ export function createApp(deps: Deps): Hono {
           kind: m.monitor.kind,
           status: m.state.status,
           since: m.state.status_since,
+          maintenance: m.maintenance.map((window) => ({ title: window.title, start: window.start, end: window.end, recurring: window.recurring })),
           ...(f.has('uptime') ? { uptime24h: m.uptime24h, uptime90d: m.uptime90 } : {}),
           ...(f.has('pings') && m.monitor.kind === 'push'
             ? { lastPingAt: m.state.last_ping_at, lastDurationMs: m.state.last_duration_ms }

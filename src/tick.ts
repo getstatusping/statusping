@@ -4,6 +4,7 @@ import { type CheckResult, USER_AGENT, isDue, runHttpCheck, runPool } from './ev
 import { evaluatePush } from './evaluate/push.ts'
 import { runExpiryChecks } from './expiry/run.ts'
 import { dispatchNotifications } from './notify/dispatch.ts'
+import { activeMaintenance } from './maintenance.ts'
 import { maybeRunRetention } from './retention.ts'
 import { ensureSchema } from './schema.ts'
 import { type MonitorStateRow, applyTransition, loadStates } from './state.ts'
@@ -29,6 +30,7 @@ async function applyHttpResult(deps: Deps, m: HttpMonitor, s: MonitorStateRow, r
       fromVersion: s.version,
       to: 'up',
       at: now,
+      maintenance: activeMaintenance(deps.config.maintenance, m.id, now).length > 0,
       set: { consecutive_fail: 0, last_error: null },
     })
   }
@@ -42,6 +44,7 @@ async function applyHttpResult(deps: Deps, m: HttpMonitor, s: MonitorStateRow, r
       reason: 'check_failed',
       detail: r.err,
       at: now,
+      maintenance: activeMaintenance(deps.config.maintenance, m.id, now).length > 0,
       set: { consecutive_fail: fails, last_error: r.err },
     })
   }
@@ -109,7 +112,14 @@ export async function tick(deps: Deps, nowMs: number = Date.now()): Promise<Tick
       monitorId: m.id,
       fromVersion: s.version,
       at: now,
-      ...(decision.kind === 'late' ? { to: 'late' as const } : { to: 'down' as const, reason: decision.reason, detail: decision.detail }),
+      ...(decision.kind === 'late'
+        ? { to: 'late' as const }
+        : {
+            to: 'down' as const,
+            reason: decision.reason,
+            detail: decision.detail,
+            maintenance: activeMaintenance(deps.config.maintenance, m.id, now).length > 0,
+          }),
     })
     if (applied) summary.transitions++
   }

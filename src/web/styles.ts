@@ -46,6 +46,18 @@ const APP_STYLES = `
   color: color-mix(in oklab, var(--chip) 75%, var(--foreground)); font-size: 14px; font-weight: 500; }
 .chip.late { --chip: var(--warning); }
 .chip:hover { text-decoration: none; background: color-mix(in oklab, var(--chip) 22%, transparent); }
+.pill.maintenance::before { background: var(--muted-foreground); }
+.maintenance-banner { margin: 0 0 24px; overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius); background: var(--card); }
+.maintenance-banner.active { border-color: color-mix(in oklab, var(--muted-foreground) 48%, var(--border)); }
+.maintenance-heading { display: flex; align-items: center; gap: 10px; padding: 14px 20px; background: var(--muted); }
+.maintenance-heading h2 { margin: 0; font-size: 16px; font-weight: 550; letter-spacing: -.01em; }
+.maintenance-icon { color: var(--muted-foreground); font-size: 11px; }
+.maintenance-note { margin-left: auto; color: var(--muted-foreground); font-size: 13px; }
+.maintenance-list { display: grid; gap: 1px; background: var(--border); }
+.maintenance-item { display: flex; justify-content: space-between; gap: 16px; align-items: baseline; padding: 12px 20px; background: var(--card); font-size: 14px; }
+.maintenance-monitors { display: block; margin-top: 2px; color: var(--muted-foreground); font-size: 13px; }
+.maintenance-time { flex: none; color: var(--muted-foreground); font-size: 13px; text-align: right; }
+.monitor-maintenance { margin-top: 24px; }
 .status-incidents { display: grid; gap: 8px; padding: 8px; }
 .incident { padding: 14px 16px; border-radius: calc(var(--radius) - 2px); background: var(--muted); }
 .incident-title { display: flex; align-items: center; gap: 10px; font-weight: 500; font-size: 15px; }
@@ -62,12 +74,14 @@ const APP_STYLES = `
 .mon-name { font-weight: 500; color: var(--foreground); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--muted-foreground); }
 .dot.up { background: var(--success); } .dot.down { background: var(--destructive); } .dot.late { background: var(--warning); }
+.dot.maintenance { background: var(--muted-foreground); }
 .pill.warning::before { background: var(--warning); }
 
 /* Uptime bars */
 .bars { display: flex; gap: 2px; height: 32px; }
 .bar { flex: 1; min-width: 2px; border-radius: 2px; background: var(--nodata); position: relative; }
 .bar.up { background: var(--success); } .bar.partial { background: var(--warning); } .bar.down { background: var(--destructive); }
+.bar.maintenance::after { content: ''; position: absolute; inset: auto 0 0; height: 3px; border-radius: 0 0 2px 2px; background: var(--muted-foreground); opacity: .85; }
 .bar[tabindex] { cursor: pointer; outline: none; }
 .bar[tabindex]:hover, .bar[tabindex]:focus { box-shadow: 0 0 0 2px var(--card), 0 0 0 4px var(--ring); }
 .bar-legend { display: flex; justify-content: space-between; margin-top: 6px; font-size: 12px; color: var(--muted-foreground); }
@@ -81,6 +95,7 @@ const APP_STYLES = `
 .pop-item { display: grid; grid-template-columns: auto 1fr; column-gap: 10px; padding: 4px 0; }
 .pop-item + .pop-item { border-top: 1px solid var(--border); }
 .pop-dur { grid-row: span 3; min-width: 44px; font-weight: 500; font-variant-numeric: tabular-nums; color: var(--warning); }
+.pop-maintenance { display: block; margin-top: 5px; color: var(--muted-foreground); font-size: 12px; }
 .pop-dur.ongoing { color: var(--destructive); }
 .pop-what { overflow-wrap: anywhere; }
 .pop-when, .pop-detail, .pop-more { font-size: 12px; color: var(--muted-foreground); }

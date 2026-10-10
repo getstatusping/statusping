@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { type StatusPingConfig, normalizeConfig } from '../src/config.ts'
 import { tick } from '../src/tick.ts'
 import { createApp } from '../src/web/app.ts'
+import { loadStatusData } from '../src/web/data.ts'
 import { APP_VERSION } from '../src/version.ts'
 import { type CountingDb, TEST_TOKENS, createTestDb, fakeFetch, makeDeps, testConfig } from './helpers.ts'
 
@@ -152,6 +153,54 @@ describe('HTTP routes (no sign-in configured)', () => {
     expect(detail).toContain('Certificate expiring')
     expect(detail).not.toContain('internal.example')
     expect(detail).not.toContain('<span class="pill down">Ongoing</span>')
+  })
+
+  it('shows active and upcoming maintenance, marks affected monitors, and excludes overlapping windows from uptime', async () => {
+    // Keep the synthetic clock just ahead of setup's initial tick, so the monitor already
+    // exists when loadStatusData computes the 24-hour denominator.
+    const clock = Math.floor(Date.now() / 1000)
+    const now = clock + 120
+    const iso = (second: number) => new Date(second * 1000).toISOString()
+    const config = testConfig({
+      maintenance: [
+        // The two historical exclusions overlap. Their union fully covers the outage below;
+        // treating them independently would incorrectly subtract the shared 20 minutes twice.
+        { title: 'Database migration', monitors: ['site'], start: iso(now - 3_600), end: iso(now - 1_800) },
+        { title: 'Network work', monitors: ['site'], start: iso(now - 3_000), end: iso(now - 1_200) },
+        { title: 'Live deploy', monitors: ['site'], start: iso(clock - 30), end: iso(clock + 3_600) },
+        { title: 'Next deploy', monitors: ['site'], start: iso(clock + 2 * 86_400), end: iso(clock + 2 * 86_400 + 1_800) },
+      ],
+    })
+    const { app, deps } = await setup({ config })
+    await db.run(`UPDATE monitors SET created_at = ? WHERE id = ?`, [now - 86_400, 'site'])
+    await db.run(
+      `INSERT INTO incidents (monitor_id, reason, detail, started_at, resolved_at) VALUES (?, ?, ?, ?, ?)`,
+      ['site', 'check_failed', 'planned deploy outage', now - 3_300, now - 1_500],
+    )
+
+    const data = await loadStatusData(deps, now, ['site'])
+    const site = data.groups[0]!.monitors[0]!
+    expect(site.uptime24h).toBe(1)
+    expect(site.bars.at(-1)!.maintenance).toHaveLength(3)
+    expect(data.activeMaintenance).toEqual(expect.arrayContaining([expect.objectContaining({ title: 'Live deploy' })]))
+
+    // Use a distinct request URL so this public response cannot be a 30-second edge-cache
+    // entry left by another app instance in the same test process.
+    const body = await (await app.request('https://maintenance.status.test/')).text()
+    expect(body).toContain('Maintenance in progress')
+    expect(body).toContain('Live deploy')
+    expect(body).toContain('Upcoming maintenance')
+    expect(body).toContain('Next deploy')
+    expect(body).toContain('<span class="pill maintenance">Maintenance</span>')
+    expect(body).toContain('class="bar up maintenance"')
+
+    const json = (await (await app.request('https://maintenance.status.test/api/status')).json()) as {
+      maintenance: { active: { title: string; monitors: string[] }[]; upcoming: { title: string }[] }
+      monitors: { id: string; uptime24h?: number; maintenance: { title: string }[] }[]
+    }
+    expect(json.maintenance.active).toEqual(expect.arrayContaining([expect.objectContaining({ title: 'Live deploy', monitors: ['site'] })]))
+    expect(json.maintenance.upcoming).toEqual(expect.arrayContaining([expect.objectContaining({ title: 'Next deploy' })]))
+    expect(json.monitors.find((monitor) => monitor.id === 'site')).toMatchObject({ uptime24h: 1, maintenance: [{ title: 'Live deploy' }] })
   })
 
   it('JSON API follows the page fields', async () => {

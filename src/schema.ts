@@ -85,6 +85,9 @@ export const MIGRATIONS: string[][] = [
     `CREATE UNIQUE INDEX IF NOT EXISTS incidents_one_open_per_reason
       ON incidents(monitor_id, reason) WHERE resolved_at IS NULL`,
   ],
+  [
+    `ALTER TABLE incidents ADD COLUMN maintenance INTEGER NOT NULL DEFAULT 0`,
+  ],
 ]
 
 export const SCHEMA_VERSION = MIGRATIONS.length

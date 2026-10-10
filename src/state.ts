@@ -32,6 +32,8 @@ export interface Transition {
   /** Required when `to === 'down'`. */
   reason?: IncidentReason
   detail?: string | null
+  /** The outage began inside an active maintenance window. */
+  maintenance?: boolean
   set?: Partial<Settable>
   /**
    * Extra statements committed atomically with the transition, and only if it applied.
@@ -89,11 +91,11 @@ export async function applyTransition(db: Db, t: Transition): Promise<boolean> {
 
   if (t.to === 'down') {
     statements.push({
-      sql: `INSERT INTO incidents (monitor_id, reason, detail, started_at)
-            SELECT ?, ?, ?, ?
+      sql: `INSERT INTO incidents (monitor_id, reason, detail, started_at, maintenance)
+            SELECT ?, ?, ?, ?, ?
             WHERE ${guard.sql}
               AND NOT EXISTS (SELECT 1 FROM incidents WHERE monitor_id = ? AND resolved_at IS NULL AND severity = 'outage')`,
-      params: [t.monitorId, t.reason ?? 'missed', truncate(t.detail ?? null, 1000), t.at, ...guard.params, t.monitorId],
+      params: [t.monitorId, t.reason ?? 'missed', truncate(t.detail ?? null, 1000), t.at, t.maintenance ? 1 : 0, ...guard.params, t.monitorId],
     })
   } else if (t.to) {
     statements.push({

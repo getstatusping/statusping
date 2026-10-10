@@ -1,5 +1,6 @@
 import type { Deps } from '../deps.ts'
 import type { IncidentReason, MonitorStateRow } from '../state.ts'
+import { activeMaintenance } from '../maintenance.ts'
 import { formatDuration } from '../util/time.ts'
 import { type AlertMessage, createSink } from './sinks.ts'
 
@@ -172,6 +173,10 @@ export async function dispatchNotifications(deps: Deps, now: number, onlyMonitor
     const monitor = monitorsById.get(incident.monitor_id)
     if (!monitor) continue
     if (suppressNonPeer && !peerIds.has(monitor.id)) continue
+    // Muting is evaluated at the event time. A recovery that happened during a
+    // window must not be delivered later when the scheduler runs after it ends.
+    const eventAt = incident.resolved_at ?? now
+    if (activeMaintenance(config.maintenance, monitor.id, eventAt).length) continue
 
     for (const sinkName of monitor.notify) {
       const sinkConfig = config.sinks[sinkName]

@@ -1,4 +1,5 @@
 import type { Deps } from './deps.ts'
+import { activeMaintenance } from './maintenance.ts'
 import { type MonitorStateRow, type Status, type Transition, applyTransition, truncate } from './state.ts'
 import { sha256Hex } from './util/crypto.ts'
 
@@ -110,6 +111,7 @@ export async function handlePing(
         t.to = 'down'
         t.reason = 'failed'
         t.detail = failureDetail(signal.exitCode, body)
+        t.maintenance = activeMaintenance(deps.config.maintenance, row.id, now).length > 0
         t.set = { last_ping_at: now, last_start_at: null, ...(durationMs !== null ? { last_duration_ms: durationMs } : {}) }
         break
     }

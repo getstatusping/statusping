@@ -65,6 +65,31 @@ export interface PageInput {
   monitors: string[]
 }
 
+/** Shared fields for planned maintenance windows. */
+interface MaintenanceBaseInput {
+  /** Short description shown on the status page, e.g. "Database upgrade". */
+  title: string
+  /** Monitor ids affected by this window, or `*` for every monitor. */
+  monitors: string[] | '*'
+  /** Do not count this window's downtime against affected monitors' uptime. Default true. */
+  excludeFromUptime?: boolean
+}
+
+/** A maintenance window with fixed ISO-8601 start and end times. */
+export interface OneOffMaintenanceInput extends MaintenanceBaseInput {
+  start: string
+  end: string
+}
+
+/** A recurring maintenance window, evaluated in `tz` (or the instance timezone). */
+export interface RecurringMaintenanceInput extends MaintenanceBaseInput {
+  schedule: string
+  tz?: string
+  duration: Duration
+}
+
+export type MaintenanceInput = OneOffMaintenanceInput | RecurringMaintenanceInput
+
 export interface PushMonitorInput extends MonitorBase {
   kind: 'push'
   /** Expected time between pings (interval mode). */
@@ -180,6 +205,8 @@ export interface StatusPingConfig {
   groups: { name: string; monitors: MonitorInput[] }[]
   /** Status pages. Default: one public page with all monitors, showing uptime + incidents. */
   pages?: PageInput[]
+  /** Planned windows: alerts are muted and affected monitors show Maintenance while active. */
+  maintenance?: MaintenanceInput[]
   /** Slug of the page served at "/". Default: the first public page. */
   home?: string
   /** How people sign in to restricted pages. */
@@ -299,6 +326,31 @@ export interface NormalizedPage {
   monitorIds: string[]
 }
 
+interface NormalizedMaintenanceBase {
+  title: string
+  /** Affected monitor ids in display order. */
+  monitors: string[]
+  excludeFromUptime: boolean
+}
+
+export interface OneOffMaintenance extends NormalizedMaintenanceBase {
+  kind: 'one-off'
+  /** Unix epoch seconds. */
+  start: number
+  /** Unix epoch seconds. */
+  end: number
+}
+
+export interface RecurringMaintenance extends NormalizedMaintenanceBase {
+  kind: 'recurring'
+  schedule: string
+  tz: string
+  /** Seconds. */
+  duration: number
+}
+
+export type NormalizedMaintenance = OneOffMaintenance | RecurringMaintenance
+
 export interface NormalizedConfig {
   title: string
   baseUrl: string
@@ -311,6 +363,7 @@ export interface NormalizedConfig {
   access: NormalizedAccess | null
   pages: NormalizedPage[]
   home: string | null
+  maintenance: NormalizedMaintenance[]
 }
 
 export class ConfigError extends Error {
@@ -559,6 +612,7 @@ export function normalizeConfig(config: StatusPingConfig): NormalizedConfig {
 
   const access = normalizeAccess(config.access, problems)
   const pages = normalizePages(config, monitors, access, problems)
+  const maintenance = normalizeMaintenance(config.maintenance, monitors, timezone, problems)
   const home = config.home ?? pages.find((p) => p.access === 'public')?.slug ?? null
   if (config.home && !pages.some((p) => p.slug === config.home)) problems.push(`home: unknown page "${config.home}"`)
 
@@ -575,10 +629,137 @@ export function normalizeConfig(config: StatusPingConfig): NormalizedConfig {
     access,
     pages,
     home,
+    maintenance,
   }
 }
 
 const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,62}$/
+
+const ISO_TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:?\d{2})$/
+
+function parseIsoTimestamp(value: unknown, where: string, problems: string[]): number | null {
+  if (typeof value !== 'string' || !ISO_TIMESTAMP_RE.test(value)) {
+    problems.push(`${where}: must be an ISO-8601 timestamp with a timezone`)
+    return null
+  }
+  // Date.parse normalizes impossible calendar dates (such as February 30), so validate
+  // the calendar portion separately before accepting its instant.
+  const match = /^(\d{4})-(\d{2})-(\d{2})T/.exec(value)!
+  const year = Number(match[1])
+  const month = Number(match[2])
+  const day = Number(match[3])
+  const calendar = new Date(Date.UTC(year, month - 1, day))
+  if (calendar.getUTCFullYear() !== year || calendar.getUTCMonth() !== month - 1 || calendar.getUTCDate() !== day) {
+    problems.push(`${where}: must be a real calendar date`)
+    return null
+  }
+  const milliseconds = Date.parse(value)
+  if (!Number.isFinite(milliseconds)) {
+    problems.push(`${where}: must be a valid ISO-8601 timestamp`)
+    return null
+  }
+  return Math.floor(milliseconds / 1000)
+}
+
+function normalizeMaintenance(
+  input: StatusPingConfig['maintenance'],
+  monitors: Monitor[],
+  defaultTimezone: string,
+  problems: string[],
+): NormalizedMaintenance[] {
+  if (input === undefined) return []
+  if (!Array.isArray(input)) {
+    problems.push('maintenance: must be an array')
+    return []
+  }
+  const knownMonitors = new Map(monitors.map((monitor, order) => [monitor.id, order]))
+  const normalized: NormalizedMaintenance[] = []
+
+  for (const [index, candidate] of input.entries()) {
+    const where = `maintenance[${index}]`
+    if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
+      problems.push(`${where}: must be an object`)
+      continue
+    }
+    const window = candidate as unknown as Record<string, unknown>
+    const title = typeof window.title === 'string' ? window.title.trim() : ''
+    if (!title) problems.push(`${where}.title: must be a non-empty string`)
+
+    const ids: string[] = []
+    const selected = new Set<string>()
+    if (window.monitors === '*') {
+      ids.push(...monitors.map((monitor) => monitor.id))
+    } else if (!Array.isArray(window.monitors) || !window.monitors.length) {
+      problems.push(`${where}.monitors: must be "*" or a non-empty array of monitor ids`)
+    } else {
+      for (const id of window.monitors) {
+        if (typeof id !== 'string' || !id) {
+          problems.push(`${where}.monitors: every monitor id must be a non-empty string`)
+        } else if (selected.has(id)) {
+          problems.push(`${where}.monitors: duplicate monitor "${id}"`)
+        } else if (!knownMonitors.has(id)) {
+          selected.add(id)
+          problems.push(`${where}.monitors: unknown monitor "${id}"`)
+        } else {
+          selected.add(id)
+          ids.push(id)
+        }
+      }
+      ids.sort((a, b) => knownMonitors.get(a)! - knownMonitors.get(b)!)
+    }
+
+    let excludeFromUptime = true
+    if (window.excludeFromUptime !== undefined) {
+      if (typeof window.excludeFromUptime !== 'boolean') problems.push(`${where}.excludeFromUptime: must be a boolean`)
+      else excludeFromUptime = window.excludeFromUptime
+    }
+
+    const hasOneOffField = 'start' in window || 'end' in window
+    const hasRecurringField = 'schedule' in window || 'duration' in window || 'tz' in window
+    if (hasOneOffField && hasRecurringField) {
+      problems.push(`${where}: must define either start/end or schedule/duration, not both`)
+      continue
+    }
+    if (hasOneOffField) {
+      const startAt = parseIsoTimestamp(window.start, `${where}.start`, problems)
+      const endAt = parseIsoTimestamp(window.end, `${where}.end`, problems)
+      if (startAt === null || endAt === null || !title || !ids.length) continue
+      if (endAt <= startAt) {
+        problems.push(`${where}.end: must be after start`)
+        continue
+      }
+      normalized.push({ kind: 'one-off', title, monitors: ids, excludeFromUptime, start: startAt, end: endAt })
+      continue
+    }
+    if (hasRecurringField) {
+      const schedule = typeof window.schedule === 'string' ? window.schedule : ''
+      if (!schedule) problems.push(`${where}.schedule: must be a non-empty cron expression`)
+      const tz = typeof window.tz === 'string' ? window.tz : defaultTimezone
+      if (!isValidTimeZone(tz)) problems.push(`${where}.tz: unknown timezone "${tz}"`)
+      let duration: number | null = null
+      try {
+        duration = parseDuration(window.duration as Duration, `${where}.duration`)
+        if (duration <= 0) problems.push(`${where}.duration must be greater than 0s`)
+      } catch (error) {
+        problems.push((error as Error).message)
+      }
+      if (schedule) {
+        try {
+          // Keep validating schedule syntax when the supplied timezone is invalid too;
+          // otherwise a single bad field would hide a separate actionable problem.
+          new Cron(schedule, { timezone: isValidTimeZone(tz) ? tz : 'UTC', paused: true })
+        } catch (error) {
+          problems.push(`${where}.schedule: invalid cron expression "${schedule}": ${(error as Error).message}`)
+        }
+      }
+      if (!title || !ids.length || !schedule || !duration || duration <= 0 || !isValidTimeZone(tz)) continue
+      normalized.push({ kind: 'recurring', title, monitors: ids, excludeFromUptime, schedule, tz, duration })
+      continue
+    }
+    problems.push(`${where}: must define start/end or schedule/duration`)
+  }
+  return normalized
+}
 
 function normalizePages(
   config: StatusPingConfig,

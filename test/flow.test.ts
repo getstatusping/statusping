@@ -115,6 +115,23 @@ describe.each(DB_KINDS)('flows on %s', (kind) => {
     expect(ping).toMatchObject({ kind: 'fail', exit_code: 2 })
   })
 
+  it('mutes alerts for failures during maintenance and records the maintenance flag', async () => {
+    await setup()
+    const f = fakeFetch()
+    const config = testConfig({
+      maintenance: [{ title: 'Database work', monitors: ['heartbeat'], start: '2026-10-08T00:00:00Z', end: '2026-10-08T01:00:00Z' }],
+    })
+    const deps = makeDeps(db, { config, fetch: f.fn })
+    await tick(deps, at('2026-10-08T00:00:00Z'))
+    await handlePing(deps, TEST_TOKENS.heartbeat, parseSignal('1')!, meta, sec('2026-10-08T00:10:00Z'))
+    await dispatchNotifications(deps, sec('2026-10-08T00:10:00Z'), 'heartbeat')
+    expect(ntfyCalls(f.calls)).toHaveLength(0)
+    expect(await db.first<{ maintenance: number }>(`SELECT maintenance FROM incidents WHERE monitor_id = 'heartbeat'`)).toEqual({ maintenance: 1 })
+
+    await dispatchNotifications(deps, sec('2026-10-08T01:01:00Z'), 'heartbeat')
+    expect(ntfyCalls(f.calls)).toHaveLength(1)
+  })
+
   it('start without finish → hung after maxRuntime', async () => {
     await setup()
     const deps = makeDeps(db)
