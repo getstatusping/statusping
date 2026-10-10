@@ -60,12 +60,14 @@ async function main() {
             ? m.schedule
               ? `push, cron "${m.schedule}" (${m.tz}), grace ${formatDuration(m.grace)}`
               : `push, every ${formatDuration(m.period ?? 0)}, grace ${formatDuration(m.grace)}`
-            : `http ${m.method} ${m.url} every ${m.intervalMin}m`
+            : m.kind === 'http'
+              ? `http ${m.method} ${m.url} every ${m.intervalMin}m`
+              : `tcp ${m.host}:${m.port} every ${m.intervalMin}m`
         console.log(`  ${m.critical ? '★' : '·'} ${m.id.padEnd(24)} ${what} → ${m.notify.join(', ') || '(no sinks)'}`)
       }
-      const perTick = normalized.monitors.filter((m) => m.kind === 'http' && m.intervalMin === 1).length
+      const perTick = normalized.monitors.filter((m) => m.kind !== 'push' && m.intervalMin === 1).length
       if (perTick > normalized.limits.maxChecksPerTick) {
-        console.warn(`! ${perTick} HTTP checks run every minute; only ${normalized.limits.maxChecksPerTick} fit in one tick`)
+        console.warn(`! ${perTick} active checks run every minute; only ${normalized.limits.maxChecksPerTick} fit in one tick`)
       }
       break
     }

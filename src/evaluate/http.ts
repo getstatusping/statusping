@@ -17,7 +17,7 @@ export interface CheckResult {
  * Spreads monitors with an interval of N minutes evenly over N minute-slots without storing
  * a "next due" timestamp (saves a write per check).
  */
-export function isDue(monitor: HttpMonitor, tickMinute: number): boolean {
+export function isDue(monitor: Pick<HttpMonitor, 'id' | 'intervalMin'>, tickMinute: number): boolean {
   if (monitor.intervalMin <= 1) return true
   return tickMinute % monitor.intervalMin === fnv1a(monitor.id) % monitor.intervalMin
 }

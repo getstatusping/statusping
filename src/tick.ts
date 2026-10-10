@@ -1,6 +1,7 @@
-import { type HttpMonitor, activeMonitors, resolveSecret } from './config.ts'
+import { type HttpMonitor, type TcpMonitor, activeMonitors, resolveSecret } from './config.ts'
 import type { Deps } from './deps.ts'
 import { type CheckResult, USER_AGENT, isDue, runHttpCheck, runPool } from './evaluate/http.ts'
+import { runTcpCheck } from './evaluate/tcp.ts'
 import { evaluatePush } from './evaluate/push.ts'
 import { runExpiryChecks } from './expiry/run.ts'
 import { dispatchNotifications } from './notify/dispatch.ts'
@@ -22,7 +23,7 @@ export interface TickSummary {
 
 const HTTP_CONCURRENCY = 5 // Workers allow 6 simultaneous outbound connections.
 
-async function applyHttpResult(deps: Deps, m: HttpMonitor, s: MonitorStateRow, r: CheckResult, now: number) {
+async function applyCheckResult(deps: Deps, m: HttpMonitor | TcpMonitor, s: MonitorStateRow, r: CheckResult, now: number) {
   if (r.ok) {
     if (s.status === 'up' && s.consecutive_fail === 0) return false
     return applyTransition(deps.db, {
@@ -124,14 +125,16 @@ export async function tick(deps: Deps, nowMs: number = Date.now()): Promise<Tick
     if (applied) summary.transitions++
   }
 
-  // Active HTTP checks.
+  // Active HTTP and TCP checks.
   const due = monitors.filter(
-    (m): m is HttpMonitor => m.kind === 'http' && states.get(m.id)?.status !== 'paused' && isDue(m, tickAt / 60),
+    (m): m is HttpMonitor | TcpMonitor => m.kind !== 'push' && states.get(m.id)?.status !== 'paused' && isDue(m, tickAt / 60),
   )
   const overCap = due.splice(deps.config.limits.maxChecksPerTick)
-  const { results, skipped } = await runPool(due, HTTP_CONCURRENCY, startedMs + deps.config.limits.tickBudgetMs, (m) =>
-    runHttpCheck(m, deps.fetch),
-  )
+  const { results, skipped } = await runPool(due, HTTP_CONCURRENCY, startedMs + deps.config.limits.tickBudgetMs, (m) => {
+    if (m.kind === 'http') return runHttpCheck(m, deps.fetch)
+    if (!deps.tcpConnect) return Promise.resolve({ id: m.id, ok: false, ms: null, code: null, err: 'TCP checks are unavailable in this runtime' })
+    return runTcpCheck(m, deps.tcpConnect)
+  })
   summary.checks = results.length
   summary.skippedChecks = [...overCap, ...skipped].map((m) => m.id)
   if (summary.skippedChecks.length) {
@@ -141,7 +144,7 @@ export async function tick(deps: Deps, nowMs: number = Date.now()): Promise<Tick
   for (const r of results) {
     const m = byId.get(r.id)!
     const s = states.get(r.id)
-    if (s && (await applyHttpResult(deps, m, s, r, now))) summary.transitions++
+    if (s && (await applyCheckResult(deps, m, s, r, now))) summary.transitions++
   }
   if (results.length) {
     await deps.db.run(`UPDATE tick_results SET results_json = ? WHERE tick_at = ?`, [JSON.stringify(results), tickAt])

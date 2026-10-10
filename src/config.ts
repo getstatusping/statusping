@@ -128,7 +128,17 @@ export interface HttpMonitorInput extends MonitorBase {
   domainExpiry?: { warnDays?: number[] }
 }
 
-export type MonitorInput = PushMonitorInput | HttpMonitorInput
+export interface TcpMonitorInput extends MonitorBase {
+  kind: 'tcp'
+  host: string
+  port: number
+  interval?: Duration
+  timeout?: Duration
+  /** Consecutive failed checks tolerated before marking down. Default 0. */
+  retries?: number
+}
+
+export type MonitorInput = PushMonitorInput | HttpMonitorInput | TcpMonitorInput
 
 export interface PushoverSinkInput {
   type: 'pushover'
@@ -302,7 +312,15 @@ export interface HttpMonitor extends NormalizedBase {
   /** Days before expiry which open an amber domain-registration warning. */
   domainWarnDays: number[] | null
 }
-export type Monitor = PushMonitor | HttpMonitor
+export interface TcpMonitor extends NormalizedBase {
+  kind: 'tcp'
+  host: string
+  port: number
+  intervalMin: number
+  timeoutMs: number
+  retries: number
+}
+export type Monitor = PushMonitor | HttpMonitor | TcpMonitor
 
 export type Role = 'primary' | 'watchdog'
 
@@ -582,6 +600,22 @@ export function normalizeConfig(config: StatusPingConfig): NormalizedConfig {
             retries: Math.max(0, Math.floor(input.retries ?? 0)),
             sslWarnDays,
             domainWarnDays,
+          })
+        } else if (input.kind === 'tcp') {
+          if (typeof input.host !== 'string' || !input.host.trim()) fail('host must be a non-empty hostname or IP address')
+          if (!Number.isInteger(input.port) || input.port < 1 || input.port > 65_535) fail('port must be an integer between 1 and 65535')
+          const interval = parseDuration(input.interval ?? 60, 'interval')
+          if (interval < 60 || interval % 60 !== 0) fail('interval must be a whole number of minutes')
+          const timeout = parseDuration(input.timeout ?? 10, 'timeout')
+          if (timeout < 1 || timeout > 30) fail('timeout must be between 1s and 30s')
+          monitors.push({
+            ...base,
+            kind: 'tcp',
+            host: input.host.trim(),
+            port: input.port,
+            intervalMin: Math.max(1, Math.round(interval / 60)),
+            timeoutMs: timeout * 1000,
+            retries: Math.max(0, Math.floor(input.retries ?? 0)),
           })
         } else {
           fail(`unknown kind "${(input as { kind: string }).kind}"`)

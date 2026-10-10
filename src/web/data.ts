@@ -362,7 +362,7 @@ export async function loadMonitorDetail(deps: Deps, id: string, now: number): Pr
           [id],
         )
       : Promise.resolve([]),
-    view.monitor.kind === 'http'
+    view.monitor.kind !== 'push'
       ? deps.db.all<{ tick_at: number; results_json: string }>(
           `SELECT tick_at, results_json FROM tick_results WHERE results_json <> '[]' ORDER BY tick_at DESC LIMIT 180`,
         )

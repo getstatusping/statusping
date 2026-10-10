@@ -9,6 +9,7 @@ import {
 } from './config.ts'
 import type { Db } from './db/types.ts'
 import type { CertificateExpiryProvider } from './expiry/types.ts'
+import type { TcpConnector } from './evaluate/tcp.ts'
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error'
 export type Logger = (level: LogLevel, message: string, data?: Record<string, unknown>) => void
@@ -23,6 +24,8 @@ export interface Deps {
   fetch: typeof fetch
   /** Optional runtime-native certificate provider. Workers intentionally omit this. */
   certificateExpiry?: CertificateExpiryProvider
+  /** Raw TCP connector supplied by the active runtime adapter. */
+  tcpConnect?: TcpConnector
   log: Logger
   /** Runs a promise after the response is sent where the platform supports it. */
   waitUntil?: (p: Promise<unknown>) => void
@@ -35,6 +38,7 @@ export interface CreateDepsOptions {
   fetch?: typeof fetch
   log?: Logger
   certificateExpiry?: CertificateExpiryProvider
+  tcpConnect?: TcpConnector
 }
 
 export const consoleLogger: Logger = (level, message, data) => {
@@ -58,6 +62,7 @@ export function createDeps(opts: CreateDepsOptions): Deps {
     // Bind: Workers throw "Illegal invocation" when fetch is called detached from globalThis.
     fetch: opts.fetch ?? fetch.bind(globalThis),
     certificateExpiry: opts.certificateExpiry,
+    tcpConnect: opts.tcpConnect,
     log: opts.log ?? consoleLogger,
   }
 }

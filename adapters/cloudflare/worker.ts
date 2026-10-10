@@ -4,6 +4,7 @@ import { type D1DatabaseLike, D1Db } from '../../src/db/d1.ts'
 import { type Deps, createDeps } from '../../src/deps.ts'
 import { tick } from '../../src/tick.ts'
 import { createApp } from '../../src/web/app.ts'
+import { cloudflareTcpConnect } from './tcp.ts'
 
 interface Env {
   DB: D1DatabaseLike
@@ -39,6 +40,7 @@ function init(env: Env) {
         const v = env[name]
         return typeof v === 'string' ? v : undefined
       },
+      tcpConnect: cloudflareTcpConnect,
     })
     instance = { deps, app: createApp(deps) }
     cached.set(env, instance)

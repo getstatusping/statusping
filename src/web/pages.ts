@@ -479,7 +479,7 @@ export function statusPage(data: StatusData, ctx: PageCtx): Html {
 }
 
 function describeMonitor(m: Monitor, fields: ReadonlySet<DetailField>): [string, string][] {
-  const out: [string, string][] = [['Type', m.kind === 'push' ? 'Push (heartbeat)' : 'HTTP']]
+  const out: [string, string][] = [['Type', m.kind === 'push' ? 'Push (heartbeat)' : m.kind === 'http' ? 'HTTP' : 'TCP port']]
   if (m.kind === 'push') {
     if (fields.has('schedule')) {
       out.push(['Schedule', m.schedule ? `${m.schedule} (${m.tz})` : `every ${formatDuration(m.period ?? 0)}`])
@@ -489,8 +489,12 @@ function describeMonitor(m: Monitor, fields: ReadonlySet<DetailField>): [string,
     return out
   }
   if (fields.has('target')) {
-    out.push(['URL', `${m.method} ${m.url}`])
-    if (m.keyword) out.push(['Keyword', `${m.invertKeyword ? 'must not contain' : 'must contain'} "${m.keyword}"`])
+    if (m.kind === 'http') {
+      out.push(['URL', `${m.method} ${m.url}`])
+      if (m.keyword) out.push(['Keyword', `${m.invertKeyword ? 'must not contain' : 'must contain'} "${m.keyword}"`])
+    } else {
+      out.push(['Target', `${m.host}:${m.port}`])
+    }
   }
   if (fields.has('schedule')) {
     out.push(['Interval', m.intervalMin === 1 ? 'every minute' : `every ${m.intervalMin} minutes`])
@@ -608,7 +612,7 @@ function checksChart(
     </div>
     <div class="chart-x"><span>${when(checks[0]!.at, o.now, o.tz, 'datetime')}</span><span>${when(checks[n - 1]!.at, o.now, o.tz, 'datetime')}</span></div>
     <div class="sr-only"><table><caption>Recent checks</caption>
-      <thead><tr><th>Checked</th><th>Result</th><th>HTTP</th>${showMs ? html`<th>Response</th>` : ''}</tr></thead>
+      <thead><tr><th>Checked</th><th>Result</th><th>Code</th>${showMs ? html`<th>Response</th>` : ''}</tr></thead>
       <tbody>${checks.map((c) => html`<tr><td>${when(c.at, o.now, o.tz, 'datetime')}</td><td>${c.ok ? 'OK' : 'Failed'}</td><td>${c.code ?? ''}</td>${showMs ? html`<td>${c.ms !== null ? `${c.ms} ms` : ''}</td>` : ''}</tr>`)}</tbody>
     </table></div>`
 }
@@ -626,7 +630,7 @@ export function monitorPage(d: MonitorDetail, ctx: PageCtx & { now: number }): H
     if (state.last_duration_ms !== null) facts.push(['Last run took', formatDuration(state.last_duration_ms / 1000)])
     if (state.last_start_at !== null) facts.push(['Running since', html`${when(state.last_start_at, now, tz, 'stamp')} (${ago(now, state.last_start_at)})`])
   }
-  if (monitor.kind === 'http' && fields.has('response-time') && d.checks[0]?.ms != null) {
+  if (monitor.kind !== 'push' && fields.has('response-time') && d.checks[0]?.ms != null) {
     facts.push(['Last response time', `${d.checks[0].ms} ms`])
   }
   if (fields.has('errors') && state.last_error) facts.push(['Last error', state.last_error])
@@ -712,7 +716,7 @@ export function monitorPage(d: MonitorDetail, ctx: PageCtx & { now: number }): H
       : ''
 
   const checks =
-    monitor.kind === 'http' && fields.has('checks')
+    monitor.kind !== 'push' && fields.has('checks')
       ? html`<section class="card">
           <h2>${fields.has('response-time') ? 'Response time' : 'Recent checks'}</h2>
           ${d.checks.length === 0

@@ -265,7 +265,11 @@ export function createApp(deps: Deps): Hono {
             ? { lastPingAt: m.state.last_ping_at, lastDurationMs: m.state.last_duration_ms }
             : {}),
           ...(f.has('errors') ? { lastError: m.state.last_error } : {}),
-          ...(f.has('target') && m.monitor.kind === 'http' ? { url: m.monitor.url } : {}),
+          ...(f.has('target') && m.monitor.kind === 'http'
+            ? { url: m.monitor.url }
+            : f.has('target') && m.monitor.kind === 'tcp'
+              ? { host: m.monitor.host, port: m.monitor.port }
+              : {}),
         })),
       ),
     }

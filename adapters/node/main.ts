@@ -10,6 +10,7 @@ import { LibsqlDb } from '../../src/db/libsql.ts'
 import { createDeps } from '../../src/deps.ts'
 import { loadNodeConfig } from './config.ts'
 import { lookupNodeCertificateExpiry } from './expiry.ts'
+import { nodeTcpConnect } from './tcp.ts'
 import { startNodeServer } from './server.ts'
 
 const env = (name: string) => process.env[name] || undefined
@@ -21,6 +22,7 @@ const deps = createDeps({
   config: await loadNodeConfig(env),
   getEnv: env,
   certificateExpiry: lookupNodeCertificateExpiry,
+  tcpConnect: nodeTcpConnect,
 })
 
 const server = await startNodeServer(deps, { port: Number(env('PORT') ?? 8000) })

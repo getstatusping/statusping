@@ -72,6 +72,12 @@ describe('crypto utils', () => {
 })
 
 describe('config validation', () => {
+  it('normalizes TCP monitors and rejects invalid TCP endpoints', () => {
+    const source = testConfig({ groups: [{ name: 'TCP', monitors: [{ id: 'db', name: 'Database', kind: 'tcp', host: 'db.internal', port: 5432, interval: '5m', timeout: '3s' }] }] })
+    expect(normalizeConfig(source).monitors[0]).toMatchObject({ kind: 'tcp', host: 'db.internal', port: 5432, intervalMin: 5, timeoutMs: 3000 })
+    const bad = testConfig({ groups: [{ name: 'TCP', monitors: [{ id: 'bad', name: 'Bad', kind: 'tcp', host: '', port: 0, interval: '30s', timeout: '31s' }] }] })
+    expect(() => normalizeConfig(bad)).toThrow(/host must be a non-empty[\s\S]*port must be an integer[\s\S]*interval must be a whole[\s\S]*timeout must be between/)
+  })
   it('normalizes a valid config', () => {
     const c = normalizeConfig(testConfig())
     expect(c.monitors.map((m) => m.id)).toEqual(['backup-db', 'heartbeat', 'site'])
