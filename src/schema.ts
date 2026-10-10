@@ -128,6 +128,14 @@ export const MIGRATIONS: string[][] = [
     )`,
     `CREATE INDEX IF NOT EXISTS announcement_updates_announcement ON announcement_updates(announcement_id, created_at DESC)`,
   ],
+  [
+    `CREATE TABLE IF NOT EXISTS acknowledgements (
+      incident_id INTEGER PRIMARY KEY,
+      by          TEXT NOT NULL,
+      at          INTEGER NOT NULL,
+      via         TEXT NOT NULL CHECK (via IN ('alert-link', 'admin-page'))
+    )`,
+  ],
 ]
 
 export const SCHEMA_VERSION = MIGRATIONS.length

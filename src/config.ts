@@ -32,6 +32,14 @@ interface MonitorBase {
   renotifyEvery?: Duration
   /** Maximum number of repeated alerts for one incident. Omit for no cap. */
   renotifyMax?: number
+  /** Replace ordinary down/re-notify delivery with these acknowledgement-gated steps. */
+  escalation?: EscalationStepInput[]
+}
+
+/** One acknowledgement-gated delivery step. The first step is always immediate (`after: '0s'`). */
+export interface EscalationStepInput {
+  after: Duration
+  notify: string[]
 }
 
 /** Detail fields that can be shown on the status page. The current status is always shown. */
@@ -202,6 +210,10 @@ export interface EmailSinkInput {
 }
 export type SinkInput = PushoverSinkInput | NtfySinkInput | TelegramSinkInput | WebhookSinkInput | DiscordSinkInput | SlackSinkInput | EmailSinkInput
 
+/** Delivery settings for status-page subscribers.  This intentionally does not
+ * reuse an arbitrary alert sink: subscribers need a provider that can deliver
+ * to addresses we do not know at configuration time. */
+
 export type AuthProviderInput =
   /** Per-user email + password from the BASIC_AUTH_USERS secret (`npm run cli -- add-user`). */
   | { type: 'basic' }
@@ -229,6 +241,8 @@ export interface AccessInput {
   provider: AuthProviderInput
   /** Named, reusable member lists for page access: `access: { teams: ['ops'] }`. */
   teams?: Record<string, MatchInput>
+  /** People allowed to acknowledge an active incident from a monitor page. */
+  admins?: MatchInput & { teams?: string[] }
   /** SSO session length in hours. Default 12. */
   sessionHours?: number
 }
@@ -317,6 +331,12 @@ interface NormalizedBase {
   renotifyEvery: number | null
   /** Maximum repeats per incident, or null for no cap. */
   renotifyMax: number | null
+  /** Null means ordinary down/re-notify delivery. */
+  escalation: NormalizedEscalationStep[] | null
+}
+export interface NormalizedEscalationStep {
+  after: number
+  notify: string[]
 }
 export interface PushMonitor extends NormalizedBase {
   kind: 'push'
@@ -369,6 +389,7 @@ export interface NormalizedAccess {
   provider: AuthProviderInput
   teams: Record<string, NormalizedMatch>
   sessionHours: number
+  admins: (NormalizedMatch & { teams: string[] }) | null
 }
 
 export interface NormalizedPage {
@@ -637,6 +658,42 @@ export function normalizeConfig(config: StatusPingConfig): NormalizedConfig {
         else renotifyMax = input.renotifyMax
       }
 
+      let escalation: NormalizedEscalationStep[] | null = null
+      if (input.escalation !== undefined) {
+        if (!Array.isArray(input.escalation) || input.escalation.length === 0) {
+          fail('escalation must be a non-empty array of steps')
+        } else {
+          const steps: NormalizedEscalationStep[] = []
+          let previous = -1
+          for (const [stepIndex, step] of input.escalation.entries()) {
+            const stepWhere = `escalation[${stepIndex}]`
+            if (!step || typeof step !== 'object') {
+              fail(`${stepWhere} must be an object`)
+              continue
+            }
+            let after: number | null = null
+            try {
+              after = parseDuration(step.after, `${stepWhere}.after`)
+              if (after < 0) fail(`${stepWhere}.after must not be negative`)
+            } catch (error) {
+              fail((error as Error).message)
+            }
+            const notifyStep = Array.isArray(step.notify) ? step.notify : []
+            if (!notifyStep.length) fail(`${stepWhere}.notify must name one or more sinks`)
+            if (new Set(notifyStep).size !== notifyStep.length) fail(`${stepWhere}.notify must not contain duplicates`)
+            for (const sink of notifyStep) if (!sinks[sink]) fail(`${stepWhere}.notify references unknown sink "${sink}"`)
+            if (after !== null) {
+              if (stepIndex === 0 && after !== 0) fail('escalation[0].after must be 0s')
+              if (after <= previous) fail(`${stepWhere}.after must be strictly greater than the previous step`)
+              previous = after
+              steps.push({ after, notify: notifyStep })
+            }
+          }
+          if (steps.length === input.escalation.length) escalation = steps
+        }
+        if (renotifyEvery !== null) fail('renotifyEvery cannot be used with escalation')
+      }
+
       const base: NormalizedBase = {
         id: input.id,
         name: input.name || input.id,
@@ -647,6 +704,7 @@ export function normalizeConfig(config: StatusPingConfig): NormalizedConfig {
         critical: input.critical ?? false,
         renotifyEvery,
         renotifyMax,
+        escalation,
       }
 
       try {
@@ -1010,7 +1068,17 @@ function normalizeAccess(input: AccessInput | undefined, problems: string[]): No
   for (const [name, t] of Object.entries(input.teams ?? {})) {
     teams[name] = normalizeMatch(t, `access.teams.${name}`, sso, problems)
   }
-  return { provider: p, teams, sessionHours: input.sessionHours ?? 12 }
+  let admins: NormalizedAccess['admins'] = null
+  if (input.admins !== undefined) {
+    const match = normalizeMatch(input.admins, 'access.admins', sso, problems)
+    const adminTeams = input.admins.teams ?? []
+    for (const team of adminTeams) if (!teams[team]) problems.push(`access.admins: unknown team "${team}"`)
+    if (!match.emails.length && !match.groups.length && !adminTeams.length) {
+      problems.push(`access.admins: must list emails${sso ? ', groups' : ''} or teams`)
+    }
+    admins = { ...match, teams: adminTeams }
+  }
+  return { provider: p, teams, sessionHours: input.sessionHours ?? 12, admins }
 }
 
 /**

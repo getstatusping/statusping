@@ -5,6 +5,8 @@ export interface AlertMessage {
   title: string
   body: string
   url: string
+  /** Signed one-time capability to stop an escalation. Present only on escalation alerts. */
+  acknowledgeUrl?: string
   priority: 'high' | 'normal'
   /** Included in generic webhook payloads. */
   monitor?: { id: string; name: string }
@@ -67,7 +69,7 @@ function pushover(name: string, cfg: Extract<SinkInput, { type: 'pushover' }>, g
           token,
           user,
           title: clip(msg.title, 250),
-          message: clip(msg.body || msg.title, 1024),
+          message: clip(`${msg.body || msg.title}${msg.acknowledgeUrl ? `\n\nAcknowledge: ${msg.acknowledgeUrl}` : ''}`, 1024),
           url: clip(msg.url, 512),
           url_title: 'Open status page',
         })
@@ -109,6 +111,7 @@ function ntfy(name: string, cfg: Extract<SinkInput, { type: 'ntfy' }>, getEnv: E
             priority: msg.priority === 'high' ? 4 : 3,
             tags: [msg.kind === 'down' ? 'rotating_light' : msg.kind === 'up' ? 'white_check_mark' : 'bell'],
             click: msg.url,
+            actions: msg.acknowledgeUrl ? [{ action: 'view', label: 'Acknowledge', url: msg.acknowledgeUrl, clear: true }] : undefined,
           }),
         })
         await ensureOk(res, 'ntfy')
@@ -130,6 +133,7 @@ function telegram(name: string, cfg: Extract<SinkInput, { type: 'telegram' }>, g
           `<b>${escapeHtml(clip(msg.title, 250))}</b>`,
           msg.body ? escapeHtml(clip(msg.body, 3000)) : null,
           `<a href="${escapeHtml(msg.url)}">Open status page</a>`,
+          msg.acknowledgeUrl ? `<a href="${escapeHtml(msg.acknowledgeUrl)}">Acknowledge</a>` : null,
         ]
           .filter(Boolean)
           .join('\n')
@@ -162,6 +166,7 @@ function webhook(name: string, cfg: Extract<SinkInput, { type: 'webhook' }>, get
           monitor: msg.monitor ?? null,
           incident: msg.incident ?? null,
           url: msg.url,
+          ...(msg.acknowledgeUrl ? { acknowledgeUrl: msg.acknowledgeUrl } : {}),
         })
         const headers: Record<string, string> = { ...cfg.headers, 'content-type': 'application/json' }
         if (secret) headers['x-statusping-signature'] = `sha256=${await hmacSha256Hex(secret, body)}`
@@ -183,7 +188,7 @@ function discord(name: string, cfg: Extract<SinkInput, { type: 'discord' }>, get
         const res = await fetchFn(webhookUrl, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ embeds: [{ title: clip(msg.title, 256), description: clip(msg.body || msg.title, 4096), url: msg.url, color: colour }] }),
+          body: JSON.stringify({ embeds: [{ title: clip(msg.title, 256), description: clip(msg.body || msg.title, 4096), url: msg.url, color: colour }], components: msg.acknowledgeUrl ? [{ type: 1, components: [{ type: 2, style: 5, label: 'Acknowledge', url: msg.acknowledgeUrl }] }] : [] }),
         })
         await ensureOk(res, 'discord')
       })
@@ -207,7 +212,10 @@ function slack(name: string, cfg: Extract<SinkInput, { type: 'slack' }>, getEnv:
             blocks: [
               { type: 'header', text: { type: 'plain_text', text: clip(msg.title, 150), emoji: true } },
               { type: 'section', text: { type: 'mrkdwn', text: detail } },
-              { type: 'actions', elements: [{ type: 'button', text: { type: 'plain_text', text: 'Open status page' }, url: msg.url }] },
+              { type: 'actions', elements: [
+                { type: 'button', text: { type: 'plain_text', text: 'Open status page' }, url: msg.url },
+                ...(msg.acknowledgeUrl ? [{ type: 'button', text: { type: 'plain_text', text: 'Acknowledge' }, url: msg.acknowledgeUrl, style: 'danger' }] : []),
+              ] },
             ],
           }),
         })
@@ -228,8 +236,8 @@ function email(
     type: 'email',
     async send(msg, fetchFn) {
       const subject = clip(msg.title, 200)
-      const text = `${msg.body || msg.title}\n\nOpen status page: ${msg.url}`
-      const html = `<h2>${escapeHtml(subject)}</h2><p>${escapeHtml(msg.body || msg.title)}</p><p><a href="${escapeHtml(msg.url)}">Open status page</a></p>`
+      const text = `${msg.body || msg.title}\n\nOpen status page: ${msg.url}${msg.acknowledgeUrl ? `\nAcknowledge: ${msg.acknowledgeUrl}` : ''}`
+      const html = `<h2>${escapeHtml(subject)}</h2><p>${escapeHtml(msg.body || msg.title)}</p><p><a href="${escapeHtml(msg.url)}">Open status page</a>${msg.acknowledgeUrl ? ` · <a href="${escapeHtml(msg.acknowledgeUrl)}">Acknowledge</a>` : ''}</p>`
       if (cfg.via === 'cloudflare') {
         if (!cloudflareEmail) throw new Error('email: Cloudflare send_email binding is unavailable')
         await cloudflareEmail.send({ to: cfg.to, subject, text, html })

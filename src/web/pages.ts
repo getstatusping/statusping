@@ -33,6 +33,8 @@ export interface PageCtx extends Chrome {
   page: NormalizedPage
   fields: ReadonlySet<DetailField>
   base: string
+  /** The viewer matches access.admins and may acknowledge a current escalation. */
+  canAcknowledge?: boolean
 }
 
 const STATUS_LABEL: Record<Status, string> = {
@@ -686,6 +688,13 @@ export function monitorPage(d: MonitorDetail, ctx: PageCtx & { now: number }): H
       </section>`
     : ''
 
+  const activeEscalation = monitor.escalation
+    ? d.incidents.find((incident) => incident.severity === 'outage' && incident.resolvedAt === null)
+    : undefined
+  const acknowledge = ctx.canAcknowledge && activeEscalation
+    ? html`<section class="card" aria-label="Incident acknowledgement"><h2>Incident response</h2><p class="muted">Acknowledge this incident to stop further escalation alerts.</p><form method="post" action="${ctx.base}/m/${enc(monitor.id)}/ack"><input type="hidden" name="incidentId" value="${activeEscalation.id}"><button type="submit" class="btn-primary">Acknowledge incident</button></form></section>`
+    : ''
+
   const warnings = d.view.warnings.length
     ? html`<section class="card warning-panel" aria-label="Active warnings">
         <h2><span class="status-icon warning" aria-hidden="true">${raw(ICON_TRIANGLE_FILLED)}</span>Active warnings</h2>
@@ -783,9 +792,20 @@ export function monitorPage(d: MonitorDetail, ctx: PageCtx & { now: number }): H
       ${fields.has('uptime') ? bars(d.view, { fields, tz, now }) : ''}
       ${fields.has('response-time') ? latencyTrend(d.view) : ''}
     </section>
-    ${maintenance}${warnings}${incidents}${pings}${checks}`,
+    ${maintenance}${acknowledge}${warnings}${incidents}${pings}${checks}`,
     ctx,
     { refresh: true },
+  )
+}
+
+/** The capability GET is intentionally only a confirmation view; the POST is the mutation. */
+export function acknowledgePage(chrome: Chrome, token: string, monitorName: string): Html {
+  return layout(
+    `Acknowledge ${monitorName}`,
+    html`${pageHeading('Acknowledge incident')}
+      <section class="card"><p>Acknowledge the active incident for <strong>${monitorName}</strong>? This stops any remaining escalation alerts.</p>
+      <form method="post" action="/ack"><input type="hidden" name="token" value="${token}"><button type="submit" class="btn-primary">Acknowledge incident</button></form></section>`,
+    chrome,
   )
 }
 

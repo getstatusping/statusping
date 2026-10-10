@@ -27,6 +27,16 @@ export function canOpen(page: NormalizedPage, viewer: Viewer | null, access: Nor
   })
 }
 
+/** May this signed-in viewer acknowledge incidents? Deliberately separate from page visibility. */
+export function canAcknowledge(viewer: Viewer | null, access: NormalizedAccess | null): boolean {
+  if (!viewer || !access?.admins) return false
+  if (matches(viewer, access.admins)) return true
+  return access.admins.teams.some((teamName) => {
+    const team = access.teams[teamName]
+    return team ? matches(viewer, team) : false
+  })
+}
+
 /** Group names referenced anywhere in pages/teams — the only ones worth keeping in a session cookie. */
 export function referencedGroups(pages: NormalizedPage[], access: NormalizedAccess): Set<string> {
   const lists = [

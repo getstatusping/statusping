@@ -1,6 +1,7 @@
 import type { Deps } from '../deps.ts'
 import type { IncidentReason, MonitorStateRow } from '../state.ts'
 import { activeMaintenance } from '../maintenance.ts'
+import { createAcknowledgeToken } from '../acknowledgements.ts'
 import { formatDuration } from '../util/time.ts'
 import { type AlertMessage, createSink } from './sinks.ts'
 
@@ -29,6 +30,8 @@ interface NotificationRow {
   sent_at: number | null
 }
 
+interface AcknowledgementRow { incident_id: number }
+
 const TITLES: Record<IncidentReason, string> = {
   missed: 'missed a ping',
   failed: 'reported a failure',
@@ -55,6 +58,7 @@ export function buildMessage(
   incident: IncidentRow,
   event: 'down' | 'up' | 'renotify' | 'warning',
   now = incident.resolved_at ?? incident.started_at,
+  acknowledgeUrl?: string,
 ): AlertMessage {
   const prefix = deps.role === 'watchdog' ? '[watchdog] ' : ''
   const url = monitorLink(deps, monitorId)
@@ -65,6 +69,7 @@ export function buildMessage(
       body: incident.detail ?? '',
       url,
       priority: 'high',
+      acknowledgeUrl,
       monitor: { id: monitorId, name: monitorName },
       incident: {
         reason: incident.reason,
@@ -92,6 +97,7 @@ export function buildMessage(
       body: `${TITLES[incident.reason]}${incident.detail ? `: ${incident.detail}` : ''}`,
       url,
       priority: 'high',
+      acknowledgeUrl,
       monitor: { id: monitorId, name: monitorName },
       incident: {
         reason: incident.reason,
@@ -156,6 +162,12 @@ export async function dispatchNotifications(deps: Deps, now: number, onlyMonitor
   )
   const key = (incidentId: number, event: string, sink: string) => `${incidentId}|${event}|${sink}`
   const known = new Map(existing.map((n) => [key(n.incident_id, n.event, n.sink), n]))
+  const acknowledgements = await db.all<AcknowledgementRow>(
+    `SELECT a.incident_id FROM acknowledgements a JOIN incidents i ON i.id = a.incident_id
+     WHERE (i.resolved_at IS NULL OR i.resolved_at >= ?) ${filter}`,
+    incidentParams,
+  )
+  const acknowledged = new Set(acknowledgements.map((ack) => ack.incident_id))
 
   let suppressNonPeer = false
   const peerIds = new Set([config.peer.heartbeatMonitor, config.peer.healthMonitor].filter(Boolean) as string[])
@@ -178,36 +190,48 @@ export async function dispatchNotifications(deps: Deps, now: number, onlyMonitor
     const eventAt = incident.resolved_at ?? now
     if (activeMaintenance(config.maintenance, monitor.id, eventAt).length) continue
 
-    for (const sinkName of monitor.notify) {
-      const sinkConfig = config.sinks[sinkName]
-      if (!sinkConfig) continue
-      // Open incident → "down", then numbered re-notifications. Resolved → "up", but
-      // only where the original down alert was delivered.
-      let event: string | null
-      if (incident.resolved_at === null) {
-        const initialEvent = incident.severity === 'warning' ? 'warning' : 'down'
-        const down = known.get(key(incident.id, initialEvent, sinkName))
-        if (!down?.ok) {
-          event = initialEvent
-        } else if (incident.severity === 'outage' && monitor.renotifyEvery !== null) {
-          const repeats = existing.filter(
-            (n) => n.incident_id === incident.id && n.sink === sinkName && n.event.startsWith('renotify:'),
-          )
-          const successful = repeats.filter((n) => n.ok)
-          const lastSent = [down, ...successful].reduce((latest, notification) =>
-            Math.max(latest, notification.sent_at ?? 0), 0)
-          if (monitor.renotifyMax !== null && successful.length >= monitor.renotifyMax) event = null
-          else if (now - lastSent >= monitor.renotifyEvery) event = `renotify:${successful.length + 1}`
-          else event = null
-        } else {
-          event = null
+    const targets: { sinkName: string; event: string; messageKind: 'down' | 'up' | 'renotify' | 'warning'; acknowledge: boolean }[] = []
+    if (incident.resolved_at === null && monitor.escalation) {
+      if (!acknowledged.has(incident.id)) {
+        for (const [stepIndex, step] of monitor.escalation.entries()) {
+          if (now < incident.started_at + step.after) continue
+          for (const sinkName of step.notify) {
+            targets.push({ sinkName, event: `escalate:${stepIndex}`, messageKind: stepIndex === 0 ? 'down' : 'renotify', acknowledge: true })
+          }
         }
       }
-      else if (known.get(key(incident.id, incident.severity === 'warning' ? 'warning' : 'down', sinkName))?.ok) event = 'up'
-      else continue
+    } else if (incident.resolved_at !== null && monitor.escalation) {
+      const escalationSinks = new Set(monitor.escalation.flatMap((step) => step.notify))
+      for (const sinkName of escalationSinks) {
+        const sentDown = existing.some((notification) => notification.incident_id === incident.id && notification.sink === sinkName && notification.event.startsWith('escalate:') && notification.ok)
+        if (sentDown) targets.push({ sinkName, event: 'up', messageKind: 'up', acknowledge: false })
+      }
+    } else {
+      for (const sinkName of monitor.notify) {
+        let event: string | null
+        if (incident.resolved_at === null) {
+          const initialEvent = incident.severity === 'warning' ? 'warning' : 'down'
+          const down = known.get(key(incident.id, initialEvent, sinkName))
+          if (!down?.ok) event = initialEvent
+          else if (incident.severity === 'outage' && monitor.renotifyEvery !== null) {
+            const repeats = existing.filter(
+              (n) => n.incident_id === incident.id && n.sink === sinkName && n.event.startsWith('renotify:'),
+            )
+            const successful = repeats.filter((n) => n.ok)
+            const lastSent = [down, ...successful].reduce((latest, notification) => Math.max(latest, notification.sent_at ?? 0), 0)
+            if (monitor.renotifyMax !== null && successful.length >= monitor.renotifyMax) event = null
+            else if (now - lastSent >= monitor.renotifyEvery) event = `renotify:${successful.length + 1}`
+            else event = null
+          } else event = null
+        } else if (known.get(key(incident.id, incident.severity === 'warning' ? 'warning' : 'down', sinkName))?.ok) event = 'up'
+        else event = null
+        if (event) targets.push({ sinkName, event, messageKind: event === 'up' ? 'up' : event === 'down' ? 'down' : event === 'warning' ? 'warning' : 'renotify', acknowledge: false })
+      }
+    }
 
-      if (!event) continue
-
+    for (const { sinkName, event, messageKind, acknowledge } of targets) {
+      const sinkConfig = config.sinks[sinkName]
+      if (!sinkConfig) continue
       const prev = known.get(key(incident.id, event, sinkName))
       if (prev && (prev.ok || prev.attempts >= MAX_ATTEMPTS)) continue
       if (prev?.sent_at && now - prev.sent_at < RETRY_AFTER) continue
@@ -227,7 +251,10 @@ export async function dispatchNotifications(deps: Deps, now: number, onlyMonitor
       ])
       if (claim?.changes !== 1) continue // someone else is sending it
 
-      const message = buildMessage(deps, monitor.name, monitor.id, incident, event === 'up' ? 'up' : event === 'down' ? 'down' : event === 'warning' ? 'warning' : 'renotify', now)
+      const acknowledgeUrl = acknowledge
+        ? `${config.baseUrl}/ack/${await createAcknowledgeToken(incident.id, now, deps.getEnv('ACK_SECRET')!)}`
+        : undefined
+      const message = buildMessage(deps, monitor.name, monitor.id, incident, messageKind, now, acknowledgeUrl)
       try {
         await createSink(sinkName, sinkConfig, deps.getEnv, deps.cloudflareEmail).send(message, deps.fetch)
         await db.run(`UPDATE notifications SET ok = 1, error = NULL WHERE incident_id = ? AND event = ? AND sink = ?`, [

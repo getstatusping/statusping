@@ -251,7 +251,7 @@ function mountOidc(app: Hono, deps: Deps, p: Oidc) {
 // ── Email + password sign-in form ─────────────────────────────────────────────────────────────
 
 /** Rejects cross-site form posts (login CSRF): the Origin, if sent, must be this site. */
-function sameOrigin(c: Context, deps: Deps): boolean {
+export function sameOrigin(c: Context, deps: Deps): boolean {
   const origin = c.req.header('origin')
   if (!origin) return true
   const allowed = new Set([new URL(c.req.url).origin, new URL(deps.config.baseUrl).origin])

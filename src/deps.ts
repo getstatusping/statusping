@@ -57,9 +57,13 @@ export function createDeps(opts: CreateDepsOptions): Deps {
   if (roleEnv !== 'primary' && roleEnv !== 'watchdog') {
     throw new Error(`STATUSPING_ROLE must be "primary" or "watchdog", got "${roleEnv}"`)
   }
+  const config = normalizeConfig(resolveConfigEnv(opts.config, opts.getEnv))
+  if (config.monitors.some((monitor) => monitor.escalation) && !opts.getEnv('ACK_SECRET')) {
+    throw new Error('ACK_SECRET must be set when escalation is configured')
+  }
   return {
     db: opts.db,
-    config: normalizeConfig(resolveConfigEnv(opts.config, opts.getEnv)),
+    config,
     role: roleEnv,
     getEnv: opts.getEnv,
     pingTokens: parsePingTokens(opts.getEnv('PING_TOKENS')),

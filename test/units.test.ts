@@ -20,6 +20,7 @@ const push = (over: Partial<PushMonitor> = {}): PushMonitor => ({
   critical: false,
   renotifyEvery: null,
   renotifyMax: null,
+  escalation: null,
   kind: 'push',
   period: null,
   schedule: '0 3 * * *',

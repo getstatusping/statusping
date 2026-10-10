@@ -1,7 +1,8 @@
 import { Hono } from 'hono'
 import type { Context } from 'hono'
-import { currentViewer, hasCredentials, mountAuthRoutes, signInResponse } from '../auth/providers.ts'
-import { type Viewer, canOpen } from '../auth/viewer.ts'
+import { currentViewer, hasCredentials, mountAuthRoutes, sameOrigin, signInResponse } from '../auth/providers.ts'
+import { type Viewer, canAcknowledge, canOpen } from '../auth/viewer.ts'
+import { acknowledgeIncident, verifyAcknowledgeToken } from '../acknowledgements.ts'
 import type { NormalizedPage } from '../config.ts'
 import type { Deps } from '../deps.ts'
 import { dispatchNotifications } from '../notify/dispatch.ts'
@@ -15,7 +16,7 @@ import { APP_VERSION } from '../version.ts'
 import { type StatusData, lastTickAt, loadMonitorDetail, loadStatusData } from './data.ts'
 import { buildChrome } from './chrome.ts'
 import { renderBadge } from './badge.ts'
-import { type PageCtx, messagePage, monitorPage, statusPage } from './pages.ts'
+import { acknowledgePage, type PageCtx, messagePage, monitorPage, statusPage } from './pages.ts'
 
 const STALE_TICK_SECONDS = 180
 const PUBLIC_MAX_AGE = 30
@@ -67,7 +68,8 @@ function runAfterResponse(c: Context, deps: Deps, p: Promise<unknown>) {
 export function createApp(deps: Deps): Hono {
   const app = new Hono()
   const { config } = deps
-  const hasRestricted = config.pages.some((p) => p.access !== 'public')
+  // An admins list also needs a sign-in affordance on otherwise-public monitor pages.
+  const hasRestricted = config.pages.some((p) => p.access !== 'public') || Boolean(config.access?.admins)
 
   app.use('*', async (_c, next) => {
     await ensureSchema(deps.db)
@@ -206,6 +208,35 @@ export function createApp(deps: Deps): Hono {
     page,
     fields: new Set(page.show),
     base: `/pages/${page.slug}`,
+    canAcknowledge: canAcknowledge(viewer, config.access),
+  })
+
+  // Alert capability links are deliberately confirmed with a non-mutating GET. The token is
+  // signed and expires, while acknowledgements.incident_id makes the POST single-use.
+  app.get('/ack/:token', async (c) => {
+    const secret = deps.getEnv('ACK_SECRET')
+    if (!secret) return c.text('Not found', 404)
+    const incidentId = await verifyAcknowledgeToken(c.req.param('token'), nowSeconds(), secret)
+    if (!incidentId) return c.text('Not found', 404)
+    const incident = await deps.db.first<{ monitor_id: string; name: string; resolved_at: number | null }>(
+      `SELECT i.monitor_id, m.name, i.resolved_at FROM incidents i JOIN monitors m ON m.id = i.monitor_id WHERE i.id = ?`, [incidentId],
+    )
+    if (!incident || incident.resolved_at !== null) return c.text('Not found', 404)
+    const chrome = await buildChrome(deps, { viewer: null, current: c.req.path })
+    return c.html(acknowledgePage(chrome, c.req.param('token'), incident.name), 200, { 'cache-control': 'no-store' })
+  })
+  app.post('/ack', async (c) => {
+    const secret = deps.getEnv('ACK_SECRET')
+    if (!secret) return c.text('Not found', 404)
+    const body = await c.req.parseBody()
+    const token = typeof body.token === 'string' ? body.token : ''
+    const incidentId = await verifyAcknowledgeToken(token, nowSeconds(), secret)
+    if (!incidentId) return c.text('Not found', 404)
+    const incident = await deps.db.first<{ monitor_id: string; resolved_at: number | null }>(`SELECT monitor_id, resolved_at FROM incidents WHERE id = ?`, [incidentId])
+    if (!incident || incident.resolved_at !== null) return c.text('Not found', 404)
+    const created = await acknowledgeIncident(deps.db, incidentId, 'alert-link', 'alert-link', nowSeconds())
+    const chrome = await buildChrome(deps, { viewer: null, current: c.req.path })
+    return c.html(messagePage(chrome, created ? 'Incident acknowledged' : 'Already acknowledged', created ? 'Further escalation alerts have been stopped.' : 'This incident was already acknowledged.'), 200, { 'cache-control': 'no-store' })
   })
 
   /** "Not found" page with the shared header/footer (personalized only if signed in). */
@@ -263,6 +294,25 @@ export function createApp(deps: Deps): Hono {
       },
       r.viewer,
     )
+  })
+
+  app.post('/pages/:slug/m/:id/ack', async (c) => {
+    const r = await openPage(c, c.req.param('slug'))
+    if (r instanceof Response) return r
+    const viewer = await currentViewer(c, deps)
+    if (!canAcknowledge(viewer, config.access)) return c.text('Forbidden', 403)
+    if (!sameOrigin(c, deps)) return c.text('Forbidden', 403)
+    const id = c.req.param('id')
+    if (!r.page.monitorIds.includes(id)) return c.text('Not found', 404)
+    const monitor = config.monitors.find((candidate) => candidate.id === id)
+    if (!monitor?.escalation) return c.text('Not found', 404)
+    const body = await c.req.parseBody()
+    const incidentId = Number(typeof body.incidentId === 'string' ? body.incidentId : NaN)
+    if (!Number.isSafeInteger(incidentId) || incidentId < 1) return c.text('Not found', 404)
+    const incident = await deps.db.first<{ id: number }>(`SELECT id FROM incidents WHERE id = ? AND monitor_id = ? AND severity = 'outage' AND resolved_at IS NULL`, [incidentId, id])
+    if (!incident) return c.text('Not found', 404)
+    await acknowledgeIncident(deps.db, incidentId, viewer!.email, 'admin-page', nowSeconds())
+    return c.redirect(`/pages/${encodeURIComponent(r.page.slug)}/m/${encodeURIComponent(id)}`, 303)
   })
 
   // ── Public SVG badges ────────────────────────────────────────────────────────────────────
