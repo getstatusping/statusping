@@ -135,7 +135,8 @@ export function createApp(deps: Deps): Hono {
       // disclosing configuration or credentials.
       const channel = deps.getEnv('STATUSPING_RELEASE_CHANNEL') ?? 'stable'
       const instanceId = deps.getEnv('STATUSPING_INSTANCE_ID') ?? null
-      return c.json({ ok, version: APP_VERSION, schemaVersion: SCHEMA_VERSION, channel, instanceId, role: deps.role, lastTickAt: last, lagSeconds: lag }, ok ? 200 : 503, {
+      const templateVersion = deps.getEnv('STATUSPING_TEMPLATE_VERSION') ?? APP_VERSION
+      return c.json({ ok, version: APP_VERSION, schemaVersion: SCHEMA_VERSION, channel, templateVersion, instanceId, role: deps.role, lastTickAt: last, lagSeconds: lag }, ok ? 200 : 503, {
         'cache-control': 'no-store',
       })
     } catch (e) {

@@ -334,7 +334,7 @@ describe('HTTP routes (no sign-in configured)', () => {
 
   it('healthz and POST /tick', async () => {
     const off = await setup()
-    expect(await (await off.app.request('/healthz')).json()).toMatchObject({ ok: true, version: APP_VERSION, schemaVersion: SCHEMA_VERSION, channel: 'stable', instanceId: null, role: 'primary' })
+    expect(await (await off.app.request('/healthz')).json()).toMatchObject({ ok: true, version: APP_VERSION, schemaVersion: SCHEMA_VERSION, channel: 'stable', templateVersion: APP_VERSION, instanceId: null, role: 'primary' })
     expect((await off.app.request('/tick', { method: 'POST' })).status).toBe(404)
     await close()
     const on = await setup({ env: { TICK_SECRET: 's3cret-value' } })
