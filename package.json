@@ -24,7 +24,7 @@
     "template:generate": "node scripts/build-deploy-template.ts"
   },
   "dependencies": {
-    "@statusping/ui": "*",
+    "@statusping/ui": "file:packages/ui",
     "@hono/node-server": "^2.1.4",
     "@libsql/client": "^0.18.0",
     "croner": "^10.0.1",
