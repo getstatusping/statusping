@@ -1,0 +1,37 @@
+{
+  "name": "@statusping/app",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Serverless uptime and cron-job monitoring with a status page, for Cloudflare Workers or Node.",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "exports": {
+    "./config": "./src/config.ts"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "dev": "node --disable-warning=ExperimentalWarning --env-file-if-exists=.env adapters/node/main.ts",
+    "demo": "node --disable-warning=ExperimentalWarning scripts/demo.ts",
+    "cli": "node --disable-warning=ExperimentalWarning cli/statusping.ts",
+    "cf:dev": "wrangler dev --config adapters/cloudflare/wrangler.toml --test-scheduled",
+    "cf:deploy": "wrangler deploy --config adapters/cloudflare/wrangler.toml"
+  },
+  "dependencies": {
+    "@hono/node-server": "^2.1.4",
+    "@libsql/client": "^0.18.0",
+    "croner": "^10.0.1",
+    "hono": "^4.13.13"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.4",
+    "miniflare": "5.20261006.1-alpha",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.3",
+    "wrangler": "^4.149.0"
+  }
+}

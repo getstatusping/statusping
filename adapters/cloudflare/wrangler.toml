@@ -1,0 +1,32 @@
+name = "statusping"
+main = "worker.ts"
+compatibility_date = "2026-10-01"
+
+# Every minute: drives missed-ping detection and HTTP checks.
+[triggers]
+crons = ["* * * * *"]
+
+# Create with: npx wrangler d1 create statusping  — then paste the id below.
+[[d1_databases]]
+binding = "DB"
+database_name = "statusping"
+database_id = "00000000-0000-0000-0000-000000000000"
+
+# Custom domain (zone must be on Cloudflare). Uncomment after the first deploy.
+# [[routes]]
+# pattern = "statusp.ing"
+# custom_domain = true
+
+[vars]
+# "primary" or "watchdog" (see README: primary + watchdog).
+STATUSPING_ROLE = "primary"
+
+# Secrets (set with `npx wrangler secret put NAME --config adapters/cloudflare/wrangler.toml`):
+#   PING_TOKENS            JSON {"monitor-id":"token"} — generate with `npm run cli -- tokens`
+#   PUSHOVER_APP_TOKEN, PUSHOVER_USER_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, NTFY_TOPIC, NTFY_TOKEN
+#   Sign-in (only for the provider you use):
+#     basic:             BASIC_AUTH_USERS (JSON, from `npm run cli -- add-user <email>`)
+#     cloudflare-access: CF_ACCESS_AUD (the Access application's audience tag)
+#     oidc:              OIDC_CLIENT_ID, OIDC_CLIENT_SECRET, SESSION_SECRET (≥ 32 random chars)
+#   PEER_PING_URL          optional: watchdog pairing
+#   TICK_SECRET            optional: enables POST /tick for external schedulers
