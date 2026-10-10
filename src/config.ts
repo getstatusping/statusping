@@ -34,6 +34,16 @@ interface MonitorBase {
   renotifyMax?: number
   /** Replace ordinary down/re-notify delivery with these acknowledgement-gated steps. */
   escalation?: EscalationStepInput[]
+  /** Re-check a failed active monitor from other locations before opening an outage. */
+  confirm?: ConfirmationInput
+}
+
+/** Regional confirmation settings. `quorum` includes the scheduler's failed check. */
+export interface ConfirmationInput {
+  /** Number of additional regional probes to ask (1–3). */
+  regions: number
+  /** Failed locations required to declare the monitor down (2 through regions + 1). */
+  quorum: number
 }
 
 /** One acknowledgement-gated delivery step. The first step is always immediate (`after: '0s'`). */
@@ -286,6 +296,8 @@ export interface StatusPingConfig {
     maxChecksPerTick?: number
     /** Stop starting new checks after this many ms in one tick. Default 20000. */
     tickBudgetMs?: number
+    /** Maximum additional regional confirmation probes started in one tick. Default 6. */
+    maxConfirmationsPerTick?: number
   }
 }
 
@@ -339,10 +351,16 @@ interface NormalizedBase {
   renotifyMax: number | null
   /** Null means ordinary down/re-notify delivery. */
   escalation: NormalizedEscalationStep[] | null
+  /** Null disables regional confirmation. */
+  confirm?: NormalizedConfirmation | null
 }
 export interface NormalizedEscalationStep {
   after: number
   notify: string[]
+}
+export interface NormalizedConfirmation {
+  regions: number
+  quorum: number
 }
 export interface PushMonitor extends NormalizedBase {
   kind: 'push'
@@ -442,7 +460,7 @@ export interface NormalizedConfig {
   subscribers: SubscriberConfigInput | null
   monitors: Monitor[]
   peer: { pingUrl: Secret | null; heartbeatMonitor: string | null; healthMonitor: string | null }
-  limits: { maxChecksPerTick: number; tickBudgetMs: number }
+  limits: { maxChecksPerTick: number; tickBudgetMs: number; maxConfirmationsPerTick: number }
   access: NormalizedAccess | null
   pages: NormalizedPage[]
   home: string | null
@@ -708,6 +726,18 @@ export function normalizeConfig(config: StatusPingConfig): NormalizedConfig {
         if (renotifyEvery !== null) fail('renotifyEvery cannot be used with escalation')
       }
 
+      let confirm: NormalizedConfirmation | null = null
+      if (input.confirm !== undefined) {
+        const value = input.confirm
+        if (!value || typeof value !== 'object' || !Number.isInteger(value.regions) || value.regions < 1 || value.regions > 3) {
+          fail('confirm.regions must be a whole number from 1 to 3')
+        } else if (!Number.isInteger(value.quorum) || value.quorum < 2 || value.quorum > value.regions + 1) {
+          fail('confirm.quorum must be a whole number from 2 through confirm.regions + 1')
+        } else {
+          confirm = { regions: value.regions, quorum: value.quorum }
+        }
+      }
+
       const base: NormalizedBase = {
         id: input.id,
         name: input.name || input.id,
@@ -719,6 +749,7 @@ export function normalizeConfig(config: StatusPingConfig): NormalizedConfig {
         renotifyEvery,
         renotifyMax,
         escalation,
+        confirm,
       }
 
       try {
@@ -831,6 +862,7 @@ export function normalizeConfig(config: StatusPingConfig): NormalizedConfig {
   const limits = {
     maxChecksPerTick: config.limits?.maxChecksPerTick ?? 35,
     tickBudgetMs: config.limits?.tickBudgetMs ?? 20_000,
+    maxConfirmationsPerTick: config.limits?.maxConfirmationsPerTick ?? 6,
   }
 
   const access = normalizeAccess(config.access, problems)

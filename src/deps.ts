@@ -10,6 +10,7 @@ import {
 import type { Db } from './db/types.ts'
 import type { CertificateExpiryProvider } from './expiry/types.ts'
 import type { TcpConnector } from './evaluate/tcp.ts'
+import type { ConfirmationProbe } from './confirmation.ts'
 import type { CloudflareEmailSender } from './notify/sinks.ts'
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error'
@@ -27,6 +28,10 @@ export interface Deps {
   certificateExpiry?: CertificateExpiryProvider
   /** Raw TCP connector supplied by the active runtime adapter. */
   tcpConnect?: TcpConnector
+  /** Optional second-vantage implementation. Required at runtime by monitors with `confirm`. */
+  confirmationProbe?: ConfirmationProbe
+  /** Display name for this scheduler location; adapters may set a truthful value. */
+  location?: string
   /** Optional Cloudflare Email Routing binding adapter. */
   cloudflareEmail?: CloudflareEmailSender
   log: Logger
@@ -42,6 +47,8 @@ export interface CreateDepsOptions {
   log?: Logger
   certificateExpiry?: CertificateExpiryProvider
   tcpConnect?: TcpConnector
+  confirmationProbe?: ConfirmationProbe
+  location?: string
   cloudflareEmail?: CloudflareEmailSender
 }
 
@@ -74,6 +81,8 @@ export function createDeps(opts: CreateDepsOptions): Deps {
     fetch: opts.fetch ?? fetch.bind(globalThis),
     certificateExpiry: opts.certificateExpiry,
     tcpConnect: opts.tcpConnect,
+    confirmationProbe: opts.confirmationProbe,
+    location: opts.location,
     cloudflareEmail: opts.cloudflareEmail,
     log: opts.log ?? consoleLogger,
   }

@@ -6,10 +6,12 @@ import { tick } from '../../src/tick.ts'
 import { createApp } from '../../src/web/app.ts'
 import { cloudflareTcpConnect } from './tcp.ts'
 import { cloudflareEmailSender } from './email.ts'
+import { cloudflareConfirmationProbe, RegionalProbe, type DurableObjectNamespaceLike } from './confirmation.ts'
 
 interface Env {
   DB: D1DatabaseLike
   SEND_EMAIL?: { send(message: unknown): Promise<void> }
+  REGIONAL_PROBE?: DurableObjectNamespaceLike
   [key: string]: unknown
 }
 
@@ -43,6 +45,7 @@ function init(env: Env) {
         return typeof v === 'string' ? v : undefined
       },
       tcpConnect: cloudflareTcpConnect,
+      confirmationProbe: env.REGIONAL_PROBE ? cloudflareConfirmationProbe(env.REGIONAL_PROBE) : undefined,
       cloudflareEmail: cloudflareEmailSender(env.SEND_EMAIL, typeof env.STATUSPING_EMAIL_FROM === 'string' ? env.STATUSPING_EMAIL_FROM : undefined),
     })
     instance = { deps, app: createApp(deps) }
@@ -50,6 +53,8 @@ function init(env: Env) {
   }
   return instance
 }
+
+export { RegionalProbe }
 
 export default {
   fetch(request: Request, env: Env, ctx: ExecutionContextLike) {

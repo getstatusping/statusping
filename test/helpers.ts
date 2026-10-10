@@ -8,6 +8,8 @@ import { D1Db } from '../src/db/d1.ts'
 import { LibsqlDb } from '../src/db/libsql.ts'
 import type { Db, RunResult, SqlValue, Statement } from '../src/db/types.ts'
 import { type Deps, createDeps } from '../src/deps.ts'
+import type { ConfirmationProbe } from '../src/confirmation.ts'
+import type { TcpConnector } from '../src/evaluate/tcp.ts'
 import { migrate } from '../src/schema.ts'
 
 export type DbKind = 'libsql' | 'd1'
@@ -121,7 +123,7 @@ export function testConfig(overrides: Partial<StatusPingConfig> = {}): StatusPin
 
 export function makeDeps(
   db: Db,
-  opts: { config?: StatusPingConfig; fetch?: typeof fetch; env?: Record<string, string> } = {},
+  opts: { config?: StatusPingConfig; fetch?: typeof fetch; env?: Record<string, string>; confirmationProbe?: ConfirmationProbe; location?: string; tcpConnect?: TcpConnector } = {},
 ): Deps {
   const env: Record<string, string> = { PING_TOKENS: JSON.stringify(TEST_TOKENS), ...opts.env }
   return createDeps({
@@ -129,6 +131,9 @@ export function makeDeps(
     config: opts.config ?? testConfig(),
     getEnv: (n) => env[n],
     fetch: opts.fetch ?? fakeFetch().fn,
+    confirmationProbe: opts.confirmationProbe,
+    location: opts.location,
+    tcpConnect: opts.tcpConnect,
     log: () => {},
   })
 }

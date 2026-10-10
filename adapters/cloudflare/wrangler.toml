@@ -12,6 +12,16 @@ binding = "DB"
 database_name = "statusping"
 database_id = "00000000-0000-0000-0000-000000000000"
 
+# Optional only for monitors configured with `confirm: { regions, quorum }`.
+# The object reports its actual colo; hints are advisory and quorum deduplicates it.
+[[durable_objects.bindings]]
+name = "REGIONAL_PROBE"
+class_name = "RegionalProbe"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["RegionalProbe"]
+
 # Custom domain (zone must be on Cloudflare). Uncomment after the first deploy.
 # [[routes]]
 # pattern = "statusp.ing"

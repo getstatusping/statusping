@@ -170,6 +170,17 @@ export const MIGRATIONS: string[][] = [
     )`,
     `CREATE INDEX IF NOT EXISTS subscriber_outbox_pending ON subscriber_outbox(ok, created_at)`,
   ],
+  [
+    `CREATE TABLE IF NOT EXISTS confirmation_results (
+      monitor_id TEXT NOT NULL,
+      tick_at    INTEGER NOT NULL,
+      location   TEXT NOT NULL,
+      ok         INTEGER CHECK (ok IN (0, 1)),
+      error      TEXT,
+      PRIMARY KEY (monitor_id, tick_at, location)
+    )`,
+    `CREATE INDEX IF NOT EXISTS confirmation_results_monitor_time ON confirmation_results(monitor_id, tick_at DESC)`,
+  ],
 ]
 
 export const SCHEMA_VERSION = MIGRATIONS.length
