@@ -9,6 +9,20 @@ permissions:
   contents: read
 
 jobs:
+  test:
+    name: Test and type-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: npm test
+      - run: npm run typecheck
+
   build:
     name: Install and dry-run deploy
     runs-on: ubuntu-latest
