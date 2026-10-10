@@ -6,6 +6,7 @@ import { evaluatePush } from './evaluate/push.ts'
 import { runExpiryChecks } from './expiry/run.ts'
 import { dispatchNotifications } from './notify/dispatch.ts'
 import { activeMaintenance } from './maintenance.ts'
+import { rollupLatency } from './latency.ts'
 import { maybeRunRetention } from './retention.ts'
 import { ensureSchema } from './schema.ts'
 import { type MonitorStateRow, applyTransition, loadStates } from './state.ts'
@@ -149,6 +150,12 @@ export async function tick(deps: Deps, nowMs: number = Date.now()): Promise<Tick
   if (results.length) {
     await deps.db.run(`UPDATE tick_results SET results_json = ? WHERE tick_at = ?`, [JSON.stringify(results), tickAt])
   }
+
+  await rollupLatency(
+    deps.db,
+    monitors.filter((m): m is HttpMonitor => m.kind === 'http'),
+    now,
+  )
 
   await runExpiryChecks(deps, now)
 

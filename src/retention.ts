@@ -10,6 +10,8 @@ export const RETENTION = {
   pingsKeepMax: 1000,
   notifications: 90 * DAY,
   incidents: 400 * DAY,
+  latencyHourly: 7 * DAY,
+  latencyDaily: 90 * DAY,
 }
 
 /** Prunes old rows once per UTC day, on the first tick after 00:05. */
@@ -29,6 +31,8 @@ export async function maybeRunRetention(deps: Deps, now: number): Promise<boolea
 export async function runRetention(deps: Deps, now: number): Promise<void> {
   await deps.db.batch([
     { sql: `DELETE FROM tick_results WHERE tick_at < ?`, params: [now - RETENTION.tickResults] },
+    { sql: `DELETE FROM latency_hourly WHERE hour < ?`, params: [now - RETENTION.latencyHourly] },
+    { sql: `DELETE FROM latency_daily WHERE day < ?`, params: [now - RETENTION.latencyDaily] },
     {
       sql: `DELETE FROM pings WHERE id IN (
               SELECT id FROM (

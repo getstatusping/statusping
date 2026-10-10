@@ -57,6 +57,29 @@ describe('HTTP routes (no sign-in configured)', () => {
     expect(detail).not.toContain('<script>x</script>')
   })
 
+  it('maps page-scoped latency rollups into daily bars and the 24-hour response-time trend', async () => {
+    const config = testConfig({ pages: [{ slug: 'status', title: 'Status', show: ['uptime', 'response-time'], monitors: ['site'] }] })
+    const { app, deps } = await setup({ config })
+    const now = Math.floor(Date.now() / 1000)
+    const hour = Math.floor(now / 3600) * 3600 - 3600
+    const day = now - (now % 86_400) - 86_400
+    await db.run(`INSERT INTO latency_hourly (monitor_id, hour, avg_ms, p95_ms, samples) VALUES (?, ?, ?, ?, ?)`, ['site', hour, 123, 180, 4])
+    await db.run(`INSERT INTO latency_daily (monitor_id, day, avg_ms, samples) VALUES (?, ?, ?, ?)`, ['site', day, 111, 96])
+    // This must not leak through a page scoped to Site.
+    await db.run(`INSERT INTO latency_hourly (monitor_id, hour, avg_ms, p95_ms, samples) VALUES (?, ?, ?, ?, ?)`, ['backup-db', hour, 999, 999, 1])
+
+    const data = await loadStatusData(deps, now, ['site'])
+    const site = data.groups.flatMap((group) => group.monitors).find((monitor) => monitor.monitor.id === 'site')!
+    expect(site.latency24h.at(-1)).toMatchObject({ hour, avgMs: 123, p95Ms: 180, samples: 4 })
+    expect(site.bars.find((bar) => bar.day === new Date(day * 1000).toISOString().slice(0, 10))?.avgLatencyMs).toBe(111)
+
+    const body = await (await app.request('/')).text()
+    expect(body).toContain('class="latency-trend"')
+    expect(body).toContain('Response time <span>24h</span>')
+    expect(body).toContain('Average response 111 ms')
+    expect(body).not.toContain('999 ms')
+  })
+
   it('times are emitted as <time datetime> elements plus a script that localizes them', async () => {
     const { app } = await setup()
     const body = await (await app.request('/')).text()

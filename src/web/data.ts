@@ -16,6 +16,16 @@ export interface DayBar {
   outages: DayOutage[]
   /** Planned maintenance overlapping this day, including healthy maintenance. */
   maintenance: DayMaintenance[]
+  /** The sample-weighted response-time mean for this UTC day, when rolled up. */
+  avgLatencyMs: number | null
+}
+
+/** One closed hourly response-time bucket. A null average represents a genuine gap. */
+export interface LatencyHour {
+  hour: number
+  avgMs: number | null
+  p95Ms: number | null
+  samples: number
 }
 
 export interface DayMaintenance {
@@ -64,6 +74,8 @@ export interface MonitorView {
   bars: DayBar[]
   uptime90: number | null
   uptime24h: number | null
+  /** The last 24 closed UTC hours, oldest first. HTTP monitors only have samples. */
+  latency24h: LatencyHour[]
   /** Currently active non-outage incidents, shown as amber monitor warnings. */
   warnings: IncidentView[]
   /** Windows currently affecting this monitor. */
@@ -86,6 +98,21 @@ export interface StatusData {
 interface MonitorRow {
   id: string
   created_at: number
+}
+
+interface LatencyHourlyRow {
+  monitor_id: string
+  hour: number
+  avg_ms: number
+  p95_ms: number
+  samples: number
+}
+
+interface LatencyDailyRow {
+  monitor_id: string
+  day: number
+  avg_ms: number
+  samples: number
 }
 
 function mergedSeconds(intervals: readonly { start: number; end: number }[], from: number, to: number): number {
@@ -200,7 +227,28 @@ export async function lastTickAt(deps: Deps): Promise<number | null> {
 export async function loadStatusData(deps: Deps, now: number, monitorIds?: readonly string[]): Promise<StatusData> {
   const { db, config } = deps
   const since = now - HISTORY_DAYS * DAY
-  const [rows, states, incidentRows, tick] = await Promise.all([
+  const wanted = monitorIds ? new Set(monitorIds) : null
+  const httpIds = config.monitors
+    .filter((monitor): monitor is Extract<Monitor, { kind: 'http' }> => monitor.kind === 'http' && (!wanted || wanted.has(monitor.id)))
+    .map((monitor) => monitor.id)
+  const hourStart = Math.floor(now / 3600) * 3600 - 24 * 3600
+  const todayStart = now - (now % DAY)
+  const placeholders = httpIds.map(() => '?').join(', ')
+  const latencyHourly = httpIds.length
+    ? db.all<LatencyHourlyRow>(
+        `SELECT monitor_id, hour, avg_ms, p95_ms, samples FROM latency_hourly
+         WHERE monitor_id IN (${placeholders}) AND hour >= ? AND hour < ?`,
+        [...httpIds, hourStart, hourStart + 24 * 3600],
+      )
+    : Promise.resolve([] as LatencyHourlyRow[])
+  const latencyDaily = httpIds.length
+    ? db.all<LatencyDailyRow>(
+        `SELECT monitor_id, day, avg_ms, samples FROM latency_daily
+         WHERE monitor_id IN (${placeholders}) AND day >= ? AND day < ?`,
+        [...httpIds, todayStart - 90 * DAY, todayStart],
+      )
+    : Promise.resolve([] as LatencyDailyRow[])
+  const [rows, states, incidentRows, tick, hourlyRows, dailyRows] = await Promise.all([
     db.all<MonitorRow>(`SELECT id, created_at FROM monitors WHERE paused = 0`),
     db.all<MonitorStateRow>(`SELECT * FROM monitor_state`),
     db.all<{ id: number; monitor_id: string; reason: IncidentReason; severity: 'outage' | 'warning'; detail: string | null; started_at: number; resolved_at: number | null }>(
@@ -209,6 +257,8 @@ export async function loadStatusData(deps: Deps, now: number, monitorIds?: reado
       [since],
     ),
     lastTickAt(deps),
+    latencyHourly,
+    latencyDaily,
   ])
   const created = new Map(rows.map((r) => [r.id, r.created_at]))
   const stateById = new Map(states.map((s) => [s.monitor_id, s]))
@@ -219,13 +269,23 @@ export async function loadStatusData(deps: Deps, now: number, monitorIds?: reado
     incidentsBy.set(r.monitor_id, list)
   }
 
-  const todayStart = now - (now % DAY)
+  const hourlyByMonitor = new Map<string, Map<number, LatencyHourlyRow>>()
+  for (const row of hourlyRows) {
+    const rows = hourlyByMonitor.get(row.monitor_id) ?? new Map<number, LatencyHourlyRow>()
+    rows.set(row.hour, row)
+    hourlyByMonitor.set(row.monitor_id, rows)
+  }
+  const dailyByMonitor = new Map<string, Map<number, LatencyDailyRow>>()
+  for (const row of dailyRows) {
+    const rows = dailyByMonitor.get(row.monitor_id) ?? new Map<number, LatencyDailyRow>()
+    rows.set(row.day, row)
+    dailyByMonitor.set(row.monitor_id, rows)
+  }
   const counts: Record<Status, number> = { new: 0, up: 0, late: 0, down: 0, paused: 0 }
   const groups: StatusData['groups'] = []
   const openIncidents: StatusData['openIncidents'] = []
   const openWarnings: StatusData['openWarnings'] = []
 
-  const wanted = monitorIds ? new Set(monitorIds) : null
   for (const monitor of config.monitors) {
     if (wanted && !wanted.has(monitor.id)) continue
     const createdAt = created.get(monitor.id)
@@ -234,6 +294,7 @@ export async function loadStatusData(deps: Deps, now: number, monitorIds?: reado
     const incidents = incidentsBy.get(monitor.id) ?? []
     const historyMaintenance = maintenanceOccurrences(config.maintenance, since, now, monitor.id)
     const currentMaintenance = activeMaintenanceForMonitor(config.maintenance, monitor.id, now)
+    const dailyLatency = dailyByMonitor.get(monitor.id)
     const bars: DayBar[] = []
     for (let d = HISTORY_DAYS - 1; d >= 0; d--) {
       const from = todayStart - d * DAY
@@ -244,6 +305,7 @@ export async function loadStatusData(deps: Deps, now: number, monitorIds?: reado
         downSeconds: down,
         outages: down > 0 ? outagesOn(incidents, from, from + DAY, now) : [],
         maintenance: maintenanceForDay(historyMaintenance, from, from + DAY),
+        avgLatencyMs: dailyLatency?.get(from)?.avg_ms ?? null,
       })
     }
     counts[state.status]++
@@ -263,6 +325,11 @@ export async function loadStatusData(deps: Deps, now: number, monitorIds?: reado
       bars,
       uptime90: uptimeBetween(incidents, historyMaintenance, createdAt, since, now, now).uptime,
       uptime24h: uptimeBetween(incidents, historyMaintenance, createdAt, now - DAY, now, now).uptime,
+      latency24h: Array.from({ length: 24 }, (_, index) => {
+        const hour = hourStart + index * 3600
+        const bucket = hourlyByMonitor.get(monitor.id)?.get(hour)
+        return { hour, avgMs: bucket?.avg_ms ?? null, p95Ms: bucket?.p95_ms ?? null, samples: bucket?.samples ?? 0 }
+      }),
       warnings,
       maintenance: pageMaintenance(currentMaintenance, [monitor]),
     })

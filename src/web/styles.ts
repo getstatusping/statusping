@@ -87,6 +87,13 @@ const APP_STYLES = `
 .bar-legend { display: flex; justify-content: space-between; margin-top: 6px; font-size: 12px; color: var(--muted-foreground); }
 @media (max-width: 600px) { .bar:nth-child(-n+60) { display: none; } .bar-legend span:first-child { visibility: hidden; } }
 
+/* Small, intentionally quiet rollup trend below the uptime history. */
+.latency-trend { display: flex; align-items: center; gap: 10px; margin-top: 12px; color: var(--muted-foreground); }
+.latency-label { flex: none; font-size: 12px; white-space: nowrap; }
+.latency-label span { color: var(--muted-foreground); opacity: .75; }
+.latency-trend svg { height: 28px; flex: 1; min-width: 0; overflow: visible; }
+.latency-trend path { fill: none; stroke: var(--success); stroke-width: 2; vector-effect: non-scaling-stroke; stroke-linecap: round; stroke-linejoin: round; }
+
 .pop-head { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
 .pop-head strong { font-weight: 600; }
 .pop-total { font-weight: 500; color: var(--destructive); white-space: nowrap; }

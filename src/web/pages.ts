@@ -409,18 +409,19 @@ function bar(b: DayBar, index: number, total: number, o: BarOpts): Html {
   const edge = index < total * 0.2 ? 'pop-l' : index > total * 0.8 ? 'pop-r' : ''
   const maintenance = b.maintenance.length
   const maintenanceText = maintenance ? `${maintenance} planned maintenance window${maintenance === 1 ? '' : 's'}` : ''
+  const latencyText = b.avgLatencyMs === null ? '' : ` · Average response ${b.avgLatencyMs} ms`
   if (!b.downSeconds) {
     // Healthy / no-data days: a small popover too. tabindex=-1 → opens on hover or tap, but
     // doesn't add 90 stops per monitor to keyboard Tab navigation.
     const text = b.uptime === null ? 'No data' : '100% uptime · No downtime'
-    return html`<span class="bar ${barClass(b)}${maintenance ? ' maintenance' : ''}" tabindex="-1" aria-label="${dayLabel(b.day)}: ${text}${maintenance ? ` · ${maintenanceText}` : ''}"><span class="pop ${edge}" role="tooltip"><span class="pop-head"><strong>${dayLabel(b.day)}</strong></span><span class="pop-sub">${text}</span>${maintenance ? html`<span class="pop-maintenance">${maintenanceText}</span>` : ''}</span></span>`
+    return html`<span class="bar ${barClass(b)}${maintenance ? ' maintenance' : ''}" tabindex="-1" aria-label="${dayLabel(b.day)}: ${text}${latencyText}${maintenance ? ` · ${maintenanceText}` : ''}"><span class="pop ${edge}" role="tooltip"><span class="pop-head"><strong>${dayLabel(b.day)}</strong></span><span class="pop-sub">${text}${latencyText}</span>${maintenance ? html`<span class="pop-maintenance">${maintenanceText}</span>` : ''}</span></span>`
   }
   const items = o.fields.has('incidents') ? b.outages.slice(0, MAX_POP_ITEMS) : []
   const more = o.fields.has('incidents') ? b.outages.length - items.length : 0
   return html`<span class="bar ${barClass(b)}${maintenance ? ' maintenance' : ''}" tabindex="0" aria-label="${dayLabel(b.day)}: ${summary}, ${formatDuration(b.downSeconds)} down${maintenance ? ` · ${maintenanceText}` : ''}">
     <span class="pop ${edge}" role="tooltip">
       <span class="pop-head"><strong>${dayLabel(b.day)}</strong><span class="pop-total">${formatDuration(b.downSeconds)} down</span></span>
-      <span class="pop-sub">${summary}${b.outages.length ? ` · ${b.outages.length} outage${b.outages.length === 1 ? '' : 's'}` : ''}</span>
+      <span class="pop-sub">${summary}${b.outages.length ? ` · ${b.outages.length} outage${b.outages.length === 1 ? '' : 's'}` : ''}${latencyText}</span>
       ${maintenance ? html`<span class="pop-maintenance">${maintenanceText}</span>` : ''}
       ${items.length
         ? html`<span class="pop-list">${items.map(
@@ -443,6 +444,34 @@ function bars(view: MonitorView, o: Omit<BarOpts, 'label'>): Html {
   <div class="bar-legend"><span>90 days ago</span><span>${pct(view.uptime90)} uptime</span><span>Today</span></div>`
 }
 
+/** Compact 24-hour HTTP response-time trend. Missing rollups deliberately break the line. */
+function latencyTrend(view: MonitorView): Html | '' {
+  if (view.monitor.kind !== 'http' || view.latency24h.every((bucket) => bucket.avgMs === null)) return ''
+  const values = view.latency24h.flatMap((bucket) => (bucket.avgMs === null ? [] : [bucket.avgMs]))
+  const max = Math.max(...values, 1)
+  const x = (index: number) => ((index / Math.max(view.latency24h.length - 1, 1)) * 240).toFixed(1)
+  const y = (value: number) => (28 - (value / max) * 24 - 2).toFixed(1)
+  const paths: string[] = []
+  let path = ''
+  for (const [index, bucket] of view.latency24h.entries()) {
+    if (bucket.avgMs === null) {
+      if (path) paths.push(path)
+      path = ''
+      continue
+    }
+    path += `${path ? ' L' : 'M'}${x(index)} ${y(bucket.avgMs)}`
+  }
+  if (path) paths.push(path)
+  const summary = view.latency24h
+    .filter((bucket) => bucket.avgMs !== null)
+    .map((bucket) => `${new Date(bucket.hour * 1000).toISOString().slice(11, 16)} UTC: ${bucket.avgMs} ms average${bucket.p95Ms === null ? '' : `, ${bucket.p95Ms} ms p95`}`)
+    .join('; ')
+  return html`<div class="latency-trend" role="img" aria-label="Response time over the last 24 closed hours. ${summary}">
+    <span class="latency-label">Response time <span>24h</span></span>
+    <svg viewBox="0 0 240 28" preserveAspectRatio="none" aria-hidden="true">${paths.map((d) => html`<path d="${d}"/>`)}</svg>
+  </div>`
+}
+
 function monitorRow(view: MonitorView, ctx: PageCtx, now: number): Html {
   const { monitor, state } = view
   const inMaintenance = view.maintenance.length > 0
@@ -454,6 +483,7 @@ function monitorRow(view: MonitorView, ctx: PageCtx, now: number): Html {
       ${view.warnings.length ? html`<span class="pill warning">Warning</span>` : ''}
     </div>
     ${ctx.fields.has('uptime') ? bars(view, { fields: ctx.fields, tz: ctx.timezone, now }) : ''}
+    ${ctx.fields.has('response-time') ? latencyTrend(view) : ''}
   </li>`
 }
 
@@ -734,6 +764,7 @@ export function monitorPage(d: MonitorDetail, ctx: PageCtx & { now: number }): H
     <section class="card">
       <dl class="facts">${facts.map(([k, v]) => html`<div><dt>${k}</dt><dd>${v}</dd></div>`)}</dl>
       ${fields.has('uptime') ? bars(d.view, { fields, tz, now }) : ''}
+      ${fields.has('response-time') ? latencyTrend(d.view) : ''}
     </section>
     ${maintenance}${warnings}${incidents}${pings}${checks}`,
     ctx,

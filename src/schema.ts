@@ -88,6 +88,25 @@ export const MIGRATIONS: string[][] = [
   [
     `ALTER TABLE incidents ADD COLUMN maintenance INTEGER NOT NULL DEFAULT 0`,
   ],
+  [
+    `CREATE TABLE IF NOT EXISTS latency_hourly (
+      monitor_id TEXT NOT NULL,
+      hour       INTEGER NOT NULL,
+      avg_ms     REAL NOT NULL,
+      p95_ms     INTEGER NOT NULL,
+      samples    INTEGER NOT NULL,
+      PRIMARY KEY (monitor_id, hour)
+    )`,
+    `CREATE INDEX IF NOT EXISTS latency_hourly_hour ON latency_hourly(hour)`,
+    `CREATE TABLE IF NOT EXISTS latency_daily (
+      monitor_id TEXT NOT NULL,
+      day        INTEGER NOT NULL,
+      avg_ms     REAL NOT NULL,
+      samples    INTEGER NOT NULL,
+      PRIMARY KEY (monitor_id, day)
+    )`,
+    `CREATE INDEX IF NOT EXISTS latency_daily_day ON latency_daily(day)`,
+  ],
 ]
 
 export const SCHEMA_VERSION = MIGRATIONS.length
