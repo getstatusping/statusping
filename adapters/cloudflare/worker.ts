@@ -1,4 +1,5 @@
-import config from '../../statusping.config.ts'
+import fileConfig from '../../statusping.config.ts'
+import { selectConfig } from '../../src/config.ts'
 import { type D1DatabaseLike, D1Db } from '../../src/db/d1.ts'
 import { type Deps, createDeps } from '../../src/deps.ts'
 import { tick } from '../../src/tick.ts'
@@ -19,22 +20,30 @@ interface ScheduledControllerLike {
   cron: string
 }
 
-// Built once per isolate; bindings and secrets are stable for the isolate's lifetime.
-let cached: { deps: Deps; app: ReturnType<typeof createApp> } | undefined
+// Workers may host multiple configured instances in one isolate. Cache by the actual binding
+// object, rather than letting the first request's DB/secrets/config leak into later instances.
+const cached = new WeakMap<Env, { deps: Deps; app: ReturnType<typeof createApp> }>()
 
 function init(env: Env) {
-  if (!cached) {
+  let instance = cached.get(env)
+  if (!instance) {
     const deps = createDeps({
       db: new D1Db(env.DB),
-      config,
+      // A release template can provide a config module whose default export is undefined;
+      // then this selects the per-instance JSON binding. A real config file wins everywhere.
+      config: selectConfig(fileConfig, (name) => {
+        const v = env[name]
+        return typeof v === 'string' ? v : undefined
+      }),
       getEnv: (name) => {
         const v = env[name]
         return typeof v === 'string' ? v : undefined
       },
     })
-    cached = { deps, app: createApp(deps) }
+    instance = { deps, app: createApp(deps) }
+    cached.set(env, instance)
   }
-  return cached
+  return instance
 }
 
 export default {

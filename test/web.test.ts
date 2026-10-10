@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { type StatusPingConfig, normalizeConfig } from '../src/config.ts'
 import { tick } from '../src/tick.ts'
 import { createApp } from '../src/web/app.ts'
+import { APP_VERSION } from '../src/version.ts'
 import { type CountingDb, TEST_TOKENS, createTestDb, fakeFetch, makeDeps, testConfig } from './helpers.ts'
 
 describe('HTTP routes (no sign-in configured)', () => {
@@ -146,7 +147,7 @@ describe('HTTP routes (no sign-in configured)', () => {
 
   it('healthz and POST /tick', async () => {
     const off = await setup()
-    expect(await (await off.app.request('/healthz')).json()).toMatchObject({ ok: true, role: 'primary' })
+    expect(await (await off.app.request('/healthz')).json()).toMatchObject({ ok: true, version: APP_VERSION, role: 'primary' })
     expect((await off.app.request('/tick', { method: 'POST' })).status).toBe(404)
     await close()
     const on = await setup({ env: { TICK_SECRET: 's3cret-value' } })

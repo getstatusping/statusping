@@ -6,9 +6,9 @@
  * Also the host for a self-run watchdog (STATUSPING_ROLE=watchdog), see the README.
  */
 import { createClient } from '@libsql/client'
-import config from '../../statusping.config.ts'
 import { LibsqlDb } from '../../src/db/libsql.ts'
 import { createDeps } from '../../src/deps.ts'
+import { loadNodeConfig } from './config.ts'
 import { startNodeServer } from './server.ts'
 
 const env = (name: string) => process.env[name] || undefined
@@ -17,7 +17,7 @@ const deps = createDeps({
   db: new LibsqlDb(
     createClient({ url: env('TURSO_DATABASE_URL') ?? 'file:statusping.db', authToken: env('TURSO_AUTH_TOKEN') }),
   ),
-  config,
+  config: await loadNodeConfig(env),
   getEnv: env,
 })
 

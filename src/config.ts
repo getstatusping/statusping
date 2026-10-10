@@ -190,6 +190,36 @@ export function defineConfig(config: StatusPingConfig): StatusPingConfig {
   return config
 }
 
+/**
+ * Parses the JSON form used by deployments which cannot ship a TypeScript config file.
+ * Keep this deliberately small: structural and semantic validation remains in
+ * normalizeConfig(), so both config sources produce the same validation errors.
+ */
+export function parseJsonConfig(raw: string, source = 'STATUSPING_CONFIG'): StatusPingConfig {
+  let value: unknown
+  try {
+    value = JSON.parse(raw)
+  } catch (error) {
+    throw new Error(`${source} is not valid JSON: ${(error as Error).message}`)
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(`${source} must be a JSON object`)
+  }
+  return value as StatusPingConfig
+}
+
+/** Returns the runtime JSON configuration, with a useful error if it is absent. */
+export function configFromEnv(getEnv: EnvGetter): StatusPingConfig {
+  const raw = getEnv('STATUSPING_CONFIG')
+  if (!raw) throw new Error('STATUSPING_CONFIG is not set')
+  return parseJsonConfig(raw)
+}
+
+/** Prefer a checked-in TypeScript config when one is available (the Node adapter). */
+export function selectConfig(fileConfig: StatusPingConfig | undefined, getEnv: EnvGetter): StatusPingConfig {
+  return fileConfig ?? configFromEnv(getEnv)
+}
+
 // ─── Normalized form ────────────────────────────────────────────────────────────────────────
 
 interface NormalizedBase {
@@ -293,7 +323,10 @@ function parseStatusRanges(input: number[] | string | undefined): [number, numbe
 
 export function normalizeConfig(config: StatusPingConfig): NormalizedConfig {
   const problems: string[] = []
-  const sinks = config.sinks ?? {}
+  const sinks = config.sinks && typeof config.sinks === 'object' && !Array.isArray(config.sinks) ? config.sinks : {}
+  if (config.sinks !== undefined && sinks !== config.sinks) problems.push('sinks: must be an object')
+  const groups = Array.isArray(config.groups) ? config.groups : []
+  if (!Array.isArray(config.groups)) problems.push('groups: must be an array')
   const timezone = config.timezone ?? 'UTC'
   if (!isValidTimeZone(timezone)) problems.push(`timezone: unknown timezone "${timezone}"`)
   try {
@@ -319,8 +352,16 @@ export function normalizeConfig(config: StatusPingConfig): NormalizedConfig {
   const monitors: Monitor[] = []
   let order = 0
 
-  for (const group of config.groups) {
+  for (const group of groups) {
+    if (!group || typeof group !== 'object' || !Array.isArray(group.monitors)) {
+      problems.push('each group must be an object with a monitors array')
+      continue
+    }
     for (const input of group.monitors) {
+      if (!input || typeof input !== 'object') {
+        problems.push(`group "${group.name}": each monitor must be an object`)
+        continue
+      }
       const where = `monitor "${input.id ?? '?'}"`
       const fail = (msg: string) => problems.push(`${where}: ${msg}`)
       if (!input.id || !ID_RE.test(input.id)) {
@@ -454,9 +495,10 @@ function normalizePages(
   access: NormalizedAccess | null,
   problems: string[],
 ): NormalizedPage[] {
-  const inputs: PageInput[] = config.pages ?? [
+  const inputs: PageInput[] = config.pages === undefined ? [
     { slug: 'status', title: config.title, description: config.description, access: 'public', monitors: ['*'] },
-  ]
+  ] : Array.isArray(config.pages) ? config.pages : []
+  if (config.pages !== undefined && !Array.isArray(config.pages)) problems.push('pages: must be an array')
   const seen = new Set<string>()
   return inputs.map((p) => {
     const where = `page "${p.slug}"`
@@ -521,6 +563,10 @@ function normalizeMatch(input: MatchInput | undefined, where: string, sso: boole
 
 function normalizeAccess(input: AccessInput | undefined, problems: string[]): NormalizedAccess | null {
   if (!input) return null
+  if (typeof input !== 'object' || !input.provider || typeof input.provider !== 'object') {
+    problems.push('access: must contain a provider object')
+    return null
+  }
   const p = input.provider
   const sso = p.type === 'oidc'
   if (p.type === 'cloudflare-access' && !/^[a-z0-9-]+\.cloudflareaccess\.com$/i.test(p.teamDomain)) {

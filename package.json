@@ -22,6 +22,7 @@
     "cf:deploy": "wrangler deploy --config adapters/cloudflare/wrangler.toml"
   },
   "dependencies": {
+    "@statusping/ui": "*",
     "@hono/node-server": "^2.1.4",
     "@libsql/client": "^0.18.0",
     "croner": "^10.0.1",

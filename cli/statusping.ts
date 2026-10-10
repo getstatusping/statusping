@@ -3,20 +3,23 @@
  * StatusPing CLI (Node ≥ 22.18 runs this TypeScript file directly).
  *
  *   npm run cli -- check                 validate statusping.config.ts
+ *   npm run cli -- check --json-config <file>  validate JSON config without a TS config file
+ *   npm run cli -- export-config          print statusping.config.ts as JSON
  *   npm run cli -- tokens                generate PING_TOKENS (keeps tokens already in $PING_TOKENS)
  *   npm run cli -- urls                  print ping URLs from $PING_TOKENS
  *   npm run cli -- migrate               apply the schema to $TURSO_DATABASE_URL (Node + Turso setups)
  *   npm run cli -- test-sink <name>      send a test notification through a sink
  *   npm run cli -- add-user <email>      add a Basic-auth user (keeps users already in $BASIC_AUTH_USERS)
  */
-import config from '../statusping.config.ts'
-import { normalizeConfig, parsePingTokens, resolveConfigEnv } from '../src/config.ts'
+import { readFile } from 'node:fs/promises'
+import { parseJsonConfig, normalizeConfig, parsePingTokens, resolveConfigEnv, type StatusPingConfig } from '../src/config.ts'
 import { hashPassword } from '../src/auth/providers.ts'
 import { LibsqlDb } from '../src/db/libsql.ts'
 import { createSink } from '../src/notify/sinks.ts'
 import { migrate } from '../src/schema.ts'
 import { randomToken } from '../src/util/crypto.ts'
 import { formatDuration } from '../src/util/time.ts'
+import { loadNodeConfig } from '../adapters/node/config.ts'
 
 const [command, ...args] = process.argv.slice(2)
 const getEnv = (name: string) => process.env[name]
@@ -27,7 +30,21 @@ function fail(message: string): never {
 }
 
 async function main() {
-  const normalized = normalizeConfig(resolveConfigEnv(config, getEnv, true))
+  let sourceConfig: StatusPingConfig
+  if (command === 'check' && args[0] === '--json-config') {
+    const path = args[1] ?? fail('usage: check --json-config <file>')
+    if (args[2]) fail('usage: check --json-config <file>')
+    let raw: string
+    try {
+      raw = await readFile(path, 'utf8')
+    } catch (error) {
+      fail(`cannot read JSON config "${path}": ${(error as Error).message}`)
+    }
+    sourceConfig = parseJsonConfig(raw, path)
+  } else {
+    sourceConfig = await loadNodeConfig(getEnv)
+  }
+  const normalized = normalizeConfig(resolveConfigEnv(sourceConfig, getEnv, true))
   const pushMonitors = normalized.monitors.filter((m) => m.kind === 'push')
 
   switch (command) {
@@ -50,6 +67,11 @@ async function main() {
       if (perTick > normalized.limits.maxChecksPerTick) {
         console.warn(`! ${perTick} HTTP checks run every minute; only ${normalized.limits.maxChecksPerTick} fit in one tick`)
       }
+      break
+    }
+
+    case 'export-config': {
+      console.log(JSON.stringify(sourceConfig, null, 2))
       break
     }
 
@@ -120,7 +142,7 @@ async function main() {
     }
 
     default:
-      console.log('usage: statusping <check | tokens | urls | migrate | test-sink <name> | add-user <email>>')
+      console.log('usage: statusping <check [--json-config <file>] | export-config | tokens | urls | migrate | test-sink <name> | add-user <email>>')
       process.exit(command ? 1 : 0)
   }
 }

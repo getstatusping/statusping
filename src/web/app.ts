@@ -10,6 +10,7 @@ import { ensureSchema } from '../schema.ts'
 import { tick } from '../tick.ts'
 import { timingSafeEqual } from '../util/crypto.ts'
 import { nowSeconds } from '../util/time.ts'
+import { APP_VERSION } from '../version.ts'
 import { type StatusData, lastTickAt, loadMonitorDetail, loadStatusData } from './data.ts'
 import { buildChrome } from './chrome.ts'
 import { type PageCtx, messagePage, monitorPage, statusPage } from './pages.ts'
@@ -113,7 +114,7 @@ export function createApp(deps: Deps): Hono {
       const last = await lastTickAt(deps)
       const lag = last === null ? null : now - last
       const ok = lag !== null && lag <= STALE_TICK_SECONDS
-      return c.json({ ok, role: deps.role, lastTickAt: last, lagSeconds: lag }, ok ? 200 : 503, {
+      return c.json({ ok, version: APP_VERSION, role: deps.role, lastTickAt: last, lagSeconds: lag }, ok ? 200 : 503, {
         'cache-control': 'no-store',
       })
     } catch (e) {
