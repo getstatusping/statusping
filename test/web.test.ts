@@ -355,7 +355,8 @@ describe('bar popovers', () => {
     const now = Math.floor(Date.now() / 1000)
     await tick(deps, (now - 100 * 86400) * 1000) // monitors exist for 100 days
     const add = (id: string, reason: string, detail: string, daysAgo: number, minutes: number | null) => {
-      const start = now - daysAgo * 86400
+      // Keep short test outages away from midnight so their daily aggregate is deterministic.
+      const start = now - daysAgo * 86400 - 12 * 3600
       return db.run(`INSERT INTO incidents (monitor_id, reason, detail, started_at, resolved_at) VALUES (?, ?, ?, ?, ?)`, [
         id, reason, detail, start, minutes === null ? null : start + minutes * 60,
       ])

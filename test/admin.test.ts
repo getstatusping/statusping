@@ -6,6 +6,7 @@ import { tick } from '../src/tick.ts'
 import { syncConfig } from '../src/sync.ts'
 import { authorizeAdminToken, isAdminEnabled, issueCsrfToken, validateAdminConfig, validateAdminSecrets, verifyCsrfToken } from '../src/admin/security.ts'
 import { listAudit, loadAdminConfig, redactAdminValue, rotatePingToken, saveAdminConfig, seedAdminConfig, sendSinkTest } from '../src/admin/service.ts'
+import { stringifyAdminYaml } from '../src/admin/yaml.ts'
 import { createTestDb, makeDeps, testConfig } from './helpers.ts'
 
 const adminConfig = () => ({
@@ -119,6 +120,8 @@ describe('admin secure configuration', () => {
     expect(page.status).toBe(200)
     const pageText = await page.text()
     expect(pageText).toContain('Administration')
+    expect(pageText).toContain('Import a YAML file')
+    expect(pageText).toContain('StatusPing YAML configuration')
     expect(pageText).toContain('Generate / rotate')
     expect(pageText).toContain('Send test')
     expect(pageText).not.toContain('https://slack.test')
@@ -127,6 +130,16 @@ describe('admin secure configuration', () => {
     expect(api.status).toBe(200)
     const apiBody = await api.json() as { config: Record<string, unknown> }
     expect(apiBody).toMatchObject({ config: { admin: true, sinks: { slack: { webhookUrl: { $env: 'SLACK_WEBHOOK_URL' } } } } })
+    const csrf = pageText.match(/name="csrf" value="([^"]+)"/)?.[1]
+    expect(csrf).toBeTruthy()
+    const yamlUpdate = await app.request('/admin/config', {
+      method: 'POST',
+      headers: { cookie, origin: 'http://localhost', 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ csrf: csrf!, config: stringifyAdminYaml({ ...apiBody.config, title: 'Changed from YAML' }) }).toString(),
+    })
+    expect(yamlUpdate.status).toBe(303)
+    const yamlSaved = await app.request('/api/admin/config', { headers: { authorization: 'Bearer admin-api-token' } })
+    expect((await yamlSaved.json() as { config: { title: string } }).config.title).toBe('Changed from YAML')
     // A management client can safely round-trip a config: it sees env names, never values.
     const unchanged = await app.request('/api/admin/config', { method: 'PUT', headers: { authorization: 'Bearer admin-api-token', 'content-type': 'application/json' }, body: JSON.stringify(apiBody.config) })
     expect(unchanged.status).toBe(200)

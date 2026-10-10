@@ -6,6 +6,7 @@ import { nowSeconds } from '../util/time.ts'
 import { adminPage, pingTokenPage } from './ui.ts'
 import { appendAudit, listAudit, loadAdminConfig, rotatePingToken, saveAdminConfig, sendSinkTest } from './service.ts'
 import { authorizeAdminToken, canAdmin, issueCsrfToken, verifyCsrfToken } from './security.ts'
+import { parseAdminYaml } from './yaml.ts'
 
 const noStore = { 'cache-control': 'no-store' }
 
@@ -26,12 +27,12 @@ export function mountAdminRoutes(app: Hono, deps: Deps): void {
     return authorizeAdminToken(c.req.header('authorization'), deps.getEnv)
   }
   const storedConfig = async () => (await loadAdminConfig(deps.db))?.config ?? deps.configInput
-  const ui = async (viewer: NonNullable<Awaited<ReturnType<typeof currentViewer>>>, csrf: string, message?: string) => {
+  const ui = async (viewer: NonNullable<Awaited<ReturnType<typeof currentViewer>>>, csrf: string, message?: string, configText?: string) => {
     const config = await storedConfig()
     // Config values are safe here: validation admits only environment *names* for every secret
     // field. Audit records use redaction separately. Presentation-only fields would break an
     // unchanged textarea round-trip, so never add them here.
-    return adminPage({ viewer, csrf, config, audit: await listAudit(deps.db, 50), message, sinkNames: Object.keys(config.sinks ?? {}), monitorIds: deps.config.monitors.filter((monitor) => monitor.kind === 'push').map((monitor) => monitor.id) })
+    return adminPage({ viewer, csrf, config, configText, audit: await listAudit(deps.db, 50), message, sinkNames: Object.keys(config.sinks ?? {}), monitorIds: deps.config.monitors.filter((monitor) => monitor.kind === 'push').map((monitor) => monitor.id) })
   }
   const bodyJson = async (c: Context): Promise<unknown | null> => {
     try { return await c.req.json() } catch { return null }
@@ -53,14 +54,18 @@ export function mountAdminRoutes(app: Hono, deps: Deps): void {
     if (!sameOrigin(c, deps)) return c.text('Forbidden', 403, noStore)
     const form = await c.req.parseBody().catch(() => ({})) as Record<string, unknown>
     if (!(await verifyCsrfToken(deps.db, c, form.csrf, nowSeconds()))) return c.text('Forbidden', 403, noStore)
+    const configText = typeof form.config === 'string' ? form.config : ''
     let parsed: unknown
-    try { parsed = JSON.parse(typeof form.config === 'string' ? form.config : '') } catch { return c.text('Configuration must be valid JSON.', 400, noStore) }
+    try { parsed = parseAdminYaml(configText) } catch (error) {
+      const csrf = await issueCsrfToken(deps.db, c, nowSeconds())
+      return c.html(await ui(viewer, csrf ?? '', error instanceof Error ? error.message : String(error), configText), 400, noStore)
+    }
     try {
       await saveAdminConfig(deps.db, parsed, viewer.email, nowSeconds(), deps.getEnv)
       await refreshAdminConfig(deps, nowSeconds())
     } catch (error) {
       const csrf = await issueCsrfToken(deps.db, c, nowSeconds())
-      return c.html(await ui(viewer, csrf ?? '', (error as Error).message), 400, noStore)
+      return c.html(await ui(viewer, csrf ?? '', (error as Error).message, configText), 400, noStore)
     }
     return c.redirect('/admin', 303)
   })
