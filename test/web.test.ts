@@ -297,7 +297,10 @@ describe('HTTP routes (no sign-in configured)', () => {
     const data = await loadStatusData(deps, now, ['site'])
     const site = data.groups[0]!.monitors[0]!
     expect(site.uptime24h).toBe(1)
-    expect(site.bars.at(-1)!.maintenance).toHaveLength(3)
+    // The clock may be just after midnight, so a window can live in the
+    // preceding day bar or be split across two bars. All three source windows
+    // must still render.
+    expect(new Set(site.bars.flatMap((bar) => bar.maintenance.map((window) => window.title)))).toEqual(new Set(['Database migration', 'Network work', 'Live deploy']))
     expect(data.activeMaintenance).toEqual(expect.arrayContaining([expect.objectContaining({ title: 'Live deploy' })]))
 
     // Use a distinct request URL so this public response cannot be a 30-second edge-cache
