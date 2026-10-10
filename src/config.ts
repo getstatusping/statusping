@@ -1,9 +1,12 @@
 import { Cron } from 'croner'
+import { parseJsonPath } from './evaluate/json.ts'
 import { isValidTimeZone, parseDuration } from './util/time.ts'
 
 // ─── Public config types (what users write in statusping.config.ts) ────────────────────────
 
 export type Duration = number | string
+/** Values accepted by JSON response assertions. */
+export type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue }
 export interface EnvRef {
   readonly $env: string
   readonly optional?: boolean
@@ -120,12 +123,26 @@ export interface HttpMonitorInput extends MonitorBase {
   keyword?: string
   /** If true, the body must NOT contain `keyword`. */
   invertKeyword?: boolean
+  /** Assertions evaluated against a JSON response body. */
+  json?: JsonAssertionInput[]
   /** Consecutive failed checks tolerated before marking down. Default 0. */
   retries?: number
   /** Certificate-expiry warnings. Enabled by default for HTTPS monitors; set false to disable. */
   sslExpiry?: false | { warnDays?: number[] }
   /** Domain-registration expiry warnings. Disabled unless configured. */
   domainExpiry?: { warnDays?: number[] }
+}
+
+/** One deliberately small JSONPath assertion. Exactly one operator must be supplied. */
+export interface JsonAssertionInput {
+  /** Dot properties, quoted bracket properties, and numeric array indexes are supported. */
+  path: string
+  equals?: JsonValue
+  notEquals?: JsonValue
+  contains?: JsonValue
+  lessThan?: number
+  greaterThan?: number
+  exists?: boolean
 }
 
 export interface TcpMonitorInput extends MonitorBase {
@@ -306,11 +323,17 @@ export interface HttpMonitor extends NormalizedBase {
   expectStatus: [number, number][]
   keyword: string | null
   invertKeyword: boolean
+  json: NormalizedJsonAssertion[]
   retries: number
   /** Days before expiry which open an amber certificate warning. */
   sslWarnDays: number[] | null
   /** Days before expiry which open an amber domain-registration warning. */
   domainWarnDays: number[] | null
+}
+export interface NormalizedJsonAssertion {
+  path: string
+  operator: 'equals' | 'notEquals' | 'contains' | 'lessThan' | 'greaterThan' | 'exists'
+  expected: JsonValue | boolean
 }
 export interface TcpMonitor extends NormalizedBase {
   kind: 'tcp'
@@ -423,6 +446,63 @@ function normalizeWarnDays(input: number[] | undefined, fallback: number[], wher
   }
   if (new Set(days).size !== days.length) fail(`${where}.warnDays must not contain duplicates`)
   return [...days].sort((a, b) => b - a)
+}
+
+const JSON_OPERATORS = ['equals', 'notEquals', 'contains', 'lessThan', 'greaterThan', 'exists'] as const
+
+function isJsonValue(value: unknown): value is JsonValue {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return true
+  if (typeof value === 'number') return Number.isFinite(value)
+  if (Array.isArray(value)) return value.every(isJsonValue)
+  return !!value && typeof value === 'object' && Object.getPrototypeOf(value) === Object.prototype && Object.values(value).every(isJsonValue)
+}
+
+function normalizeJsonAssertions(input: unknown, fail: (message: string) => void): NormalizedJsonAssertion[] {
+  if (input === undefined) return []
+  if (!Array.isArray(input)) {
+    fail('json must be an array of assertions')
+    return []
+  }
+  const assertions: NormalizedJsonAssertion[] = []
+  for (const [index, assertion] of input.entries()) {
+    const where = `json[${index}]`
+    if (!assertion || typeof assertion !== 'object' || Array.isArray(assertion)) {
+      fail(`${where} must be an object`)
+      continue
+    }
+    const record = assertion as Record<string, unknown>
+    if (typeof record.path !== 'string' || !record.path) {
+      fail(`${where}.path must be a non-empty JSONPath string`)
+      continue
+    }
+    try {
+      parseJsonPath(record.path)
+    } catch (error) {
+      fail(`${where}.path "${record.path}" is not supported: ${(error as Error).message}`)
+      continue
+    }
+    const operators = JSON_OPERATORS.filter((operator) => Object.prototype.hasOwnProperty.call(record, operator))
+    if (operators.length !== 1) {
+      fail(`${where} must specify exactly one operator (${JSON_OPERATORS.join(', ')})`)
+      continue
+    }
+    const operator = operators[0]!
+    const expected = record[operator]
+    if (operator === 'exists') {
+      if (typeof expected !== 'boolean') {
+        fail(`${where}.exists must be true or false`)
+        continue
+      }
+    } else if ((operator === 'lessThan' || operator === 'greaterThan') && (typeof expected !== 'number' || !Number.isFinite(expected))) {
+      fail(`${where}.${operator} must be a finite number`)
+      continue
+    } else if (!isJsonValue(expected)) {
+      fail(`${where}.${operator} must be a JSON value`)
+      continue
+    }
+    assertions.push({ path: record.path, operator, expected: expected as JsonValue | boolean })
+  }
+  return assertions
 }
 
 export function normalizeConfig(config: StatusPingConfig): NormalizedConfig {
@@ -585,6 +665,7 @@ export function normalizeConfig(config: StatusPingConfig): NormalizedConfig {
           const domainWarnDays = input.domainExpiry
             ? normalizeWarnDays(input.domainExpiry.warnDays, [30, 7], 'domainExpiry', fail)
             : null
+          const json = normalizeJsonAssertions(input.json, fail)
           monitors.push({
             ...base,
             kind: 'http',
@@ -597,6 +678,7 @@ export function normalizeConfig(config: StatusPingConfig): NormalizedConfig {
             expectStatus: parseStatusRanges(input.expectStatus),
             keyword: input.keyword ?? null,
             invertKeyword: input.invertKeyword ?? false,
+            json,
             retries: Math.max(0, Math.floor(input.retries ?? 0)),
             sslWarnDays,
             domainWarnDays,

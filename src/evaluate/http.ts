@@ -1,8 +1,10 @@
 import type { HttpMonitor } from '../config.ts'
 import { fnv1a } from '../util/crypto.ts'
+import { assertJson } from './json.ts'
 
 export const USER_AGENT = 'StatusPing/0.1 (+https://statusp.ing)'
 const MAX_BODY_BYTES = 2 * 1024 * 1024
+const MAX_JSON_BYTES = 1024 * 1024
 
 export interface CheckResult {
   id: string
@@ -84,7 +86,16 @@ export async function runHttpCheck(monitor: HttpMonitor, fetchFn: typeof fetch):
       return result(false, res.status, monitor.invertKeyword ? `keyword "${monitor.keyword}" found` : `keyword "${monitor.keyword}" not found`, ms)
     }
   } else {
-    res.body?.cancel().catch(() => {})
+    if (monitor.json.length) {
+      const body = await res.text()
+      if (body.length > MAX_JSON_BYTES) return result(false, res.status, 'JSON response exceeds 1 MB limit', ms)
+      try {
+        const failure = assertJson(JSON.parse(body), monitor.json)
+        if (failure) return result(false, res.status, failure, ms)
+      } catch (e) {
+        return result(false, res.status, `invalid JSON response: ${(e as Error).message}`, ms)
+      }
+    } else res.body?.cancel().catch(() => {})
   }
   return result(true, res.status, null, ms)
 }
