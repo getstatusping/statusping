@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { ConfigError, configFromEnv, normalizeConfig, parseJsonConfig, selectConfig } from '../src/config.ts'
+import { ConfigError, configFromEnv, env, normalizeConfig, parseJsonConfig, selectConfig } from '../src/config.ts'
 import type { PushMonitor } from '../src/config.ts'
 import { evaluatePush } from '../src/evaluate/push.ts'
 import { isDue } from '../src/evaluate/http.ts'
@@ -111,6 +111,19 @@ describe('config validation', () => {
       'sinks.hook.url: must be http(s)',
       'sinks.hook.headers: all values must be strings',
     ]))
+  })
+
+  it('validates email sink recipients and Resend provider settings', () => {
+    const valid = normalizeConfig(testConfig({
+      sinks: {
+        email: { type: 'email', to: ['ops@example.com'], via: { provider: 'resend', apiKey: env('RESEND_KEY'), from: 'alerts@example.com' } },
+      },
+    }))
+    expect(valid.sinks.email).toMatchObject({ type: 'email', to: ['ops@example.com'] })
+
+    expect(() => normalizeConfig(testConfig({
+      sinks: { email: { type: 'email', to: [], via: { provider: 'postmark', apiKey: 'x', from: 'not-an-email' } as never } },
+    }))).toThrow(/sinks\.email\.to: must contain one or more email addresses/)
   })
 
   it('reports all problems at once', () => {

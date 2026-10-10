@@ -94,6 +94,49 @@ describe('sinks', () => {
     expect(await crypto.subtle.verify('HMAC', key, signature, new TextEncoder().encode(call.body!))).toBe(true)
   })
 
+  it('Discord and Slack post their documented rich messages and scrub webhook URLs', async () => {
+    const f = fakeFetch(() => new Response('ok'))
+    const discordUrl = 'https://discord.com/api/webhooks/secret-token'
+    await createSink('discord', { type: 'discord', webhookUrl: discordUrl }, getEnv).send(down, f.fn)
+    expect(f.calls[0]).toMatchObject({ url: discordUrl, method: 'POST' })
+    expect(JSON.parse(f.calls[0]!.body!)).toMatchObject({ embeds: [{ title: down.title, url: down.url, color: 0xef4444 }] })
+
+    const slackUrl = 'https://hooks.slack.com/services/T000/B000/secret-token'
+    await createSink('slack', { type: 'slack', webhookUrl: slackUrl }, getEnv).send(down, f.fn)
+    const slack = JSON.parse(f.calls[1]!.body!)
+    expect(slack.blocks).toMatchObject([
+      { type: 'header' },
+      { type: 'section' },
+      { type: 'actions', elements: [{ url: down.url }] },
+    ])
+
+    const failing = fakeFetch(() => { throw new Error(`failed ${discordUrl}`) })
+    const error = await createSink('discord', { type: 'discord', webhookUrl: discordUrl }, getEnv).send(down, failing.fn).catch((e: Error) => e)
+    expect((error as Error).message).toContain('***')
+    expect((error as Error).message).not.toContain('secret-token')
+  })
+
+  it('email uses the Cloudflare binding or Resend HTTP API', async () => {
+    const delivered: Array<{ to: string[]; subject: string; text: string; html: string }> = []
+    const cloudflare = { send: async (message: { to: string[]; subject: string; text: string; html: string }) => { delivered.push(message) } }
+    await createSink('mail', { type: 'email', to: ['ops@example.com'], via: 'cloudflare' }, getEnv, cloudflare).send(down, fakeFetch().fn)
+    expect(delivered).toEqual([expect.objectContaining({ to: ['ops@example.com'], subject: down.title, text: expect.stringContaining(down.url) })])
+
+    const f = fakeFetch(() => new Response('{"id":"email_1"}', { status: 200 }))
+    await createSink('mail', { type: 'email', to: ['ops@example.com'], via: { provider: 'resend', apiKey: 're_secret_abcdef', from: 'StatusPing <alerts@example.com>' } }, getEnv).send(down, f.fn)
+    expect(f.calls[0]!.url).toBe('https://api.resend.com/emails')
+    expect(f.calls[0]!.headers.authorization).toBe('Bearer re_secret_abcdef')
+    expect(JSON.parse(f.calls[0]!.body!)).toMatchObject({ to: ['ops@example.com'], subject: down.title, from: 'StatusPing <alerts@example.com>' })
+
+    const resendFailure = fakeFetch(() => { throw new Error('authorization failed for re_secret_abcdef') })
+    const resendError = await createSink('mail', { type: 'email', to: ['ops@example.com'], via: { provider: 'resend', apiKey: 're_secret_abcdef', from: 'alerts@example.com' } }, getEnv)
+      .send(down, resendFailure.fn).catch((e: Error) => e)
+    expect((resendError as Error).message).not.toContain('re_secret_abcdef')
+
+    const missing = await createSink('mail', { type: 'email', to: ['ops@example.com'], via: 'cloudflare' }, getEnv).send(down, f.fn).catch((e: Error) => e)
+    expect((missing as Error).message).toBe('email: Cloudflare send_email binding is unavailable')
+  })
+
   it('missing env var raises a clear error', async () => {
     const err = await createSink('po', { type: 'pushover', appToken: env('NOPE'), userKey: 'x' }, getEnv)
       .send(down, fakeFetch().fn)

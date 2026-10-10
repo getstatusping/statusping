@@ -148,6 +148,37 @@ describe('HTTP routes (no sign-in configured)', () => {
     expect((await app.request('/pages/nope')).status).toBe(404)
   })
 
+  it('renders cached, escaped SVG badges only for listed monitors on public pages', async () => {
+    const config = testConfig({
+      groups: [{ name: 'Web', monitors: [{ id: 'site', kind: 'http', name: 'Site & <prod>', url: 'https://site.test/health' }] }],
+      access: { provider: { type: 'basic' } },
+      pages: [
+        { slug: 'public', title: 'Public', access: 'public', monitors: ['site'] },
+        { slug: 'private', title: 'Private', access: { emails: ['owner@example.test'] }, monitors: ['site'] },
+      ],
+    })
+    const { app } = await setup({ config })
+    await db.run(`UPDATE monitors SET created_at = ? WHERE id = ?`, [Math.floor(Date.now() / 1000) - 3600, 'site'])
+    const status = await app.request('/badge/public/site.svg')
+    expect(status.status).toBe(200)
+    expect(status.headers.get('content-type')).toContain('image/svg+xml')
+    expect(status.headers.get('cache-control')).toBe('public, max-age=60')
+    const svg = await status.text()
+    expect(svg).toContain('Site &amp; &lt;prod&gt;')
+    expect(svg).toContain('operational')
+    expect(svg).not.toContain('Site & <prod>')
+
+    const uptime = await (await app.request('/badge/public/site.svg?style=uptime')).text()
+    expect(uptime).toContain('uptime')
+    expect(uptime).toMatch(/\d{2,3}\.\d{2}%/)
+
+    const restricted = await app.request('/badge/private/site.svg')
+    const missing = await app.request('/badge/public/nope.svg')
+    const unknownPage = await app.request('/badge/nope/site.svg')
+    expect([restricted.status, missing.status, unknownPage.status]).toEqual([404, 404, 404])
+    expect(await Promise.all([restricted.text(), missing.text(), unknownPage.text()])).toEqual(['Not found', 'Not found', 'Not found'])
+  })
+
   it('banner says "We’re fully operational" when nothing is down', async () => {
     const config = testConfig({ pages: [{ slug: 'web', title: 'Web', monitors: ['site'] }] })
     const { app } = await setup({ config })

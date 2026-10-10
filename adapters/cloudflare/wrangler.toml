@@ -30,3 +30,10 @@ STATUSPING_ROLE = "primary"
 #     oidc:              OIDC_CLIENT_ID, OIDC_CLIENT_SECRET, SESSION_SECRET (≥ 32 random chars)
 #   PEER_PING_URL          optional: watchdog pairing
 #   TICK_SECRET            optional: enables POST /tick for external schedulers
+#   STATUSPING_EMAIL_FROM  required only for the Cloudflare email sink
+
+# Optional Cloudflare Email Routing send binding for `{ type: "email", via: "cloudflare" }`.
+# Configure the allowed sender in Email Routing, then uncomment and replace the destination.
+# [[send_email]]
+# name = "SEND_EMAIL"
+# destination_address = "ops@example.com"

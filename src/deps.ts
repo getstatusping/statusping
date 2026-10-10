@@ -10,6 +10,7 @@ import {
 import type { Db } from './db/types.ts'
 import type { CertificateExpiryProvider } from './expiry/types.ts'
 import type { TcpConnector } from './evaluate/tcp.ts'
+import type { CloudflareEmailSender } from './notify/sinks.ts'
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error'
 export type Logger = (level: LogLevel, message: string, data?: Record<string, unknown>) => void
@@ -26,6 +27,8 @@ export interface Deps {
   certificateExpiry?: CertificateExpiryProvider
   /** Raw TCP connector supplied by the active runtime adapter. */
   tcpConnect?: TcpConnector
+  /** Optional Cloudflare Email Routing binding adapter. */
+  cloudflareEmail?: CloudflareEmailSender
   log: Logger
   /** Runs a promise after the response is sent where the platform supports it. */
   waitUntil?: (p: Promise<unknown>) => void
@@ -39,6 +42,7 @@ export interface CreateDepsOptions {
   log?: Logger
   certificateExpiry?: CertificateExpiryProvider
   tcpConnect?: TcpConnector
+  cloudflareEmail?: CloudflareEmailSender
 }
 
 export const consoleLogger: Logger = (level, message, data) => {
@@ -63,6 +67,7 @@ export function createDeps(opts: CreateDepsOptions): Deps {
     fetch: opts.fetch ?? fetch.bind(globalThis),
     certificateExpiry: opts.certificateExpiry,
     tcpConnect: opts.tcpConnect,
+    cloudflareEmail: opts.cloudflareEmail,
     log: opts.log ?? consoleLogger,
   }
 }

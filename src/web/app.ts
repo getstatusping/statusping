@@ -13,6 +13,7 @@ import { nowSeconds } from '../util/time.ts'
 import { APP_VERSION } from '../version.ts'
 import { type StatusData, lastTickAt, loadMonitorDetail, loadStatusData } from './data.ts'
 import { buildChrome } from './chrome.ts'
+import { renderBadge } from './badge.ts'
 import { type PageCtx, messagePage, monitorPage, statusPage } from './pages.ts'
 
 const STALE_TICK_SECONDS = 180
@@ -24,7 +25,7 @@ type Cacheable = { cacheable: boolean }
  * Serves public pages through the edge cache (Cloudflare Cache API) to save CPU and DB
  * reads. Only ever used for responses that are identical for every visitor.
  */
-async function withEdgeCache(c: Context, render: () => Promise<Response>): Promise<Response> {
+async function withEdgeCache(c: Context, render: () => Promise<Response>, maxAge = PUBLIC_MAX_AGE): Promise<Response> {
   const cacheApi = (globalThis as { caches?: CacheStorage }).caches
   let cache: Cache | undefined
   if (cacheApi) {
@@ -33,14 +34,14 @@ async function withEdgeCache(c: Context, render: () => Promise<Response>): Promi
       const hit = await cache.match(c.req.url)
       // Check freshness ourselves: not every Cache API implementation expires entries.
       const cachedAt = Number(hit?.headers.get('x-statusping-cached-at') ?? 0)
-      if (hit && Date.now() - cachedAt < PUBLIC_MAX_AGE * 1000) return hit
+      if (hit && Date.now() - cachedAt < maxAge * 1000) return hit
       if (hit) await cache.delete(c.req.url)
     } catch {
       cache = undefined
     }
   }
   const res = await render()
-  res.headers.set('cache-control', `public, max-age=${PUBLIC_MAX_AGE}`)
+  res.headers.set('cache-control', `public, max-age=${maxAge}`)
   res.headers.set('x-statusping-cached-at', String(Date.now()))
   if (cache && res.status === 200) {
     const put = cache.put(c.req.url, res.clone()).catch(() => {})
@@ -222,6 +223,26 @@ export function createApp(deps: Deps): Hono {
       },
       r.viewer,
     )
+  })
+
+  // ── Public SVG badges ────────────────────────────────────────────────────────────────────
+  // Keep every denial identical: badges must not reveal restricted pages or monitors.
+  app.get('/badge/:page/:file', async (c) => {
+    const file = c.req.param('file')
+    const monitorId = file.endsWith('.svg') ? file.slice(0, -'.svg'.length) : ''
+    const page = config.pages.find((candidate) => candidate.slug === c.req.param('page'))
+    const style = c.req.query('style') ?? 'status'
+    if (!page || page.access !== 'public' || !page.monitorIds.includes(monitorId) || (style !== 'status' && style !== 'uptime')) {
+      return c.text('Not found', 404)
+    }
+    return withEdgeCache(c, async () => {
+      const data = await loadStatusData(deps, nowSeconds(), [monitorId])
+      const view = data.groups.flatMap((group) => group.monitors).find((monitor) => monitor.monitor.id === monitorId)
+      if (!view) return c.text('Not found', 404)
+      return c.body(renderBadge(view, style), 200, {
+        'content-type': 'image/svg+xml; charset=utf-8',
+      })
+    }, 60)
   })
 
   // ── JSON API (same access rules and fields as the page) ────────────────────────────────────

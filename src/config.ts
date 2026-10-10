@@ -186,7 +186,21 @@ export interface WebhookSinkInput {
   /** HMAC-SHA256 signing secret. Sent as X-StatusPing-Signature when configured. */
   secret?: Secret
 }
-export type SinkInput = PushoverSinkInput | NtfySinkInput | TelegramSinkInput | WebhookSinkInput
+export interface DiscordSinkInput {
+  type: 'discord'
+  webhookUrl: Secret
+}
+export interface SlackSinkInput {
+  type: 'slack'
+  webhookUrl: Secret
+}
+export interface EmailSinkInput {
+  type: 'email'
+  /** Recipients must be verified when using Cloudflare Email Routing. */
+  to: string[]
+  via: 'cloudflare' | { provider: 'resend'; apiKey: Secret; from: string }
+}
+export type SinkInput = PushoverSinkInput | NtfySinkInput | TelegramSinkInput | WebhookSinkInput | DiscordSinkInput | SlackSinkInput | EmailSinkInput
 
 export type AuthProviderInput =
   /** Per-user email + password from the BASIC_AUTH_USERS secret (`npm run cli -- add-user`). */
@@ -457,6 +471,16 @@ function isJsonValue(value: unknown): value is JsonValue {
   return !!value && typeof value === 'object' && Object.getPrototypeOf(value) === Object.prototype && Object.values(value).every(isJsonValue)
 }
 
+function isEmail(value: unknown): value is string {
+  return typeof value === 'string' && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(value)
+}
+
+function isMailbox(value: unknown): value is string {
+  if (typeof value !== 'string') return false
+  const match = value.match(/^.*<([^<>]+)>$/)
+  return isEmail(match ? match[1] : value)
+}
+
 function normalizeJsonAssertions(input: unknown, fail: (message: string) => void): NormalizedJsonAssertion[] {
   if (input === undefined) return []
   if (!Array.isArray(input)) {
@@ -519,7 +543,7 @@ export function normalizeConfig(config: StatusPingConfig): NormalizedConfig {
     problems.push(`baseUrl: "${config.baseUrl}" is not a valid URL`)
   }
   for (const [name, sink] of Object.entries(sinks)) {
-    if (!['pushover', 'ntfy', 'telegram', 'webhook'].includes(sink.type)) {
+    if (!['pushover', 'ntfy', 'telegram', 'webhook', 'discord', 'slack', 'email'].includes(sink.type)) {
       problems.push(`sinks.${name}: unknown type "${(sink as { type: string }).type}"`)
     }
     if (sink.type === 'webhook') {
@@ -533,6 +557,17 @@ export function normalizeConfig(config: StatusPingConfig): NormalizedConfig {
         problems.push(`sinks.${name}.headers: must be an object`)
       } else if (sink.headers !== undefined && Object.values(sink.headers).some((value) => typeof value !== 'string')) {
         problems.push(`sinks.${name}.headers: all values must be strings`)
+      }
+    }
+    if (sink.type === 'email') {
+      if (!Array.isArray(sink.to) || sink.to.length === 0 || sink.to.some((address) => !isEmail(address))) {
+        problems.push(`sinks.${name}.to: must contain one or more email addresses`)
+      }
+      if (sink.via !== 'cloudflare') {
+        if (!sink.via || sink.via.provider !== 'resend') problems.push(`sinks.${name}.via: provider must be "resend"`)
+        else if (typeof sink.via.from !== 'string' || !isMailbox(sink.via.from)) {
+          problems.push(`sinks.${name}.via.from: must be an email address`)
+        }
       }
     }
   }

@@ -5,9 +5,11 @@ import { type Deps, createDeps } from '../../src/deps.ts'
 import { tick } from '../../src/tick.ts'
 import { createApp } from '../../src/web/app.ts'
 import { cloudflareTcpConnect } from './tcp.ts'
+import { cloudflareEmailSender } from './email.ts'
 
 interface Env {
   DB: D1DatabaseLike
+  SEND_EMAIL?: { send(message: unknown): Promise<void> }
   [key: string]: unknown
 }
 
@@ -41,6 +43,7 @@ function init(env: Env) {
         return typeof v === 'string' ? v : undefined
       },
       tcpConnect: cloudflareTcpConnect,
+      cloudflareEmail: cloudflareEmailSender(env.SEND_EMAIL, typeof env.STATUSPING_EMAIL_FROM === 'string' ? env.STATUSPING_EMAIL_FROM : undefined),
     })
     instance = { deps, app: createApp(deps) }
     cached.set(env, instance)

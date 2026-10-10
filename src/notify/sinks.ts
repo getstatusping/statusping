@@ -18,6 +18,11 @@ export interface Sink {
   send(msg: AlertMessage, fetchFn: typeof fetch): Promise<void>
 }
 
+/** Runtime adapter for Cloudflare's Email Routing `send_email` binding. */
+export interface CloudflareEmailSender {
+  send(message: { to: string[]; subject: string; text: string; html: string }): Promise<void>
+}
+
 const clip = (s: string, max: number) => (s.length > max ? `${s.slice(0, max - 1)}…` : s)
 
 const escapeHtml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -167,7 +172,84 @@ function webhook(name: string, cfg: Extract<SinkInput, { type: 'webhook' }>, get
   }
 }
 
-export function createSink(name: string, input: SinkInput, getEnv: EnvGetter): Sink {
+function discord(name: string, cfg: Extract<SinkInput, { type: 'discord' }>, getEnv: EnvGetter): Sink {
+  return {
+    name,
+    type: 'discord',
+    async send(msg, fetchFn) {
+      const webhookUrl = resolveSecret(cfg.webhookUrl, getEnv)!
+      await withScrub([webhookUrl], async () => {
+        const colour = msg.kind === 'up' ? 0x22c55e : msg.kind === 'warning' || msg.kind === 'renotify' ? 0xf59e0b : 0xef4444
+        const res = await fetchFn(webhookUrl, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ embeds: [{ title: clip(msg.title, 256), description: clip(msg.body || msg.title, 4096), url: msg.url, color: colour }] }),
+        })
+        await ensureOk(res, 'discord')
+      })
+    },
+  }
+}
+
+function slack(name: string, cfg: Extract<SinkInput, { type: 'slack' }>, getEnv: EnvGetter): Sink {
+  return {
+    name,
+    type: 'slack',
+    async send(msg, fetchFn) {
+      const webhookUrl = resolveSecret(cfg.webhookUrl, getEnv)!
+      await withScrub([webhookUrl], async () => {
+        const detail = clip(msg.body || msg.title, 2_800)
+        const res = await fetchFn(webhookUrl, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            text: msg.title,
+            blocks: [
+              { type: 'header', text: { type: 'plain_text', text: clip(msg.title, 150), emoji: true } },
+              { type: 'section', text: { type: 'mrkdwn', text: detail } },
+              { type: 'actions', elements: [{ type: 'button', text: { type: 'plain_text', text: 'Open status page' }, url: msg.url }] },
+            ],
+          }),
+        })
+        await ensureOk(res, 'slack')
+      })
+    },
+  }
+}
+
+function email(
+  name: string,
+  cfg: Extract<SinkInput, { type: 'email' }>,
+  getEnv: EnvGetter,
+  cloudflareEmail: CloudflareEmailSender | undefined,
+): Sink {
+  return {
+    name,
+    type: 'email',
+    async send(msg, fetchFn) {
+      const subject = clip(msg.title, 200)
+      const text = `${msg.body || msg.title}\n\nOpen status page: ${msg.url}`
+      const html = `<h2>${escapeHtml(subject)}</h2><p>${escapeHtml(msg.body || msg.title)}</p><p><a href="${escapeHtml(msg.url)}">Open status page</a></p>`
+      if (cfg.via === 'cloudflare') {
+        if (!cloudflareEmail) throw new Error('email: Cloudflare send_email binding is unavailable')
+        await cloudflareEmail.send({ to: cfg.to, subject, text, html })
+        return
+      }
+      const via = cfg.via
+      const apiKey = resolveSecret(via.apiKey, getEnv)!
+      await withScrub([apiKey], async () => {
+        const res = await fetchFn('https://api.resend.com/emails', {
+          method: 'POST',
+          headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
+          body: JSON.stringify({ from: via.from, to: cfg.to, subject, text, html }),
+        })
+        await ensureOk(res, 'resend')
+      })
+    },
+  }
+}
+
+export function createSink(name: string, input: SinkInput, getEnv: EnvGetter, cloudflareEmail?: CloudflareEmailSender): Sink {
   switch (input.type) {
     case 'pushover':
       return pushover(name, input, getEnv)
@@ -177,5 +259,11 @@ export function createSink(name: string, input: SinkInput, getEnv: EnvGetter): S
       return telegram(name, input, getEnv)
     case 'webhook':
       return webhook(name, input, getEnv)
+    case 'discord':
+      return discord(name, input, getEnv)
+    case 'slack':
+      return slack(name, input, getEnv)
+    case 'email':
+      return email(name, input, getEnv, cloudflareEmail)
   }
 }
