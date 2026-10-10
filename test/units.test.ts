@@ -18,6 +18,8 @@ const push = (over: Partial<PushMonitor> = {}): PushMonitor => ({
   order: 0,
   notify: [],
   critical: false,
+  renotifyEvery: null,
+  renotifyMax: null,
   kind: 'push',
   period: null,
   schedule: '0 3 * * *',
@@ -76,6 +78,33 @@ describe('config validation', () => {
     const site = c.monitors[2]!
     expect(site.kind === 'http' && site.expectStatus).toEqual([[200, 299]])
     expect(c.monitors[0]!.notify).toEqual(['ntfy'])
+  })
+
+  it('inherits re-notification defaults and validates overrides and webhooks', () => {
+    const source = testConfig({
+      defaults: { renotifyEvery: '6h', renotifyMax: 2 },
+      sinks: { hook: { type: 'webhook', url: 'https://alerts.example/hook', secret: 'test-secret' } },
+    })
+    source.groups[0]!.monitors[0]!.renotifyEvery = '1h'
+    const config = normalizeConfig(source)
+    expect(config.monitors[0]).toMatchObject({ renotifyEvery: 3600, renotifyMax: 2 })
+    expect(config.monitors[1]).toMatchObject({ renotifyEvery: 21600, renotifyMax: 2 })
+
+    const invalid = testConfig({ defaults: { renotifyEvery: '0s', renotifyMax: -1 }, sinks: { hook: { type: 'webhook', url: 'ftp://bad', headers: { retry: 3 } as unknown as Record<string, string> } } })
+    const error = (() => {
+      try {
+        normalizeConfig(invalid)
+        expect.unreachable()
+      } catch (e) {
+        return e as ConfigError
+      }
+    })()
+    expect(error.problems).toEqual(expect.arrayContaining([
+      'defaults.renotifyEvery must be greater than 0s',
+      'defaults.renotifyMax must be a non-negative integer',
+      'sinks.hook.url: must be http(s)',
+      'sinks.hook.headers: all values must be strings',
+    ]))
   })
 
   it('reports all problems at once', () => {

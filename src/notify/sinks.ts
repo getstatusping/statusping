@@ -1,11 +1,15 @@
 import { type EnvGetter, type SinkInput, resolveSecret } from '../config.ts'
 
 export interface AlertMessage {
-  kind: 'down' | 'up' | 'test'
+  kind: 'down' | 'up' | 'renotify' | 'warning' | 'test'
   title: string
   body: string
   url: string
   priority: 'high' | 'normal'
+  /** Included in generic webhook payloads. */
+  monitor?: { id: string; name: string }
+  /** Included in generic webhook payloads. Timestamps are Unix seconds. */
+  incident?: { reason: string; detail: string | null; startedAt: number; resolvedAt: number | null }
 }
 
 export interface Sink {
@@ -37,6 +41,12 @@ async function withScrub(secrets: (string | undefined)[], fn: () => Promise<void
   } catch (e) {
     throw new Error(scrub((e as Error).message ?? String(e), secrets))
   }
+}
+
+async function hmacSha256Hex(secret: string, body: string): Promise<string> {
+  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'])
+  const signature = new Uint8Array(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(body)))
+  return [...signature].map((byte) => byte.toString(16).padStart(2, '0')).join('')
 }
 
 // https://pushover.net/api — limits: title 250, message 1024, url 512, url_title 100 chars.
@@ -134,6 +144,29 @@ function telegram(name: string, cfg: Extract<SinkInput, { type: 'telegram' }>, g
   }
 }
 
+/** Generic JSON webhook. The body is kept as a string so the signature covers exactly what is sent. */
+function webhook(name: string, cfg: Extract<SinkInput, { type: 'webhook' }>, getEnv: EnvGetter): Sink {
+  return {
+    name,
+    type: 'webhook',
+    async send(msg, fetchFn) {
+      const secret = cfg.secret ? resolveSecret(cfg.secret, getEnv) : undefined
+      await withScrub([secret], async () => {
+        const body = JSON.stringify({
+          event: msg.kind,
+          monitor: msg.monitor ?? null,
+          incident: msg.incident ?? null,
+          url: msg.url,
+        })
+        const headers: Record<string, string> = { ...cfg.headers, 'content-type': 'application/json' }
+        if (secret) headers['x-statusping-signature'] = `sha256=${await hmacSha256Hex(secret, body)}`
+        const res = await fetchFn(cfg.url, { method: 'POST', headers, body })
+        await ensureOk(res, 'webhook')
+      })
+    },
+  }
+}
+
 export function createSink(name: string, input: SinkInput, getEnv: EnvGetter): Sink {
   switch (input.type) {
     case 'pushover':
@@ -142,5 +175,7 @@ export function createSink(name: string, input: SinkInput, getEnv: EnvGetter): S
       return ntfy(name, input, getEnv)
     case 'telegram':
       return telegram(name, input, getEnv)
+    case 'webhook':
+      return webhook(name, input, getEnv)
   }
 }

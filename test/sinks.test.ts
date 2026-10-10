@@ -66,6 +66,34 @@ describe('sinks', () => {
     expect((err as Error).message).not.toContain('ABCDEF_secret')
   })
 
+  it('webhook: posts the documented JSON payload and signs the exact body', async () => {
+    const f = fakeFetch(() => new Response('accepted', { status: 202 }))
+    const message: AlertMessage = {
+      ...down,
+      kind: 'renotify',
+      monitor: { id: 'backup-db', name: 'Backup' },
+      incident: { reason: 'missed', detail: 'Missed its run.', startedAt: 1_700_000_000, resolvedAt: null },
+    }
+    await createSink(
+      'hook',
+      { type: 'webhook', url: 'https://alerts.example/statusping', headers: { 'x-request-id': 'abc' }, secret: 'webhook-secret' },
+      getEnv,
+    ).send(message, f.fn)
+    const call = f.calls[0]!
+    expect(call).toMatchObject({ url: 'https://alerts.example/statusping', method: 'POST' })
+    expect(call.headers).toMatchObject({ 'content-type': 'application/json', 'x-request-id': 'abc' })
+    expect(JSON.parse(call.body!)).toEqual({
+      event: 'renotify',
+      monitor: { id: 'backup-db', name: 'Backup' },
+      incident: { reason: 'missed', detail: 'Missed its run.', startedAt: 1_700_000_000, resolvedAt: null },
+      url: down.url,
+    })
+    const hex = call.headers['x-statusping-signature']!.replace('sha256=', '')
+    const signature = new Uint8Array(hex.match(/../g)!.map((pair) => Number.parseInt(pair, 16)))
+    const key = await crypto.subtle.importKey('raw', new TextEncoder().encode('webhook-secret'), { name: 'HMAC', hash: 'SHA-256' }, false, ['verify'])
+    expect(await crypto.subtle.verify('HMAC', key, signature, new TextEncoder().encode(call.body!))).toBe(true)
+  })
+
   it('missing env var raises a clear error', async () => {
     const err = await createSink('po', { type: 'pushover', appToken: env('NOPE'), userKey: 'x' }, getEnv)
       .send(down, fakeFetch().fn)

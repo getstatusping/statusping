@@ -214,6 +214,35 @@ describe.each(DB_KINDS)('flows on %s', (kind) => {
     expect(ntfyCalls(f.calls).filter((m) => m.title.includes('Heartbeat'))).toHaveLength(2) // 1 failed + 1 ok
   })
 
+  it('re-notifies an open incident at its configured interval without duplicates and observes its cap', async () => {
+    await setup()
+    const f = fakeFetch()
+    const cfg = testConfig()
+    const heartbeat = cfg.groups[0]!.monitors.find((monitor) => monitor.id === 'heartbeat')!
+    heartbeat.renotifyEvery = '10m'
+    heartbeat.renotifyMax = 1
+    const deps = makeDeps(db, { config: cfg, fetch: f.fn })
+
+    await tick(deps, at('2026-10-08T00:00:00Z'))
+    await tick(deps, at('2026-10-08T00:08:00Z')) // Heartbeat missed; initial down alert.
+    await tick(deps, at('2026-10-08T00:17:00Z'))
+    expect(ntfyCalls(f.calls).filter((message) => message.title.includes('Heartbeat'))).toHaveLength(1)
+
+    await Promise.all([
+      dispatchNotifications(deps, sec('2026-10-08T00:18:00Z'), 'heartbeat'),
+      dispatchNotifications(deps, sec('2026-10-08T00:18:00Z'), 'heartbeat'),
+    ])
+    const alerts = ntfyCalls(f.calls).filter((message) => message.title.includes('Heartbeat'))
+    expect(alerts).toHaveLength(2)
+    expect(alerts[1]!.title).toBe('🔴 Heartbeat still down after 10m')
+    expect(alerts[1]!.message).toContain('missed a ping')
+    const notifications = await db.all<{ event: string; ok: number }>(`SELECT event, ok FROM notifications WHERE incident_id = 1 ORDER BY event`)
+    expect(notifications).toEqual([{ event: 'down', ok: 1 }, { event: 'renotify:1', ok: 1 }])
+
+    await dispatchNotifications(deps, sec('2026-10-08T00:28:00Z'), 'heartbeat')
+    expect(ntfyCalls(f.calls).filter((message) => message.title.includes('Heartbeat'))).toHaveLength(2)
+  })
+
   it('removing a monitor from config pauses it and resolves its incident silently', async () => {
     await setup()
     const f = fakeFetch()

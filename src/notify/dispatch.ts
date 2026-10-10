@@ -20,7 +20,7 @@ interface IncidentRow {
 
 interface NotificationRow {
   incident_id: number
-  event: 'down' | 'up'
+  event: string
   sink: string
   ok: number
   attempts: number
@@ -49,7 +49,8 @@ export function buildMessage(
   monitorName: string,
   monitorId: string,
   incident: IncidentRow,
-  event: 'down' | 'up',
+  event: 'down' | 'up' | 'renotify',
+  now = incident.resolved_at ?? incident.started_at,
 ): AlertMessage {
   const prefix = deps.role === 'watchdog' ? '[watchdog] ' : ''
   const url = monitorLink(deps, monitorId)
@@ -60,6 +61,29 @@ export function buildMessage(
       body: incident.detail ?? '',
       url,
       priority: 'high',
+      monitor: { id: monitorId, name: monitorName },
+      incident: {
+        reason: incident.reason,
+        detail: incident.detail,
+        startedAt: incident.started_at,
+        resolvedAt: incident.resolved_at,
+      },
+    }
+  }
+  if (event === 'renotify') {
+    return {
+      kind: 'renotify',
+      title: `${prefix}🔴 ${monitorName} still down after ${formatDuration(now - incident.started_at)}`,
+      body: `${TITLES[incident.reason]}${incident.detail ? `: ${incident.detail}` : ''}`,
+      url,
+      priority: 'high',
+      monitor: { id: monitorId, name: monitorName },
+      incident: {
+        reason: incident.reason,
+        detail: incident.detail,
+        startedAt: incident.started_at,
+        resolvedAt: incident.resolved_at,
+      },
     }
   }
   const downFor = formatDuration((incident.resolved_at ?? incident.started_at) - incident.started_at)
@@ -69,6 +93,13 @@ export function buildMessage(
     body: `Back up after ${downFor} (${TITLES[incident.reason]}${incident.detail ? `: ${incident.detail}` : ''})`,
     url,
     priority: 'normal',
+    monitor: { id: monitorId, name: monitorName },
+    incident: {
+      reason: incident.reason,
+      detail: incident.detail,
+      startedAt: incident.started_at,
+      resolvedAt: incident.resolved_at,
+    },
   }
 }
 
@@ -131,11 +162,31 @@ export async function dispatchNotifications(deps: Deps, now: number, onlyMonitor
     for (const sinkName of monitor.notify) {
       const sinkConfig = config.sinks[sinkName]
       if (!sinkConfig) continue
-      // Open incident → "down". Resolved → "up", but only where "down" was delivered.
-      let event: 'down' | 'up'
-      if (incident.resolved_at === null) event = 'down'
+      // Open incident → "down", then numbered re-notifications. Resolved → "up", but
+      // only where the original down alert was delivered.
+      let event: string | null
+      if (incident.resolved_at === null) {
+        const down = known.get(key(incident.id, 'down', sinkName))
+        if (!down?.ok) {
+          event = 'down'
+        } else if (monitor.renotifyEvery !== null) {
+          const repeats = existing.filter(
+            (n) => n.incident_id === incident.id && n.sink === sinkName && n.event.startsWith('renotify:'),
+          )
+          const successful = repeats.filter((n) => n.ok)
+          const lastSent = [down, ...successful].reduce((latest, notification) =>
+            Math.max(latest, notification.sent_at ?? 0), 0)
+          if (monitor.renotifyMax !== null && successful.length >= monitor.renotifyMax) event = null
+          else if (now - lastSent >= monitor.renotifyEvery) event = `renotify:${successful.length + 1}`
+          else event = null
+        } else {
+          event = null
+        }
+      }
       else if (known.get(key(incident.id, 'down', sinkName))?.ok) event = 'up'
       else continue
+
+      if (!event) continue
 
       const prev = known.get(key(incident.id, event, sinkName))
       if (prev && (prev.ok || prev.attempts >= MAX_ATTEMPTS)) continue
@@ -156,7 +207,7 @@ export async function dispatchNotifications(deps: Deps, now: number, onlyMonitor
       ])
       if (claim?.changes !== 1) continue // someone else is sending it
 
-      const message = buildMessage(deps, monitor.name, monitor.id, incident, event)
+      const message = buildMessage(deps, monitor.name, monitor.id, incident, event === 'up' ? 'up' : event === 'down' ? 'down' : 'renotify', now)
       try {
         await createSink(sinkName, sinkConfig, deps.getEnv).send(message, deps.fetch)
         await db.run(`UPDATE notifications SET ok = 1, error = NULL WHERE incident_id = ? AND event = ? AND sink = ?`, [

@@ -25,6 +25,10 @@ interface MonitorBase {
   notify?: string[]
   /** Also checked by the watchdog instance (see plan §8.3). */
   critical?: boolean
+  /** Repeat an unresolved outage alert at this interval. Off unless set here or in defaults. */
+  renotifyEvery?: Duration
+  /** Maximum number of repeated alerts for one incident. Omit for no cap. */
+  renotifyMax?: number
 }
 
 /** Detail fields that can be shown on the status page. The current status is always shown. */
@@ -119,7 +123,14 @@ export interface TelegramSinkInput {
   botToken: Secret
   chatId: Secret
 }
-export type SinkInput = PushoverSinkInput | NtfySinkInput | TelegramSinkInput
+export interface WebhookSinkInput {
+  type: 'webhook'
+  url: string
+  headers?: Record<string, string>
+  /** HMAC-SHA256 signing secret. Sent as X-StatusPing-Signature when configured. */
+  secret?: Secret
+}
+export type SinkInput = PushoverSinkInput | NtfySinkInput | TelegramSinkInput | WebhookSinkInput
 
 export type AuthProviderInput =
   /** Per-user email + password from the BASIC_AUTH_USERS secret (`npm run cli -- add-user`). */
@@ -160,7 +171,7 @@ export interface StatusPingConfig {
   /** IANA timezone used for times on the status page and in alerts. Default UTC. */
   timezone?: string
   sinks?: Record<string, SinkInput>
-  defaults?: { notify?: string[]; grace?: Duration }
+  defaults?: { notify?: string[]; grace?: Duration; renotifyEvery?: Duration; renotifyMax?: number }
   /** Monitor definitions. Group names become the sections on pages. */
   groups: { name: string; monitors: MonitorInput[] }[]
   /** Status pages. Default: one public page with all monitors, showing uptime + incidents. */
@@ -230,6 +241,10 @@ interface NormalizedBase {
   order: number
   notify: string[]
   critical: boolean
+  /** Seconds between repeat alerts, or null when repeat alerts are disabled. */
+  renotifyEvery: number | null
+  /** Maximum repeats per incident, or null for no cap. */
+  renotifyMax: number | null
 }
 export interface PushMonitor extends NormalizedBase {
   kind: 'push'
@@ -335,17 +350,47 @@ export function normalizeConfig(config: StatusPingConfig): NormalizedConfig {
     problems.push(`baseUrl: "${config.baseUrl}" is not a valid URL`)
   }
   for (const [name, sink] of Object.entries(sinks)) {
-    if (!['pushover', 'ntfy', 'telegram'].includes(sink.type)) {
+    if (!['pushover', 'ntfy', 'telegram', 'webhook'].includes(sink.type)) {
       problems.push(`sinks.${name}: unknown type "${(sink as { type: string }).type}"`)
+    }
+    if (sink.type === 'webhook') {
+      try {
+        const url = new URL(sink.url)
+        if (!['http:', 'https:'].includes(url.protocol)) problems.push(`sinks.${name}.url: must be http(s)`)
+      } catch {
+        problems.push(`sinks.${name}.url: "${sink.url}" is not a valid URL`)
+      }
+      if (sink.headers !== undefined && (!sink.headers || typeof sink.headers !== 'object' || Array.isArray(sink.headers))) {
+        problems.push(`sinks.${name}.headers: must be an object`)
+      } else if (sink.headers !== undefined && Object.values(sink.headers).some((value) => typeof value !== 'string')) {
+        problems.push(`sinks.${name}.headers: all values must be strings`)
+      }
     }
   }
 
   const defaultNotify = config.defaults?.notify ?? Object.keys(sinks)
   let defaultGrace = 300
+  let defaultRenotifyEvery: number | null = null
+  let defaultRenotifyMax: number | null = null
   try {
     if (config.defaults?.grace !== undefined) defaultGrace = parseDuration(config.defaults.grace, 'defaults.grace')
   } catch (e) {
     problems.push((e as Error).message)
+  }
+  try {
+    if (config.defaults?.renotifyEvery !== undefined) {
+      defaultRenotifyEvery = parseDuration(config.defaults.renotifyEvery, 'defaults.renotifyEvery')
+      if (defaultRenotifyEvery <= 0) problems.push('defaults.renotifyEvery must be greater than 0s')
+    }
+  } catch (e) {
+    problems.push((e as Error).message)
+  }
+  if (config.defaults?.renotifyMax !== undefined) {
+    if (!Number.isInteger(config.defaults.renotifyMax) || config.defaults.renotifyMax < 0) {
+      problems.push('defaults.renotifyMax must be a non-negative integer')
+    } else {
+      defaultRenotifyMax = config.defaults.renotifyMax
+    }
   }
 
   const seen = new Set<string>()
@@ -373,6 +418,21 @@ export function normalizeConfig(config: StatusPingConfig): NormalizedConfig {
       const notify = input.notify ?? defaultNotify
       for (const s of notify) if (!sinks[s]) fail(`notify references unknown sink "${s}"`)
 
+      let renotifyEvery = defaultRenotifyEvery
+      if (input.renotifyEvery !== undefined) {
+        try {
+          renotifyEvery = parseDuration(input.renotifyEvery, 'renotifyEvery')
+          if (renotifyEvery <= 0) fail('renotifyEvery must be greater than 0s')
+        } catch (e) {
+          fail((e as Error).message)
+        }
+      }
+      let renotifyMax = defaultRenotifyMax
+      if (input.renotifyMax !== undefined) {
+        if (!Number.isInteger(input.renotifyMax) || input.renotifyMax < 0) fail('renotifyMax must be a non-negative integer')
+        else renotifyMax = input.renotifyMax
+      }
+
       const base: NormalizedBase = {
         id: input.id,
         name: input.name || input.id,
@@ -381,6 +441,8 @@ export function normalizeConfig(config: StatusPingConfig): NormalizedConfig {
         order: order++,
         notify,
         critical: input.critical ?? false,
+        renotifyEvery,
+        renotifyMax,
       }
 
       try {
