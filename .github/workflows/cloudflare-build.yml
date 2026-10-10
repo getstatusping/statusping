@@ -19,10 +19,9 @@ jobs:
         with:
           node-version: 22
 
-      # Use npm install because this standalone repository intentionally has no
-      # lockfile yet. --ignore-scripts keeps this validation free of lifecycle
-      # side effects while still resolving the bundled file: UI dependency.
-      - run: npm install --ignore-scripts --no-audit --no-fund
+      # The lockfile makes Cloudflare's dependency graph reproducible. Lifecycle
+      # scripts are disabled because this job only validates the Worker build.
+      - run: npm ci --ignore-scripts --no-audit --no-fund
 
       # This compiles the Worker and validates the root Deploy Button config
       # without creating or changing anything in the Cloudflare account.
