@@ -1,0 +1,25 @@
+# Cloudflare Deploy Button configuration. Keep this at the repository root so
+# Cloudflare detects it without needing a monorepo-specific config path.
+name = "statusping"
+main = "adapters/cloudflare/worker.ts"
+compatibility_date = "2026-10-01"
+
+[triggers]
+crons = ["* * * * *"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "statusping"
+# Cloudflare replaces this placeholder during the Deploy Button flow.
+database_id = "00000000-0000-0000-0000-000000000000"
+
+[[durable_objects.bindings]]
+name = "REGIONAL_PROBE"
+class_name = "RegionalProbe"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["RegionalProbe"]
+
+[vars]
+STATUSPING_ROLE = "primary"
