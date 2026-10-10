@@ -1,4 +1,4 @@
-import type { JsonAssertionInput } from '../config.ts'
+import type { JsonAssertionInput, JsonValue, NormalizedJsonAssertion } from '../config.ts'
 
 /** Validates the supported subset and returns simple property/index segments. */
 export function parseJsonPath(path: string): (string | number)[] {
@@ -17,20 +17,42 @@ export function jsonPath(value: unknown, path: string): { found: boolean; value:
   return { found: true, value: current }
 }
 
-export function assertJson(value: unknown, assertions: JsonAssertionInput[]): string | null {
+type JsonAssertion = JsonAssertionInput | NormalizedJsonAssertion
+
+function equalJson(left: unknown, right: unknown): boolean {
+  if (left === right) return true
+  if (!left || !right || typeof left !== 'object' || typeof right !== 'object') return false
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left) && Array.isArray(right) && left.length === right.length && left.every((value, index) => equalJson(value, right[index]))
+  }
+  const leftRecord = left as Record<string, unknown>
+  const rightRecord = right as Record<string, unknown>
+  const leftKeys = Object.keys(leftRecord)
+  const rightKeys = Object.keys(rightRecord)
+  return leftKeys.length === rightKeys.length && leftKeys.every((key) => Object.prototype.hasOwnProperty.call(rightRecord, key) && equalJson(leftRecord[key], rightRecord[key]))
+}
+
+function normalized(assertion: JsonAssertion): NormalizedJsonAssertion {
+  if ('operator' in assertion) return assertion
+  const operator = ['equals', 'notEquals', 'contains', 'lessThan', 'greaterThan', 'exists'].find((key) => key in assertion) as NormalizedJsonAssertion['operator']
+  return { path: assertion.path, operator, expected: assertion[operator] as JsonValue | boolean }
+}
+
+export function assertJson(value: unknown, assertions: readonly JsonAssertion[]): string | null {
   for (const assertion of assertions) {
-    const got = jsonPath(value, assertion.path)
-    if (assertion.exists !== undefined) {
-      if (got.found !== assertion.exists) return `${assertion.path} ${got.found ? 'exists' : 'does not exist'}, expected ${assertion.exists ? 'to exist' : 'not to exist'}`
+    const check = normalized(assertion)
+    const got = jsonPath(value, check.path)
+    if (check.operator === 'exists') {
+      if (got.found !== check.expected) return `${check.path} ${got.found ? 'exists' : 'does not exist'}, expected ${check.expected ? 'to exist' : 'not to exist'}`
       continue
     }
-    if (!got.found) return `${assertion.path} does not exist`
+    if (!got.found) return `${check.path} does not exist`
     const printable = JSON.stringify(got.value)
-    if ('equals' in assertion && got.value !== assertion.equals) return `${assertion.path} is ${printable}, expected ${JSON.stringify(assertion.equals)}`
-    if ('notEquals' in assertion && got.value === assertion.notEquals) return `${assertion.path} is ${printable}, expected a different value`
-    if (assertion.contains !== undefined && (typeof got.value !== 'string' || !got.value.includes(String(assertion.contains)))) return `${assertion.path} does not contain ${JSON.stringify(assertion.contains)}`
-    if (assertion.lessThan !== undefined && (typeof got.value !== 'number' || !(got.value < assertion.lessThan))) return `${assertion.path} is ${printable}, expected less than ${assertion.lessThan}`
-    if (assertion.greaterThan !== undefined && (typeof got.value !== 'number' || !(got.value > assertion.greaterThan))) return `${assertion.path} is ${printable}, expected greater than ${assertion.greaterThan}`
+    if (check.operator === 'equals' && !equalJson(got.value, check.expected)) return `${check.path} is ${printable}, expected ${JSON.stringify(check.expected)}`
+    if (check.operator === 'notEquals' && equalJson(got.value, check.expected)) return `${check.path} is ${printable}, expected a different value`
+    if (check.operator === 'contains' && (typeof got.value !== 'string' || typeof check.expected !== 'string' || !got.value.includes(check.expected))) return `${check.path} does not contain ${JSON.stringify(check.expected)}`
+    if (check.operator === 'lessThan' && (typeof got.value !== 'number' || typeof check.expected !== 'number' || !(got.value < check.expected))) return `${check.path} is ${printable}, expected less than ${check.expected}`
+    if (check.operator === 'greaterThan' && (typeof got.value !== 'number' || typeof check.expected !== 'number' || !(got.value > check.expected))) return `${check.path} is ${printable}, expected greater than ${check.expected}`
   }
   return null
 }

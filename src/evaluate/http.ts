@@ -24,23 +24,26 @@ export function isDue(monitor: Pick<HttpMonitor, 'id' | 'intervalMin'>, tickMinu
   return tickMinute % monitor.intervalMin === fnv1a(monitor.id) % monitor.intervalMin
 }
 
-async function bodyContains(res: Response, needle: string): Promise<boolean> {
-  if (!res.body) return false
+async function readBody(res: Response, maximum: number): Promise<{ body: string; bytes: number; exceeded: boolean }> {
+  if (!res.body) return { body: '', bytes: 0, exceeded: false }
   const reader = res.body.getReader()
-  const decoder = new TextDecoder()
-  let tail = ''
+  const chunks: Uint8Array[] = []
   let read = 0
   try {
     for (;;) {
       const { done, value } = await reader.read()
       if (done) break
       read += value.byteLength
-      const chunk = tail + decoder.decode(value, { stream: true })
-      if (chunk.includes(needle)) return true
-      tail = chunk.slice(-needle.length)
-      if (read >= MAX_BODY_BYTES) break
+      chunks.push(value)
+      if (read > maximum) break
     }
-    return (tail + decoder.decode()).includes(needle)
+    const bytes = new Uint8Array(chunks.reduce((total, chunk) => total + chunk.byteLength, 0))
+    let offset = 0
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset)
+      offset += chunk.byteLength
+    }
+    return { body: new TextDecoder().decode(bytes), bytes: read, exceeded: read > maximum }
   } finally {
     reader.cancel().catch(() => {})
   }
@@ -75,27 +78,27 @@ export async function runHttpCheck(monitor: HttpMonitor, fetchFn: typeof fetch):
     res.body?.cancel().catch(() => {})
     return result(false, res.status, `HTTP ${res.status}`, ms)
   }
-  if (monitor.keyword !== null) {
-    let found: boolean
+  if (monitor.keyword !== null || monitor.json.length) {
     try {
-      found = await bodyContains(res, monitor.keyword)
-    } catch (e) {
-      return result(false, res.status, `error reading body: ${(e as Error).message}`, ms)
-    }
-    if (found === monitor.invertKeyword) {
-      return result(false, res.status, monitor.invertKeyword ? `keyword "${monitor.keyword}" found` : `keyword "${monitor.keyword}" not found`, ms)
-    }
-  } else {
-    if (monitor.json.length) {
-      const body = await res.text()
-      if (body.length > MAX_JSON_BYTES) return result(false, res.status, 'JSON response exceeds 1 MB limit', ms)
-      try {
+      const needsJson = monitor.json.length > 0
+      const { body, bytes, exceeded } = await readBody(res, MAX_BODY_BYTES)
+      if (needsJson && (exceeded || bytes > MAX_JSON_BYTES)) return result(false, res.status, 'JSON response exceeds 1 MB limit', ms)
+      if (monitor.keyword !== null) {
+        const found = body.includes(monitor.keyword)
+        if (found === monitor.invertKeyword) {
+          return result(false, res.status, monitor.invertKeyword ? `keyword "${monitor.keyword}" found` : `keyword "${monitor.keyword}" not found`, ms)
+        }
+      }
+      if (needsJson) {
         const failure = assertJson(JSON.parse(body), monitor.json)
         if (failure) return result(false, res.status, failure, ms)
-      } catch (e) {
-        return result(false, res.status, `invalid JSON response: ${(e as Error).message}`, ms)
       }
-    } else res.body?.cancel().catch(() => {})
+    } catch (e) {
+      const prefix = e instanceof SyntaxError ? 'invalid JSON response' : 'error reading body'
+      return result(false, res.status, `${prefix}: ${(e as Error).message}`, ms)
+    }
+  } else {
+    res.body?.cancel().catch(() => {})
   }
   return result(true, res.status, null, ms)
 }
