@@ -19,7 +19,8 @@
     "demo": "node --disable-warning=ExperimentalWarning scripts/demo.ts",
     "cli": "node --disable-warning=ExperimentalWarning cli/statusping.ts",
     "cf:dev": "wrangler dev --config adapters/cloudflare/wrangler.toml --test-scheduled",
-    "cf:deploy": "wrangler deploy --config adapters/cloudflare/wrangler.toml"
+    "cf:deploy": "wrangler deploy --config adapters/cloudflare/wrangler.toml",
+    "release:bundle": "node scripts/build-release-bundle.ts"
   },
   "dependencies": {
     "@statusping/ui": "*",

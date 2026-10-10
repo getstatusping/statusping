@@ -1,0 +1,21 @@
+# Build-only configuration for the portable release artifact. The target account
+# supplies its own D1 database ID and all variables/secrets during deployment.
+name = "statusping-release"
+main = "release-worker.ts"
+compatibility_date = "2026-10-01"
+
+[triggers]
+crons = ["* * * * *"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "statusping"
+database_id = "00000000-0000-0000-0000-000000000000"
+
+[[durable_objects.bindings]]
+name = "REGIONAL_PROBE"
+class_name = "RegionalProbe"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["RegionalProbe"]
