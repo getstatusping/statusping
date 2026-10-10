@@ -1,0 +1,29 @@
+name: Cloudflare Worker build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Install and dry-run deploy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # Use npm install because this standalone repository intentionally has no
+      # lockfile yet. --ignore-scripts keeps this validation free of lifecycle
+      # side effects while still resolving the bundled file: UI dependency.
+      - run: npm install --ignore-scripts --no-audit --no-fund
+
+      # This compiles the Worker and validates the root Deploy Button config
+      # without creating or changing anything in the Cloudflare account.
+      - run: npx wrangler deploy --dry-run --config wrangler.toml
