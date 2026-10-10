@@ -229,6 +229,12 @@ export interface SubscriberConfigInput {
   from: string
 }
 
+/** Optional operator-facing delivery for manual status announcements. Disabled unless a sink is named. */
+export interface AnnouncementNotificationsInput {
+  /** Alert sink names to receive every announcement create/update. */
+  notify: string[]
+}
+
 export type AuthProviderInput =
   /** Per-user email + password from the BASIC_AUTH_USERS secret (`npm run cli -- add-user`). */
   | { type: 'basic' }
@@ -270,6 +276,8 @@ export interface StatusPingConfig {
   /** IANA timezone used for times on the status page and in alerts. Default UTC. */
   timezone?: string
   sinks?: Record<string, SinkInput>
+  /** Deliver manual announcement create/updates to these alert sinks. Off by default. */
+  announcements?: AnnouncementNotificationsInput
   subscribers?: SubscriberConfigInput
   defaults?: { notify?: string[]; grace?: Duration; renotifyEvery?: Duration; renotifyMax?: number }
   /** Monitor definitions. Group names become the sections on pages. */
@@ -461,6 +469,7 @@ export interface NormalizedConfig {
   description: string | null
   timezone: string
   sinks: Record<string, SinkInput>
+  announcements: { notify: string[] }
   subscribers: SubscriberConfigInput | null
   monitors: Monitor[]
   peer: { pingUrl: Secret | null; heartbeatMonitor: string | null; healthMonitor: string | null }
@@ -626,6 +635,18 @@ export function normalizeConfig(config: StatusPingConfig): NormalizedConfig {
           problems.push(`sinks.${name}.via.from: must be an email address`)
         }
       }
+    }
+  }
+
+  let announcementNotify: string[] = []
+  if (config.announcements !== undefined) {
+    const notify = config.announcements?.notify
+    if (!Array.isArray(notify) || notify.length === 0 || notify.some((sink) => typeof sink !== 'string')) {
+      problems.push('announcements.notify: must name one or more sinks')
+    } else {
+      if (new Set(notify).size !== notify.length) problems.push('announcements.notify: must not contain duplicates')
+      for (const sink of notify) if (!sinks[sink]) problems.push(`announcements.notify references unknown sink "${sink}"`)
+      announcementNotify = notify
     }
   }
 
@@ -891,6 +912,7 @@ export function normalizeConfig(config: StatusPingConfig): NormalizedConfig {
     description: config.description ?? null,
     timezone,
     sinks,
+    announcements: { notify: announcementNotify },
     subscribers,
     monitors,
     peer,

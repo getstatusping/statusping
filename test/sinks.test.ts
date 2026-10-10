@@ -84,8 +84,11 @@ describe('sinks', () => {
     expect(call.headers).toMatchObject({ 'content-type': 'application/json', 'x-request-id': 'abc' })
     expect(JSON.parse(call.body!)).toEqual({
       event: 'renotify',
+      title: down.title,
+      body: down.body,
       monitor: { id: 'backup-db', name: 'Backup' },
       incident: { reason: 'missed', detail: 'Missed its run.', startedAt: 1_700_000_000, resolvedAt: null },
+      announcement: null,
       url: down.url,
     })
     const hex = call.headers['x-statusping-signature']!.replace('sha256=', '')

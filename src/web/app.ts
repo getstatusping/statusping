@@ -6,6 +6,7 @@ import { acknowledgeIncident, verifyAcknowledgeToken } from '../acknowledgements
 import type { NormalizedPage } from '../config.ts'
 import type { Deps } from '../deps.ts'
 import { dispatchNotifications } from '../notify/dispatch.ts'
+import { dispatchAnnouncementNotifications, enqueueAnnouncementNotifications } from '../notify/announcements.ts'
 import { MAX_PING_BODY, handlePing, parseSignal } from '../ping.ts'
 import { ensureSchema } from '../schema.ts'
 import { tick } from '../tick.ts'
@@ -165,7 +166,10 @@ export function createApp(deps: Deps): Hono {
     const known = new Set(config.monitors.map((monitor) => monitor.id))
     if (input.monitors.some((id) => !known.has(id))) return c.json({ error: 'Unknown monitor' }, 400)
     const announcement = await createAnnouncement(deps.db, input, nowSeconds())
-    runAfterResponse(c, deps, enqueueAnnouncement(deps, announcement, 'created', nowSeconds()).then(() => dispatchSubscriberOutbox(deps, nowSeconds())))
+    runAfterResponse(c, deps, Promise.all([
+      enqueueAnnouncement(deps, announcement, 'created', nowSeconds()).then(() => dispatchSubscriberOutbox(deps, nowSeconds())),
+      enqueueAnnouncementNotifications(deps, announcement, nowSeconds()).then(() => dispatchAnnouncementNotifications(deps, nowSeconds())),
+    ]))
     return c.json(announcement, 201)
   })
   const updateAnnouncement = async (c: Context, raw: unknown, routeId?: string) => {
@@ -179,7 +183,10 @@ export function createApp(deps: Deps): Hono {
     const known = new Set(config.monitors.map((monitor) => monitor.id))
     if (input.monitors?.some((monitor) => !known.has(monitor))) return c.json({ error: 'Unknown monitor' }, 400)
     const announcement = await patchAnnouncement(deps.db, id, input, nowSeconds())
-    if (announcement) runAfterResponse(c, deps, enqueueAnnouncement(deps, announcement, `update:${announcement.updates[0]?.id ?? announcement.id}`, nowSeconds()).then(() => dispatchSubscriberOutbox(deps, nowSeconds())))
+    if (announcement && (input.status !== undefined || input.body !== undefined)) runAfterResponse(c, deps, Promise.all([
+      enqueueAnnouncement(deps, announcement, `update:${announcement.updates[0]?.id ?? announcement.id}`, nowSeconds()).then(() => dispatchSubscriberOutbox(deps, nowSeconds())),
+      enqueueAnnouncementNotifications(deps, announcement, nowSeconds()).then(() => dispatchAnnouncementNotifications(deps, nowSeconds())),
+    ]))
     return announcement ? c.json(announcement) : c.text('Not found', 404)
   }
   // Accept both REST-style /:id and the documented collection endpoint with an id in JSON.

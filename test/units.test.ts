@@ -114,6 +114,14 @@ describe('config validation', () => {
     ]))
   })
 
+  it('requires an explicit, unique list of known sinks for announcement notifications', () => {
+    const config = normalizeConfig(testConfig({ announcements: { notify: ['ntfy'] } }))
+    expect(config.announcements.notify).toEqual(['ntfy'])
+    expect(normalizeConfig(testConfig()).announcements.notify).toEqual([])
+    expect(() => normalizeConfig(testConfig({ announcements: { notify: ['ntfy', 'ntfy', 'missing'] } }))).toThrow(/announcements\.notify: must not contain duplicates[\s\S]*announcements\.notify references unknown sink "missing"/)
+    expect(() => normalizeConfig(testConfig({ announcements: { notify: [] } }))).toThrow('announcements.notify: must name one or more sinks')
+  })
+
   it('validates email sink recipients and Resend provider settings', () => {
     const valid = normalizeConfig(testConfig({
       sinks: {

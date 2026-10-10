@@ -1,7 +1,7 @@
 import { type EnvGetter, type SinkInput, resolveSecret } from '../config.ts'
 
 export interface AlertMessage {
-  kind: 'down' | 'up' | 'renotify' | 'warning' | 'test'
+  kind: 'down' | 'up' | 'renotify' | 'warning' | 'announcement' | 'test'
   title: string
   body: string
   url: string
@@ -12,6 +12,8 @@ export interface AlertMessage {
   monitor?: { id: string; name: string }
   /** Included in generic webhook payloads. Timestamps are Unix seconds. */
   incident?: { reason: string; detail: string | null; startedAt: number; resolvedAt: number | null }
+  /** Included in generic webhook payloads for a manually posted status announcement. */
+  announcement?: { id: number; status: string; impact: string; monitors: string[] }
 }
 
 export interface Sink {
@@ -163,8 +165,11 @@ function webhook(name: string, cfg: Extract<SinkInput, { type: 'webhook' }>, get
       await withScrub([secret], async () => {
         const body = JSON.stringify({
           event: msg.kind,
+          title: msg.title,
+          body: msg.body,
           monitor: msg.monitor ?? null,
           incident: msg.incident ?? null,
+          announcement: msg.announcement ?? null,
           url: msg.url,
           ...(msg.acknowledgeUrl ? { acknowledgeUrl: msg.acknowledgeUrl } : {}),
         })
@@ -184,7 +189,7 @@ function discord(name: string, cfg: Extract<SinkInput, { type: 'discord' }>, get
     async send(msg, fetchFn) {
       const webhookUrl = resolveSecret(cfg.webhookUrl, getEnv)!
       await withScrub([webhookUrl], async () => {
-        const colour = msg.kind === 'up' ? 0x22c55e : msg.kind === 'warning' || msg.kind === 'renotify' ? 0xf59e0b : 0xef4444
+        const colour = msg.kind === 'up' ? 0x22c55e : msg.kind === 'announcement' ? 0x3b82f6 : msg.kind === 'warning' || msg.kind === 'renotify' ? 0xf59e0b : 0xef4444
         const res = await fetchFn(webhookUrl, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
