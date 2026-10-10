@@ -314,12 +314,23 @@ describe.each(DB_KINDS)('flows on %s', (kind) => {
     const deps = makeDeps(db)
     await tick(deps, at('2026-10-01T00:00:00Z'))
     for (let i = 0; i < 120; i++) {
-      await handlePing(deps, TEST_TOKENS.heartbeat, parseSignal(undefined)!, meta, sec('2026-08-01T00:00:00Z') + i * 60)
+      await handlePing(
+        deps,
+        TEST_TOKENS.heartbeat,
+        parseSignal(undefined)!,
+        { ...meta, ip: `198.51.100.${i}`, userAgent: `retention-test/${i}` },
+        sec('2026-08-01T00:00:00Z') + i * 60,
+      )
     }
     await tick(deps, at('2026-10-08T00:10:00Z'))
     await runRetention(deps, sec('2026-10-09T00:10:00Z'))
     const pings = await db.first<{ n: number }>(`SELECT COUNT(*) AS n FROM pings WHERE monitor_id = 'heartbeat'`)
     expect(pings?.n).toBe(100) // all older than 30d → keep the newest 100
+    const retained = await db.all<{ source_ip: string; user_agent: string }>(
+      `SELECT source_ip, user_agent FROM pings WHERE monitor_id = 'heartbeat' ORDER BY received_at, id`,
+    )
+    expect(retained[0]).toEqual({ source_ip: '198.51.100.20', user_agent: 'retention-test/20' })
+    expect(retained.at(-1)).toEqual({ source_ip: '198.51.100.119', user_agent: 'retention-test/119' })
     const ticks = await db.all<{ tick_at: number }>(`SELECT tick_at FROM tick_results`)
     expect(ticks.map((t) => t.tick_at)).toEqual([sec('2026-10-08T00:10:00Z')])
   })
