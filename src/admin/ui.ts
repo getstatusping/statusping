@@ -1,0 +1,26 @@
+import { html, raw } from 'hono/html'
+import type { Viewer } from '../auth/viewer.ts'
+import type { AuditEntry } from './service.ts'
+
+const escape = (value: string) => value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+
+/** Minimal no-JS management shell; API clients use the same underlying operations. */
+export function adminPage(opts: { viewer: Viewer; csrf: string; config: unknown; audit: AuditEntry[]; monitorIds: string[]; sinkNames: string[]; message?: string }): string {
+  const config = JSON.stringify(opts.config, null, 2)
+  const audit = opts.audit.map((event) => `<li><time datetime="${new Date(event.at * 1000).toISOString()}">${new Date(event.at * 1000).toISOString()}</time> <strong>${escape(event.actor)}</strong> ${escape(event.action)} <span>${escape(event.target)}</span></li>`).join('') || '<li>No changes recorded yet.</li>'
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>StatusPing administration</title><style>
+body{font:16px system-ui,sans-serif;max-width:980px;margin:3rem auto;padding:0 1rem;color:#18212f}textarea{box-sizing:border-box;width:100%;min-height:36rem;font:13px ui-monospace,monospace}button{background:#1769e0;color:white;border:0;border-radius:4px;padding:.65rem 1rem;font-weight:600}code{background:#eef2f7;padding:.1rem .25rem}.note{background:#fff7df;padding:1rem;border-left:4px solid #d89a00}li{margin:.5rem 0}</style></head><body>
+<nav><a href="/">Status page</a> · Signed in as ${escape(opts.viewer.email)} · <a href="/auth/logout">Sign out</a></nav>
+<h1>Administration</h1>${opts.message ? `<p class="note">${escape(opts.message)}</p>` : ''}
+<p class="note">Secret values are never stored or shown here. Use <code>{ "$env": "NAME" }</code> references. Credential-bearing headers and URLs remain config-as-code only.</p>
+<h2>Monitors, pages, access, and alert channels</h2>
+<form method="post" action="/admin/config"><input type="hidden" name="csrf" value="${escape(opts.csrf)}"><textarea name="config" aria-label="StatusPing configuration">${escape(config)}</textarea><p><button type="submit">Validate and save configuration</button></p></form>
+<h2>Alert channels</h2><p>Send a single test alert to verify a configured channel.</p>${opts.sinkNames.length ? `<ul>${opts.sinkNames.map((name) => `<li><code>${escape(name)}</code> <form style="display:inline" method="post" action="/admin/sinks/${encodeURIComponent(name)}/test"><input type="hidden" name="csrf" value="${escape(opts.csrf)}"><button type="submit">Send test</button></form></li>`).join('')}</ul>` : '<p>No alert channels are configured.</p>'}
+<h2>Ping tokens</h2><p>Rotating a token invalidates its predecessor. The new token is displayed once and is never placed in the audit log.</p>${opts.monitorIds.length ? `<ul>${opts.monitorIds.map((id) => `<li><code>${escape(id)}</code> <form style="display:inline" method="post" action="/admin/ping-tokens/${encodeURIComponent(id)}/rotate"><input type="hidden" name="csrf" value="${escape(opts.csrf)}"><button type="submit">Generate / rotate</button></form></li>`).join('')}</ul>` : '<p>No push monitors are configured.</p>'}
+<h2>Audit log</h2><ol>${audit}</ol></body></html>`
+}
+
+export function pingTokenPage(monitorId: string, token: string): string {
+  return `<!doctype html><meta charset="utf-8"><title>New ping token</title><h1>Copy this ping token now</h1><p>This value will not be shown again. Rotating it invalidates the prior token.</p><pre>${escape(token)}</pre><p>Use it as <code>/ping/${escape(token)}</code> for monitor <strong>${escape(monitorId)}</strong>.</p>`
+}
+

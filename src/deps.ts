@@ -12,6 +12,8 @@ import type { CertificateExpiryProvider } from './expiry/types.ts'
 import type { TcpConnector } from './evaluate/tcp.ts'
 import type { ConfirmationProbe } from './confirmation.ts'
 import type { CloudflareEmailSender } from './notify/sinks.ts'
+import { loadAdminConfig, seedAdminConfig } from './admin/service.ts'
+import { validateAdminConfig } from './admin/security.ts'
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error'
 export type Logger = (level: LogLevel, message: string, data?: Record<string, unknown>) => void
@@ -19,6 +21,10 @@ export type Logger = (level: LogLevel, message: string, data?: Record<string, un
 export interface Deps {
   db: Db
   config: NormalizedConfig
+  /** Raw active config. Kept to seed and render the opt-in admin editor; never sent to visitors. */
+  configInput: StatusPingConfig
+  /** `admin: true` was supplied by config-as-code. False preserves config-as-code behaviour. */
+  adminEnabled: boolean
   role: Role
   getEnv: EnvGetter
   /** monitor id → ping token (secret), from the PING_TOKENS env var. */
@@ -74,6 +80,8 @@ export function createDeps(opts: CreateDepsOptions): Deps {
   return {
     db: opts.db,
     config,
+    configInput: opts.config,
+    adminEnabled: opts.config.admin === true,
     role: roleEnv,
     getEnv: opts.getEnv,
     pingTokens: parsePingTokens(opts.getEnv('PING_TOKENS')),
@@ -86,4 +94,25 @@ export function createDeps(opts: CreateDepsOptions): Deps {
     cloudflareEmail: opts.cloudflareEmail,
     log: opts.log ?? consoleLogger,
   }
+}
+
+/**
+ * Loads the one DB-backed configuration only when the operator explicitly enables admin mode.
+ * In ordinary mode this is a no-op, leaving statusping.config.ts / STATUSPING_CONFIG authoritative.
+ * Call after migrations, before work that reads `deps.config`.
+ */
+export async function refreshAdminConfig(deps: Deps, now: number): Promise<boolean> {
+  if (!deps.adminEnabled) return false
+  let stored = await loadAdminConfig(deps.db)
+  if (!stored) {
+    // Validate before persisting: literal credentials never enter admin_config or audit_log.
+    const validated = validateAdminConfig({ ...deps.configInput, admin: true }, deps.getEnv)
+    await seedAdminConfig(deps.db, validated.config, 'config-seed', now)
+    stored = await loadAdminConfig(deps.db)
+  }
+  if (!stored) throw new Error('admin config seed was not stored')
+  const validated = validateAdminConfig(stored.config, deps.getEnv)
+  deps.config = validated.normalized
+  deps.configInput = validated.config
+  return true
 }

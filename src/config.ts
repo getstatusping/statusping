@@ -299,6 +299,8 @@ export interface StatusPingConfig {
     /** Maximum additional regional confirmation probes started in one tick. Default 6. */
     maxConfirmationsPerTick?: number
   }
+  /** Enable the database-backed browser admin. Off by default: config-as-code remains authoritative. */
+  admin?: boolean
 }
 
 export function defineConfig(config: StatusPingConfig): StatusPingConfig {
@@ -859,6 +861,10 @@ export function normalizeConfig(config: StatusPingConfig): NormalizedConfig {
     problems.push(`peer.healthMonitor: "${peer.healthMonitor}" must be an http monitor`)
   }
 
+  const maxConfirmationsPerTick = config.limits?.maxConfirmationsPerTick ?? 6
+  if (!Number.isInteger(maxConfirmationsPerTick) || maxConfirmationsPerTick < 1 || maxConfirmationsPerTick > 35) {
+    problems.push('limits.maxConfirmationsPerTick must be a whole number from 1 to 35')
+  }
   const limits = {
     maxChecksPerTick: config.limits?.maxChecksPerTick ?? 35,
     tickBudgetMs: config.limits?.tickBudgetMs ?? 20_000,

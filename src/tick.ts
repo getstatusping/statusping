@@ -1,5 +1,5 @@
 import { type HttpMonitor, type TcpMonitor, activeMonitors, resolveSecret } from './config.ts'
-import type { Deps } from './deps.ts'
+import { refreshAdminConfig, type Deps } from './deps.ts'
 import { type CheckResult, USER_AGENT, isDue, runHttpCheck, runPool } from './evaluate/http.ts'
 import { runTcpCheck } from './evaluate/tcp.ts'
 import { evaluatePush } from './evaluate/push.ts'
@@ -91,6 +91,7 @@ export async function tick(deps: Deps, nowMs: number = Date.now()): Promise<Tick
   const summary: TickSummary = { tickAt, duplicate: false, transitions: 0, checks: 0, skippedChecks: [], notifications: 0 }
 
   await ensureSchema(deps.db)
+  await refreshAdminConfig(deps, now)
   await syncConfig(deps, now)
 
   const claim = await deps.db.run(

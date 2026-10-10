@@ -18,6 +18,8 @@ import { buildChrome } from './chrome.ts'
 import { renderBadge } from './badge.ts'
 import { acknowledgePage, type PageCtx, messagePage, monitorPage, statusPage } from './pages.ts'
 import { confirmSubscription, consumeSubscribeLimit, dispatchSubscriberOutbox, enqueueAnnouncement, startSubscription, unsubscribe } from '../subscribers.ts'
+import { refreshAdminConfig } from '../deps.ts'
+import { mountAdminRoutes } from '../admin/routes.ts'
 
 const STALE_TICK_SECONDS = 180
 const PUBLIC_MAX_AGE = 30
@@ -68,12 +70,15 @@ function runAfterResponse(c: Context, deps: Deps, p: Promise<unknown>) {
 
 export function createApp(deps: Deps): Hono {
   const app = new Hono()
-  const { config } = deps
+  let config = deps.config
   // An admins list also needs a sign-in affordance on otherwise-public monitor pages.
-  const hasRestricted = config.pages.some((p) => p.access !== 'public') || Boolean(config.access?.admins)
+  let hasRestricted = config.pages.some((p) => p.access !== 'public') || Boolean(config.access?.admins)
 
   app.use('*', async (_c, next) => {
     await ensureSchema(deps.db)
+    await refreshAdminConfig(deps, nowSeconds())
+    config = deps.config
+    hasRestricted = config.pages.some((p) => p.access !== 'public') || Boolean(config.access?.admins)
     await next()
   })
 
@@ -178,6 +183,9 @@ export function createApp(deps: Deps): Hono {
 
   // ── Sign-in ────────────────────────────────────────────────────────────────────────────────
   mountAuthRoutes(app, deps)
+
+  // ── Browser admin + management API (strictly opt-in via `admin: true`) ─────────────────────
+  mountAdminRoutes(app, deps)
 
   // ── Pages ──────────────────────────────────────────────────────────────────────────────────
 

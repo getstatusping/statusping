@@ -181,6 +181,30 @@ export const MIGRATIONS: string[][] = [
     )`,
     `CREATE INDEX IF NOT EXISTS confirmation_results_monitor_time ON confirmation_results(monitor_id, tick_at DESC)`,
   ],
+  [
+    `CREATE TABLE IF NOT EXISTS admin_config (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      config_json TEXT NOT NULL,
+      updated_at INTEGER NOT NULL,
+      updated_by TEXT NOT NULL
+    )`,
+    `CREATE TABLE IF NOT EXISTS audit_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      actor TEXT NOT NULL,
+      action TEXT NOT NULL,
+      target TEXT NOT NULL,
+      before_json TEXT,
+      after_json TEXT,
+      at INTEGER NOT NULL
+    )`,
+    `CREATE INDEX IF NOT EXISTS audit_log_at ON audit_log(at DESC)`,
+    `CREATE TABLE IF NOT EXISTS admin_csrf (
+      session_hash TEXT PRIMARY KEY,
+      token_hash TEXT NOT NULL,
+      expires_at INTEGER NOT NULL
+    )`,
+    `CREATE INDEX IF NOT EXISTS admin_csrf_expires ON admin_csrf(expires_at)`,
+  ],
 ]
 
 export const SCHEMA_VERSION = MIGRATIONS.length
