@@ -61,6 +61,9 @@ export function createDeps(opts: CreateDepsOptions): Deps {
   if (config.monitors.some((monitor) => monitor.escalation) && !opts.getEnv('ACK_SECRET')) {
     throw new Error('ACK_SECRET must be set when escalation is configured')
   }
+  if (config.subscribers && !opts.getEnv('SUBSCRIBER_TOKEN_SECRET')) {
+    throw new Error('SUBSCRIBER_TOKEN_SECRET must be set when subscribers are configured')
+  }
   return {
     db: opts.db,
     config,

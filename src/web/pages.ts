@@ -33,6 +33,7 @@ export interface PageCtx extends Chrome {
   page: NormalizedPage
   fields: ReadonlySet<DetailField>
   base: string
+  subscribersEnabled?: boolean
   /** The viewer matches access.admins and may acknowledge a current escalation. */
   canAcknowledge?: boolean
 }
@@ -518,7 +519,8 @@ export function statusPage(data: StatusData, ctx: PageCtx): Html {
         <h2>${g.name}</h2>
         <ul class="mons">${g.monitors.map((m) => monitorRow(m, ctx, data.now))}</ul>
       </section>`,
-    )}`,
+    )}
+    ${ctx.subscribersEnabled ? html`<section class="card subscribe-card"><h2>Get status updates</h2><p class="muted">Receive email when incidents or status announcements are posted.</p><form class="subscribe-form" method="post" action="${ctx.base}/subscribe">${ctx.page.access === 'public' ? html`<label class="sr-only" for="subscriber-email">Email address</label><input id="subscriber-email" name="email" type="email" required autocomplete="email" placeholder="you@example.com">` : html`<span class="muted small">Updates will be sent to ${ctx.viewer?.email ?? ''}.</span>`}<button class="btn-primary" type="submit">Subscribe</button></form><p class="muted small">We’ll send a confirmation email. You can unsubscribe at any time.</p></section>` : ''}`,
     ctx,
     { refresh: true, description: ctx.page.description },
   )

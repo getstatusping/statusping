@@ -136,6 +136,40 @@ export const MIGRATIONS: string[][] = [
       via         TEXT NOT NULL CHECK (via IN ('alert-link', 'admin-page'))
     )`,
   ],
+  [
+    `CREATE TABLE IF NOT EXISTS subscribers (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      page_slug TEXT NOT NULL,
+      email TEXT NOT NULL,
+      confirmed_at INTEGER,
+      confirm_token_hash TEXT NOT NULL UNIQUE,
+      unsubscribe_token_hash TEXT NOT NULL UNIQUE,
+      created_at INTEGER NOT NULL,
+      UNIQUE(page_slug, email)
+    )`,
+    `CREATE INDEX IF NOT EXISTS subscribers_page_confirmed ON subscribers(page_slug, confirmed_at)`,
+    `CREATE TABLE IF NOT EXISTS subscriber_rate_limits (
+      bucket TEXT NOT NULL,
+      window_at INTEGER NOT NULL,
+      count INTEGER NOT NULL,
+      PRIMARY KEY(bucket, window_at)
+    )`,
+    `CREATE TABLE IF NOT EXISTS subscriber_outbox (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      subscriber_id INTEGER NOT NULL,
+      event_key TEXT NOT NULL,
+      subject TEXT NOT NULL,
+      text_body TEXT NOT NULL,
+      html_body TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      sent_at INTEGER,
+      ok INTEGER NOT NULL DEFAULT 0,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      error TEXT,
+      UNIQUE(subscriber_id, event_key)
+    )`,
+    `CREATE INDEX IF NOT EXISTS subscriber_outbox_pending ON subscriber_outbox(ok, created_at)`,
+  ],
 ]
 
 export const SCHEMA_VERSION = MIGRATIONS.length

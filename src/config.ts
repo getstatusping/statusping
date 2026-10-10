@@ -213,6 +213,11 @@ export type SinkInput = PushoverSinkInput | NtfySinkInput | TelegramSinkInput | 
 /** Delivery settings for status-page subscribers.  This intentionally does not
  * reuse an arbitrary alert sink: subscribers need a provider that can deliver
  * to addresses we do not know at configuration time. */
+export interface SubscriberConfigInput {
+  provider: 'resend'
+  apiKey: Secret
+  from: string
+}
 
 export type AuthProviderInput =
   /** Per-user email + password from the BASIC_AUTH_USERS secret (`npm run cli -- add-user`). */
@@ -255,6 +260,7 @@ export interface StatusPingConfig {
   /** IANA timezone used for times on the status page and in alerts. Default UTC. */
   timezone?: string
   sinks?: Record<string, SinkInput>
+  subscribers?: SubscriberConfigInput
   defaults?: { notify?: string[]; grace?: Duration; renotifyEvery?: Duration; renotifyMax?: number }
   /** Monitor definitions. Group names become the sections on pages. */
   groups: { name: string; monitors: MonitorInput[] }[]
@@ -433,6 +439,7 @@ export interface NormalizedConfig {
   description: string | null
   timezone: string
   sinks: Record<string, SinkInput>
+  subscribers: SubscriberConfigInput | null
   monitors: Monitor[]
   peer: { pingUrl: Secret | null; heartbeatMonitor: string | null; healthMonitor: string | null }
   limits: { maxChecksPerTick: number; tickBudgetMs: number }
@@ -554,6 +561,13 @@ export function normalizeConfig(config: StatusPingConfig): NormalizedConfig {
   const problems: string[] = []
   const sinks = config.sinks && typeof config.sinks === 'object' && !Array.isArray(config.sinks) ? config.sinks : {}
   if (config.sinks !== undefined && sinks !== config.sinks) problems.push('sinks: must be an object')
+  let subscribers: SubscriberConfigInput | null = null
+  if (config.subscribers !== undefined) {
+    const value = config.subscribers
+    if (!value || typeof value !== 'object' || value.provider !== 'resend') problems.push('subscribers.provider: must be "resend"')
+    else if (typeof value.from !== 'string' || !isMailbox(value.from)) problems.push('subscribers.from: must be an email address')
+    else subscribers = value
+  }
   const groups = Array.isArray(config.groups) ? config.groups : []
   if (!Array.isArray(config.groups)) problems.push('groups: must be an array')
   const timezone = config.timezone ?? 'UTC'
@@ -832,6 +846,7 @@ export function normalizeConfig(config: StatusPingConfig): NormalizedConfig {
     description: config.description ?? null,
     timezone,
     sinks,
+    subscribers,
     monitors,
     peer,
     limits,

@@ -5,6 +5,7 @@ import { runTcpCheck } from './evaluate/tcp.ts'
 import { evaluatePush } from './evaluate/push.ts'
 import { runExpiryChecks } from './expiry/run.ts'
 import { dispatchNotifications } from './notify/dispatch.ts'
+import { dispatchSubscriberOutbox, enqueueIncidentSubscribers } from './subscribers.ts'
 import { activeMaintenance } from './maintenance.ts'
 import { rollupLatency } from './latency.ts'
 import { maybeRunRetention } from './retention.ts'
@@ -161,6 +162,8 @@ export async function tick(deps: Deps, nowMs: number = Date.now()): Promise<Tick
 
   await pingPeer(deps)
   summary.notifications = await dispatchNotifications(deps, now)
+  await enqueueIncidentSubscribers(deps, now)
+  await dispatchSubscriberOutbox(deps, now)
   await maybeRunRetention(deps, now)
   return summary
 }

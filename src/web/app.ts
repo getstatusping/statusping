@@ -17,6 +17,7 @@ import { type StatusData, lastTickAt, loadMonitorDetail, loadStatusData } from '
 import { buildChrome } from './chrome.ts'
 import { renderBadge } from './badge.ts'
 import { acknowledgePage, type PageCtx, messagePage, monitorPage, statusPage } from './pages.ts'
+import { confirmSubscription, consumeSubscribeLimit, dispatchSubscriberOutbox, enqueueAnnouncement, startSubscription, unsubscribe } from '../subscribers.ts'
 
 const STALE_TICK_SECONDS = 180
 const PUBLIC_MAX_AGE = 30
@@ -154,6 +155,7 @@ export function createApp(deps: Deps): Hono {
     const known = new Set(config.monitors.map((monitor) => monitor.id))
     if (input.monitors.some((id) => !known.has(id))) return c.json({ error: 'Unknown monitor' }, 400)
     const announcement = await createAnnouncement(deps.db, input, nowSeconds())
+    runAfterResponse(c, deps, enqueueAnnouncement(deps, announcement, 'created', nowSeconds()).then(() => dispatchSubscriberOutbox(deps, nowSeconds())))
     return c.json(announcement, 201)
   })
   const updateAnnouncement = async (c: Context, raw: unknown, routeId?: string) => {
@@ -167,6 +169,7 @@ export function createApp(deps: Deps): Hono {
     const known = new Set(config.monitors.map((monitor) => monitor.id))
     if (input.monitors?.some((monitor) => !known.has(monitor))) return c.json({ error: 'Unknown monitor' }, 400)
     const announcement = await patchAnnouncement(deps.db, id, input, nowSeconds())
+    if (announcement) runAfterResponse(c, deps, enqueueAnnouncement(deps, announcement, `update:${announcement.updates[0]?.id ?? announcement.id}`, nowSeconds()).then(() => dispatchSubscriberOutbox(deps, nowSeconds())))
     return announcement ? c.json(announcement) : c.text('Not found', 404)
   }
   // Accept both REST-style /:id and the documented collection endpoint with an id in JSON.
@@ -198,6 +201,29 @@ export function createApp(deps: Deps): Hono {
     return { page, viewer }
   }
 
+  app.post('/pages/:slug/subscribe', async (c) => {
+    const r = await openPage(c, c.req.param('slug'))
+    if (r instanceof Response) return r
+    if (!config.subscribers) return c.text('Not found', 404)
+    if (!sameOrigin(c, deps)) return c.text('Invalid origin', 403)
+    const form = await c.req.parseBody().catch(() => ({}))
+    // A restricted-page subscription belongs to the authenticated viewer, never a form field.
+    const email = r.page.access === 'public' ? String((form as Record<string, string | File>).email ?? '') : r.viewer!.email
+    const bucket = c.req.header('cf-connecting-ip') ? `ip:${c.req.header('cf-connecting-ip')}` : `page:${r.page.slug}`
+    if (!(await consumeSubscribeLimit(deps.db, bucket, nowSeconds()))) return c.text('Too many subscription attempts; try again later.', 429)
+    const result = await startSubscription(deps, r.page.slug, email, nowSeconds())
+    if (result === 'invalid') return c.text('Enter a valid email address.', 400)
+    return c.redirect(`/pages/${encodeURIComponent(r.page.slug)}?subscription=${result === 'confirmed' ? 'already-confirmed' : 'check-email'}`, 303)
+  })
+  app.get('/subscribe/confirm', async (c) => {
+    const ok = await confirmSubscription(deps, c.req.query('token') ?? '', nowSeconds())
+    return c.text(ok ? 'Your subscription is confirmed.' : 'This confirmation link is invalid or has already been used.', ok ? 200 : 400, { 'cache-control': 'no-store' })
+  })
+  app.get('/unsubscribe', async (c) => {
+    const ok = await unsubscribe(deps, c.req.query('token') ?? '')
+    return c.text(ok ? 'You have been unsubscribed.' : 'This unsubscribe link is invalid or has already been used.', ok ? 200 : 400, { 'cache-control': 'no-store' })
+  })
+
   const ctxFor = async (
     c: Context,
     page: NormalizedPage,
@@ -208,6 +234,7 @@ export function createApp(deps: Deps): Hono {
     page,
     fields: new Set(page.show),
     base: `/pages/${page.slug}`,
+    subscribersEnabled: Boolean(config.subscribers),
     canAcknowledge: canAcknowledge(viewer, config.access),
   })
 
