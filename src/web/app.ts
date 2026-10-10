@@ -13,7 +13,7 @@ import { tick } from '../tick.ts'
 import { timingSafeEqual } from '../util/crypto.ts'
 import { createAnnouncement, listAnnouncements, parseAnnouncementCreate, parseAnnouncementPatch, patchAnnouncement } from '../announcements.ts'
 import { nowSeconds } from '../util/time.ts'
-import { APP_VERSION } from '../version.ts'
+import { APP_VERSION, SCHEMA_VERSION } from '../version.ts'
 import { type StatusData, lastTickAt, loadMonitorDetail, loadStatusData } from './data.ts'
 import { buildChrome } from './chrome.ts'
 import { renderBadge } from './badge.ts'
@@ -130,7 +130,12 @@ export function createApp(deps: Deps): Hono {
       const last = await lastTickAt(deps)
       const lag = last === null ? null : now - last
       const ok = lag !== null && lag <= STALE_TICK_SECONDS
-      return c.json({ ok, version: APP_VERSION, role: deps.role, lastTickAt: last, lagSeconds: lag }, ok ? 200 : 503, {
+      // These are intentionally public, non-secret deployment facts. They let an
+      // operator (and a future update-review flow) identify compatibility without
+      // disclosing configuration or credentials.
+      const channel = deps.getEnv('STATUSPING_RELEASE_CHANNEL') ?? 'stable'
+      const instanceId = deps.getEnv('STATUSPING_INSTANCE_ID') ?? null
+      return c.json({ ok, version: APP_VERSION, schemaVersion: SCHEMA_VERSION, channel, instanceId, role: deps.role, lastTickAt: last, lagSeconds: lag }, ok ? 200 : 503, {
         'cache-control': 'no-store',
       })
     } catch (e) {

@@ -23,3 +23,7 @@ new_sqlite_classes = ["RegionalProbe"]
 
 [vars]
 STATUSPING_ROLE = "primary"
+# Public, non-secret deployment metadata exposed by /healthz. Keep the instance
+# value opaque (for example a generated UUID); never place a secret here.
+# STATUSPING_RELEASE_CHANNEL = "stable"
+# STATUSPING_INSTANCE_ID = "replace-with-a-generated-instance-id"

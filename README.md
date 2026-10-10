@@ -16,6 +16,8 @@ For a manual deployment:
 
 The Worker creates its schema on the first request or scheduled tick. The included cron trigger runs every minute.
 
+`/healthz` reports the running app version, schema version, release channel, and (if set) an opaque `STATUSPING_INSTANCE_ID`. These values are deliberately public deployment metadata: do not use a secret for the instance ID.
+
 This repository is self-contained: the shared UI is included as a local dependency, so the Deploy Button does not fetch any StatusPing package from npm.
 
 ## Manage configuration in the app

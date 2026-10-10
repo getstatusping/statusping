@@ -3,7 +3,7 @@ import { type StatusPingConfig, normalizeConfig } from '../src/config.ts'
 import { tick } from '../src/tick.ts'
 import { createApp } from '../src/web/app.ts'
 import { loadStatusData } from '../src/web/data.ts'
-import { APP_VERSION } from '../src/version.ts'
+import { APP_VERSION, SCHEMA_VERSION } from '../src/version.ts'
 import { normalizeClientIp } from '../src/rate-limit.ts'
 import { type CountingDb, TEST_TOKENS, createTestDb, fakeFetch, makeDeps, testConfig } from './helpers.ts'
 
@@ -334,7 +334,7 @@ describe('HTTP routes (no sign-in configured)', () => {
 
   it('healthz and POST /tick', async () => {
     const off = await setup()
-    expect(await (await off.app.request('/healthz')).json()).toMatchObject({ ok: true, version: APP_VERSION, role: 'primary' })
+    expect(await (await off.app.request('/healthz')).json()).toMatchObject({ ok: true, version: APP_VERSION, schemaVersion: SCHEMA_VERSION, channel: 'stable', instanceId: null, role: 'primary' })
     expect((await off.app.request('/tick', { method: 'POST' })).status).toBe(404)
     await close()
     const on = await setup({ env: { TICK_SECRET: 's3cret-value' } })
