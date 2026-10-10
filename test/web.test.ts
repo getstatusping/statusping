@@ -34,6 +34,47 @@ describe('HTTP routes (no sign-in configured)', () => {
     expect(pings[2]).toMatchObject({ body: 'disk full', exit_code: 1 })
   })
 
+  it('creates, updates, presents, and page-scopes manual announcements', async () => {
+    const { app } = await setup({ env: { ADMIN_TOKEN: 'admin-test-token' } })
+    // The API surface is absent until explicitly configured, and rejects non-constant-time mismatches.
+    expect((await app.request('/api/admin/incidents', { method: 'POST' })).status).toBe(401)
+    const create = await app.request('/api/admin/incidents', {
+      method: 'POST',
+      headers: { authorization: 'Bearer admin-test-token', 'content-type': 'application/json' },
+      body: JSON.stringify({ title: 'Database maintenance', impact: 'major', monitors: ['site'], body: 'We are investigating elevated errors.' }),
+    })
+    expect(create.status).toBe(201)
+    const announcement = (await create.json()) as { id: number; status: string }
+    expect(announcement.status).toBe('investigating')
+    const home = await (await app.request('/')).text()
+    expect(home).toContain('Database maintenance')
+    expect(home).toContain('We are investigating elevated errors.')
+    expect(home).toContain('Affects site')
+    const patch = await app.request(`/api/admin/incidents/${announcement.id}`, {
+      method: 'PATCH',
+      headers: { authorization: 'Bearer admin-test-token', 'content-type': 'application/json' },
+      body: JSON.stringify({ status: 'resolved', body: 'The issue is resolved.' }),
+    })
+    expect(patch.status).toBe(200)
+    const history = await (await app.request('/pages/status/m/site')).text()
+    expect(history).toContain('Database maintenance')
+    const open = await (await app.request('/api/pages/status/incidents?status=open&days=7')).json() as { announcements: unknown[] }
+    expect(open.announcements).toEqual([])
+    const resolved = await (await app.request('/api/pages/status/incidents?status=resolved&days=7')).json() as { announcements: { title: string; updates: { body: string }[] }[] }
+    expect(resolved.announcements).toHaveLength(1)
+    expect(resolved.announcements[0]!.title).toBe('Database maintenance')
+    expect(resolved.announcements[0]!.updates[0]!.body).toBe('The issue is resolved.')
+  })
+
+  it('does not expose manual incidents when the page hides incident history', async () => {
+    const config = testConfig({ pages: [{ slug: 'quiet', title: 'Quiet', show: ['uptime'], monitors: ['site'] }] })
+    const { app } = await setup({ config, env: { ADMIN_TOKEN: 'admin-test-token' } })
+    expect((await app.request('/api/pages/quiet/incidents')).status).toBe(404)
+    expect((await app.request('/api/admin/incidents', { method: 'POST', headers: { authorization: 'Bearer wrong', 'content-type': 'application/json' }, body: '{}' })).status).toBe(401)
+    const noToken = await setup()
+    expect((await noToken.app.request('/api/admin/incidents', { method: 'POST' })).status).toBe(404)
+  })
+
   it('default page at / shows status + uptime + incidents, but never logs or error text', async () => {
     const { app } = await setup()
     await app.request(`/ping/${TEST_TOKENS.heartbeat}/fail`, { method: 'POST', body: 'secret-path <script>x</script>' })

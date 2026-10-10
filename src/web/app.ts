@@ -9,6 +9,7 @@ import { MAX_PING_BODY, handlePing, parseSignal } from '../ping.ts'
 import { ensureSchema } from '../schema.ts'
 import { tick } from '../tick.ts'
 import { timingSafeEqual } from '../util/crypto.ts'
+import { createAnnouncement, listAnnouncements, parseAnnouncementCreate, parseAnnouncementPatch, patchAnnouncement } from '../announcements.ts'
 import { nowSeconds } from '../util/time.ts'
 import { APP_VERSION } from '../version.ts'
 import { type StatusData, lastTickAt, loadMonitorDetail, loadStatusData } from './data.ts'
@@ -130,6 +131,45 @@ export function createApp(deps: Deps): Hono {
     if (!timingSafeEqual(auth, `Bearer ${secret}`)) return c.text('Unauthorized', 401)
     return c.json(await tick(deps))
   })
+
+  // ── Management API: manual status announcements ────────────────────────────────────────────
+  // Kept deliberately independent of the future browser admin UI.  A missing token is a 404 so
+  // deployments do not advertise an administrative surface by accident.
+  const adminAuthorized = (c: Context) => {
+    const token = deps.getEnv('ADMIN_TOKEN')
+    if (!token) return null
+    return timingSafeEqual(c.req.header('authorization') ?? '', `Bearer ${token}`)
+  }
+  const parseJson = async (c: Context): Promise<unknown | null> => {
+    try { return await c.req.json() } catch { return null }
+  }
+  app.post('/api/admin/incidents', async (c) => {
+    const ok = adminAuthorized(c)
+    if (ok === null) return c.text('Not found', 404)
+    if (!ok) return c.text('Unauthorized', 401)
+    const input = parseAnnouncementCreate(await parseJson(c))
+    if (!input) return c.json({ error: 'Invalid incident payload' }, 400)
+    const known = new Set(config.monitors.map((monitor) => monitor.id))
+    if (input.monitors.some((id) => !known.has(id))) return c.json({ error: 'Unknown monitor' }, 400)
+    const announcement = await createAnnouncement(deps.db, input, nowSeconds())
+    return c.json(announcement, 201)
+  })
+  const updateAnnouncement = async (c: Context, raw: unknown, routeId?: string) => {
+    const ok = adminAuthorized(c)
+    if (ok === null) return c.text('Not found', 404)
+    if (!ok) return c.text('Unauthorized', 401)
+    const id = Number(routeId ?? (raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, unknown>).id : NaN))
+    if (!Number.isSafeInteger(id) || id < 1) return c.text('Not found', 404)
+    const input = parseAnnouncementPatch(raw)
+    if (!input) return c.json({ error: 'Invalid incident payload' }, 400)
+    const known = new Set(config.monitors.map((monitor) => monitor.id))
+    if (input.monitors?.some((monitor) => !known.has(monitor))) return c.json({ error: 'Unknown monitor' }, 400)
+    const announcement = await patchAnnouncement(deps.db, id, input, nowSeconds())
+    return announcement ? c.json(announcement) : c.text('Not found', 404)
+  }
+  // Accept both REST-style /:id and the documented collection endpoint with an id in JSON.
+  app.patch('/api/admin/incidents/:id', async (c) => updateAnnouncement(c, await parseJson(c), c.req.param('id')))
+  app.patch('/api/admin/incidents', async (c) => updateAnnouncement(c, await parseJson(c)))
 
   // ── Sign-in ────────────────────────────────────────────────────────────────────────────────
   mountAuthRoutes(app, deps)
@@ -304,6 +344,27 @@ export function createApp(deps: Deps): Hono {
     )
   }
   app.get('/api/pages/:slug', (c) => renderJson(c, c.req.param('slug')))
+  app.get('/api/pages/:slug/incidents', async (c) => {
+    const r = await openPage(c, c.req.param('slug'))
+    if (r instanceof Response) return r
+    // Do not make incident history an accidental public API for a page that deliberately hides it.
+    if (!r.page.show.includes('incidents')) return c.text('Not found', 404)
+    const status = c.req.query('status')
+    const daysText = c.req.query('days')
+    if (status !== undefined && status !== 'open' && status !== 'resolved') return c.json({ error: 'status must be open or resolved' }, 400)
+    if (daysText !== undefined && daysText !== '7' && daysText !== '30' && daysText !== '90') return c.json({ error: 'days must be 7, 30, or 90' }, 400)
+    const now = nowSeconds(); const since = now - Number(daysText ?? '90') * 86_400
+    const ids = r.page.monitorIds
+    const placeholders = ids.map(() => '?').join(', ')
+    const automatic = ids.length
+      ? await deps.db.all<{ id: number; monitor_id: string; reason: string; severity: string; detail: string | null; started_at: number; resolved_at: number | null }>(
+          `SELECT id, monitor_id, reason, severity, detail, started_at, resolved_at FROM incidents WHERE monitor_id IN (${placeholders}) AND started_at >= ?${status === 'open' ? ' AND resolved_at IS NULL' : status === 'resolved' ? ' AND resolved_at IS NOT NULL' : ''} ORDER BY started_at DESC`,
+          [...ids, since],
+        )
+      : []
+    const announcements = (await listAnnouncements(deps.db, { status: status as 'open' | 'resolved' | undefined, since })).filter((item) => item.monitors.some((id) => ids.includes(id)))
+    return respond(c, r.page, async () => c.json({ generatedAt: now, automatic: automatic.map((item) => ({ id: item.id, monitorId: item.monitor_id, reason: item.reason, severity: item.severity, ...(r.page.show.includes('errors') ? { detail: item.detail } : {}), startedAt: item.started_at, resolvedAt: item.resolved_at })), announcements }))
+  })
   app.get('/api/status', async (c) => (config.home ? renderJson(c, config.home) : c.json({ error: 'no home page' }, 404)))
 
   app.notFound((c) => notFound(c, 'There is nothing here.'))

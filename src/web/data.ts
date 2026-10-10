@@ -1,4 +1,5 @@
 import type { Monitor } from '../config.ts'
+import { listAnnouncements, type Announcement } from '../announcements.ts'
 import type { Deps } from '../deps.ts'
 import type { CheckResult } from '../evaluate/http.ts'
 import { activeMaintenance as activeMaintenanceForMonitor, maintenanceOccurrences, type MaintenanceOccurrence } from '../maintenance.ts'
@@ -93,6 +94,8 @@ export interface StatusData {
   activeMaintenance: MaintenanceView[]
   /** Future windows beginning in the next week. */
   upcomingMaintenance: MaintenanceView[]
+  /** Manually posted incidents visible to this page's monitors. */
+  announcements: Announcement[]
 }
 
 interface MonitorRow {
@@ -248,7 +251,7 @@ export async function loadStatusData(deps: Deps, now: number, monitorIds?: reado
         [...httpIds, todayStart - 90 * DAY, todayStart],
       )
     : Promise.resolve([] as LatencyDailyRow[])
-  const [rows, states, incidentRows, tick, hourlyRows, dailyRows] = await Promise.all([
+  const [rows, states, incidentRows, tick, hourlyRows, dailyRows, announcements] = await Promise.all([
     db.all<MonitorRow>(`SELECT id, created_at FROM monitors WHERE paused = 0`),
     db.all<MonitorStateRow>(`SELECT * FROM monitor_state`),
     db.all<{ id: number; monitor_id: string; reason: IncidentReason; severity: 'outage' | 'warning'; detail: string | null; started_at: number; resolved_at: number | null }>(
@@ -259,6 +262,7 @@ export async function loadStatusData(deps: Deps, now: number, monitorIds?: reado
     lastTickAt(deps),
     latencyHourly,
     latencyDaily,
+    listAnnouncements(db),
   ])
   const created = new Map(rows.map((r) => [r.id, r.created_at]))
   const stateById = new Map(states.map((s) => [s.monitor_id, s]))
@@ -338,7 +342,9 @@ export async function loadStatusData(deps: Deps, now: number, monitorIds?: reado
   const pageWindows = maintenanceOccurrences(config.maintenance, now, now + 7 * DAY)
   const activeMaintenance = pageMaintenance(pageWindows.filter((window) => window.start <= now && window.end > now), pageMonitors)
   const upcomingMaintenance = pageMaintenance(pageWindows.filter((window) => window.start > now), pageMonitors)
-  return { now, lastTickAt: tick, groups, counts, openIncidents, openWarnings, activeMaintenance, upcomingMaintenance }
+  const pageMonitorIds = new Set(pageMonitors.map((monitor) => monitor.id))
+  const pageAnnouncements = announcements.filter((announcement) => announcement.monitors.some((id) => pageMonitorIds.has(id)))
+  return { now, lastTickAt: tick, groups, counts, openIncidents, openWarnings, activeMaintenance, upcomingMaintenance, announcements: pageAnnouncements }
 }
 
 export type RunResult = 'success' | 'failed' | 'running' | 'hung' | 'unfinished' | 'log'
@@ -415,13 +421,14 @@ export interface MonitorDetail {
   pings: PingView[]
   checks: (CheckResult & { at: number })[]
   incidents: IncidentView[]
+  announcements: Announcement[]
 }
 
 export async function loadMonitorDetail(deps: Deps, id: string, now: number): Promise<MonitorDetail | null> {
   const data = await loadStatusData(deps, now, [id])
   const view = data.groups.flatMap((g) => g.monitors).find((m) => m.monitor.id === id)
   if (!view) return null
-  const [pings, ticks, incidents] = await Promise.all([
+  const [pings, ticks, incidents, announcements] = await Promise.all([
     view.monitor.kind === 'push'
       ? deps.db.all<PingView>(
           `SELECT id, kind, exit_code, duration_ms, body, source_ip, received_at FROM pings
@@ -438,6 +445,7 @@ export async function loadMonitorDetail(deps: Deps, id: string, now: number): Pr
       `SELECT id, reason, severity, detail, started_at, resolved_at FROM incidents WHERE monitor_id = ? ORDER BY started_at DESC LIMIT 20`,
       [id],
     ),
+    listAnnouncements(deps.db, { monitorId: id }),
   ])
   const checks: MonitorDetail['checks'] = []
   for (const t of ticks) {
@@ -458,5 +466,6 @@ export async function loadMonitorDetail(deps: Deps, id: string, now: number): Pr
       startedAt: r.started_at,
       resolvedAt: r.resolved_at,
     })),
+    announcements,
   }
 }

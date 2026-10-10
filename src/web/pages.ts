@@ -4,6 +4,7 @@ import type { DetailField, Monitor, NormalizedPage } from '../config.ts'
 import type { Status } from '../state.ts'
 import { formatDuration, formatDurationLong } from '../util/time.ts'
 import { type DayBar, type IncidentView, type MaintenanceView, type MonitorDetail, type MonitorView, type RunView, type StatusData, groupRuns } from './data.ts'
+import type { Announcement } from '../announcements.ts'
 import { STYLES } from './styles.ts'
 
 type Html = ReturnType<typeof html>
@@ -216,6 +217,9 @@ function statusBanner(data: StatusData, ctx: PageCtx): Html {
           (m) => html`<a class="chip ${m.state.status}" href="${ctx.base}/m/${enc(m.monitor.id)}">${m.monitor.name}</a>`,
         )}</div>`
       : ''}
+    ${fields.has('incidents') && data.announcements.filter((announcement) => announcement.status !== 'resolved').length
+      ? html`<div class="status-incidents announcements">${data.announcements.filter((announcement) => announcement.status !== 'resolved').map((announcement) => announcementCard(announcement, data.now, tz))}</div>`
+      : ''}
     ${fields.has('incidents') && data.openIncidents.length
       ? html`<div class="status-incidents">${data.openIncidents.map(
           (i) => html`<article class="incident">
@@ -227,6 +231,16 @@ function statusBanner(data: StatusData, ctx: PageCtx): Html {
         )}</div>`
       : ''}
   </section>`
+}
+
+function announcementCard(announcement: Announcement, now: number, tz: string): Html {
+  const latest = announcement.updates[0]
+  const names = announcement.monitors.join(', ')
+  return html`<article class="incident announcement announcement-${announcement.impact}">
+    <div class="incident-title"><strong>${announcement.title}</strong></div>
+    ${latest?.body ? html`<p class="incident-body">${latest.body}</p>` : ''}
+    <p class="incident-meta">${announcement.status[0]!.toUpperCase() + announcement.status.slice(1)}<span aria-hidden="true">·</span>Ongoing for ${formatDurationLong(now - announcement.createdAt)}<span aria-hidden="true">·</span>Affects ${names || 'all monitors'}${latest ? html`<span aria-hidden="true">·</span>Updated ${when(latest.createdAt, now, tz, 'since')}` : ''}</p>
+  </article>`
 }
 
 /** Amber warnings are deliberately separate from availability: an expiring certificate is not downtime. */
@@ -682,10 +696,11 @@ export function monitorPage(d: MonitorDetail, ctx: PageCtx & { now: number }): H
     : ''
 
   const outages = d.incidents.filter((i) => i.severity === 'outage')
+  const resolvedAnnouncements = d.announcements.filter((announcement) => announcement.status === 'resolved')
   const incidents = fields.has('incidents')
     ? html`<section class="card">
         <h2>Incidents</h2>
-        ${outages.length === 0
+        ${outages.length === 0 && resolvedAnnouncements.length === 0
           ? html`<p class="muted">No incidents recorded.</p>`
           : html`<div class="scroll"><table>
               <thead><tr><th>Started</th><th>Reason</th>${fields.has('errors') ? html`<th>Detail</th>` : ''}<th class="num">Duration</th></tr></thead>
@@ -698,6 +713,8 @@ export function monitorPage(d: MonitorDetail, ctx: PageCtx & { now: number }): H
                     ? html`<span class="pill down">Ongoing</span><span>${formatDuration(now - i.startedAt)}</span>`
                     : formatDuration(i.resolvedAt - i.startedAt)}</td>
                 </tr>`,
+              )}${resolvedAnnouncements.map(
+                (announcement) => html`<tr class="announcement-history"><td class="nowrap">${when(announcement.createdAt, now, tz, 'datetime')}</td><td class="nowrap">${announcement.title}</td>${fields.has('errors') ? html`<td class="muted">${announcement.updates[0]?.body ?? ''}</td>` : ''}<td class="num nowrap">${announcement.resolvedAt ? formatDuration(announcement.resolvedAt - announcement.createdAt) : 'Resolved'}</td></tr>`,
               )}</tbody></table></div>`}
       </section>`
     : ''

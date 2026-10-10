@@ -107,6 +107,27 @@ export const MIGRATIONS: string[][] = [
     )`,
     `CREATE INDEX IF NOT EXISTS latency_daily_day ON latency_daily(day)`,
   ],
+  [
+    `CREATE TABLE IF NOT EXISTS announcements (
+      id           INTEGER PRIMARY KEY AUTOINCREMENT,
+      create_key   TEXT NOT NULL UNIQUE,
+      title        TEXT NOT NULL,
+      impact       TEXT NOT NULL CHECK (impact IN ('none', 'minor', 'major', 'maintenance')),
+      status       TEXT NOT NULL CHECK (status IN ('investigating', 'identified', 'monitoring', 'resolved')),
+      monitors_json TEXT NOT NULL,
+      created_at   INTEGER NOT NULL,
+      resolved_at  INTEGER
+    )`,
+    `CREATE INDEX IF NOT EXISTS announcements_status_created ON announcements(status, created_at DESC)`,
+    `CREATE TABLE IF NOT EXISTS announcement_updates (
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      announcement_id INTEGER NOT NULL,
+      status          TEXT NOT NULL CHECK (status IN ('investigating', 'identified', 'monitoring', 'resolved')),
+      body            TEXT NOT NULL,
+      created_at      INTEGER NOT NULL
+    )`,
+    `CREATE INDEX IF NOT EXISTS announcement_updates_announcement ON announcement_updates(announcement_id, created_at DESC)`,
+  ],
 ]
 
 export const SCHEMA_VERSION = MIGRATIONS.length
