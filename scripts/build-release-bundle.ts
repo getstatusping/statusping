@@ -23,6 +23,23 @@ function sha256(content: Uint8Array): string {
 }
 
 /**
+ * Do not use the wall clock in a release artifact: rebuilding the same source
+ * must produce the same update metadata. A release job can provide
+ * SOURCE_DATE_EPOCH; local builds use the checked-out commit timestamp.
+ */
+function releasedAt(): string {
+  const sourceDateEpoch = process.env.SOURCE_DATE_EPOCH
+  if (sourceDateEpoch && /^\d+$/.test(sourceDateEpoch)) {
+    const date = new Date(Number(sourceDateEpoch) * 1_000)
+    if (!Number.isNaN(date.valueOf())) return date.toISOString()
+  }
+  const result = spawnSync('git', ['log', '-1', '--format=%cI'], { cwd: appRoot, encoding: 'utf8' })
+  const date = new Date(result.stdout.trim())
+  if (!Number.isNaN(date.valueOf())) return date.toISOString()
+  throw new Error('Unable to determine a reproducible release timestamp; set SOURCE_DATE_EPOCH')
+}
+
+/**
  * A release bundle is public. The release worker deliberately reads all
  * credentials at runtime, but guard against a future bundler/config mistake
  * by rejecting any artifact containing a secret value supplied to this build.
@@ -101,13 +118,42 @@ async function main() {
   await writeFile(join(stagingDir, 'metadata.json'), `${JSON.stringify(metadata, null, 2)}\n`, 'utf8')
 
   const artifactContents = Object.fromEntries(await Promise.all([bundleName, 'migrations.sql', 'metadata.json'].map(async (name) => [name, await readFile(join(stagingDir, name))]))) as Record<string, Uint8Array>
+  const checksum = (name: string) => {
+    const bytes = artifactContents[name]!
+    return { sha256: sha256(bytes), bytes: bytes.byteLength }
+  }
+  const updateManifest = {
+    format: 'statusping-update-manifest/v1',
+    version,
+    channel: 'stable',
+    releasedAt: releasedAt(),
+    // Until cross-version migrations have an explicit compatibility policy,
+    // the updater may only offer a mechanical update from this release.
+    // This conservative value prevents an unsafe automatic suggestion.
+    minimumVersion: version,
+    schema: {
+      from: 0,
+      to: MIGRATIONS.length,
+      strategy: 'forward-only',
+    },
+    bundle: { file: bundleName, ...checksum(bundleName) },
+    migrations: { file: 'migrations.sql', ...checksum('migrations.sql') },
+    template: {
+      version,
+      marker: 'STATUSPING_TEMPLATE_VERSION',
+    },
+    notesUrl: `https://github.com/getstatusping/statusping/releases/tag/v${version}`,
+    breaking: false,
+  }
+  artifactContents['update-manifest.json'] = Buffer.from(`${JSON.stringify(updateManifest, null, 2)}\n`)
+  await writeFile(join(stagingDir, 'update-manifest.json'), artifactContents['update-manifest.json']!)
   assertNoBuildSecrets(artifactContents)
 
-  const fileNames = [bundleName, 'migrations.sql', 'metadata.json']
-  const files = Object.fromEntries(await Promise.all(fileNames.map(async (name) => {
+  const fileNames = [bundleName, 'migrations.sql', 'metadata.json', 'update-manifest.json']
+  const files = Object.fromEntries(fileNames.map((name) => {
     const bytes = artifactContents[name]!
     return [name, { sha256: sha256(bytes), bytes: bytes.byteLength }]
-  })))
+  }))
   const manifest = { version, files }
   await writeFile(join(stagingDir, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`, 'utf8')
 

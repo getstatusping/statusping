@@ -40,3 +40,20 @@ jobs:
       # This compiles the Worker and validates the root Deploy Button config
       # without creating or changing anything in the Cloudflare account.
       - run: npx wrangler deploy --dry-run --config wrangler.toml
+
+  release-contract:
+    name: Verify release contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: npm run release:bundle
+        env:
+          # The builder must reject artifact leaks without printing this value.
+          STATUSPING_RELEASE_BUNDLE_TEST_SECRET: release-bundle-must-not-contain-this-value
+      - run: npm run release:verify
