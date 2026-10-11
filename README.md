@@ -136,6 +136,10 @@ Every YAML import is parsed as safe plain data, validated by the same StatusPing
 
 When browser admin is enabled, the validated D1-backed configuration becomes the running configuration. The checked-in configuration or `STATUSPING_CONFIG` remains the initial seed and is still the recommended approach for automated or version-controlled deployments.
 
+## Change the sign-in method
+
+Settings → Access → **Change sign-in method** switches between email and password, Cloudflare Access and OpenID Connect without taking the site offline. You enter the new settings, then run a real test sign-in as an administrator; the current method keeps working until that succeeds and you choose **Switch**. Switching signs everyone else out.
+
 ## Connect AI assistants (MCP)
 
 With the browser admin enabled, StatusPing is also a remote [MCP](https://modelcontextprotocol.io) server at `https://<your-site>/mcp`. Create a token in **Settings → MCP** and choose what it can do:

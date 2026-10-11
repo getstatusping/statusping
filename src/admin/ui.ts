@@ -92,13 +92,13 @@ var b=document.createElement('button');b.type='button';b.className='btn-outline 
 b.addEventListener('click',function(){var s=input.type==='password';input.type=s?'text':'password';b.textContent=s?'Hide':'Show';b.setAttribute('aria-pressed',String(s));input.focus()});
 input.form&&input.form.addEventListener('submit',function(){input.type='password'});wrap.appendChild(b)})`
 
-const hidden = (csrf: string) => `<input type="hidden" name="csrf" value="${escape(csrf)}">`
-const field = (label: string, input: string, hint = '') => {
+export const hidden = (csrf: string) => `<input type="hidden" name="csrf" value="${escape(csrf)}">`
+export const field = (label: string, input: string, hint = '') => {
   const id = /\bid="([^"]+)"/.exec(input)?.[1]
   return `<div class="field"><label${id ? ` for="${id}"` : ''}>${label}</label>${input}</div>${hint ? `<p class="hint">${hint}</p>` : ''}`
 }
-const textInput = (name: string, value: string | number | undefined, attrs = '') => `<input class="input" id="${name}" name="${name}" value="${escape(String(value ?? ''))}" ${attrs}>`
-const selectInput = (name: string, options: Array<[string, string]>, current: string | undefined) =>
+export const textInput = (name: string, value: string | number | undefined, attrs = '') => `<input class="input" id="${name}" name="${name}" value="${escape(String(value ?? ''))}" ${attrs}>`
+export const selectInput = (name: string, options: Array<[string, string]>, current: string | undefined) =>
   `<select class="input" id="${name}" name="${name}">${options.map(([value, label]) => `<option value="${escape(value)}"${value === current ? ' selected' : ''}>${escape(label)}</option>`).join('')}</select>`
 const notice = (text: string | undefined, kind: 'error' | 'success' = 'success') =>
   !text ? '' : kind === 'error' ? `<p class="form-error" role="alert">${escape(text)}</p>` : `<p class="alert success" role="status">${escape(text)}</p>`
@@ -320,7 +320,7 @@ ${editing ? `<section class="card danger"><h2>Delete channel</h2><p class="lead"
 
 export function accessPage(opts: { viewer: Viewer; csrf: string; providerSummary: string; admins: string[]; notice?: string; error?: string; values?: Record<string, string> }): string {
   return layout({ ...opts, section: 'access', title: 'Access', description: 'Who can sign in to Settings.', body: `
-<section class="card"><h2>Sign-in method</h2><p class="lead" style="margin:0">${opts.providerSummary}</p></section>
+<section class="card"><h2>Sign-in method</h2><p class="lead">${opts.providerSummary}</p><div class="actions"><a class="btn-outline" href="/admin/access/method">Change sign-in method</a></div></section>
 <section class="card"><h2>Administrators</h2><p class="lead">These people can open Settings after signing in.</p>
 <form class="form" method="post" action="/admin/access">${hidden(opts.csrf)}
 ${field('Administrator emails', `<textarea class="input" id="admins" name="admins" placeholder="one per line, or *@your-domain.com">${escape(opts.values?.admins ?? opts.admins.join('\n'))}</textarea>`, 'You cannot remove yourself; another administrator has to.')}

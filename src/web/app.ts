@@ -22,6 +22,7 @@ import { confirmSubscription, consumeSubscribeLimit, dispatchSubscriberOutbox, e
 import { refreshAdminConfig } from '../deps.ts'
 import { mountAdminRoutes } from '../admin/routes.ts'
 import { mountMcp } from '../mcp/server.ts'
+import { mountAccessSwitchAuthRoutes } from '../admin/access-switch.ts'
 import { mountSetupAuthRoutes, mountSetupRoutes, SETUP_AUTH_PATHS } from '../setup/routes.ts'
 import { consumePingRateLimit } from '../rate-limit.ts'
 import { runHttpCheck } from '../evaluate/http.ts'
@@ -249,6 +250,7 @@ export function createApp(deps: Deps): Hono {
 
   // ── Sign-in (setup verification first: it shares /auth paths and hands over outside setup) ──
   mountSetupAuthRoutes(app, deps)
+  mountAccessSwitchAuthRoutes(app, deps)
   mountAuthRoutes(app, deps)
 
   // ── Browser admin + management API (opt-in via `admin: true`, or on after setup) ───────────
