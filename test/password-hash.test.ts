@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi, onTestFinished } from 'vitest'
 import { hashPassword, hashUserPassword, passwordMatches, verifyPassword } from '../src/auth/providers.ts'
 import { createApp } from '../src/web/app.ts'
 import { createTestDb, makeDeps, testConfig } from './helpers.ts'
@@ -44,6 +44,10 @@ describe('password hashes', () => {
   })
 
   it('rate-limits password sign-in per client address', async () => {
+    // The limit counts per clock minute; pin the clock so the test cannot straddle a minute.
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-10-11T00:00:05Z'))
+    onTestFinished(() => { vi.useRealTimers() })
     const t = await createTestDb('libsql'); close = t.close
     const env = { BASIC_AUTH_USERS: JSON.stringify({ 'alice@example.test': await hashUserPassword('alice chosen password') }) }
     const deps = makeDeps(t.db, { env, config: testConfig({ access: { provider: { type: 'basic' } } }) })
