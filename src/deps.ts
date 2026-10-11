@@ -73,7 +73,7 @@ export interface Deps {
 /** What a site serves before setup or a migration has stored its configuration. */
 const UNCONFIGURED: StatusPingConfig = { title: 'StatusPing', baseUrl: 'http://localhost', groups: [] }
 
-/** The copy of a config-as-code site's configuration that v0.2.26 saved; adopted once on first run. */
+/** The copy of a config-as-code site's configuration that v0.2.26/v0.2.27 saved; adopted once on first run. */
 export const LEGACY_CONFIG_KEY = 'legacy_config'
 
 export interface CreateDepsOptions {
@@ -199,7 +199,7 @@ export async function refreshAdminConfig(deps: Deps, now: number): Promise<boole
 }
 
 /**
- * v0.3.0 dropped config-as-code. A site that ran v0.2.26 saved a validated copy of it; a site
+ * v0.3.0 dropped config-as-code. A site that ran v0.2.26 or v0.2.27 saved a validated copy of it; a site
  * configured by STATUSPING_CONFIG still has the variable. Either is adopted once, keeping monitor
  * IDs, history and ping URLs. With a sign-in method and administrators the site carries on as
  * before; without, setup opens with the configuration already imported. Otherwise setup starts

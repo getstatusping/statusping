@@ -6,9 +6,9 @@ If your site was set up with the setup wizard, or has `admin: true`, it already 
 
 ## The short version
 
-1. Update to **v0.2.26** first. The update notice requires it, because v0.2.26 saves a checked copy of your configuration in the database while the site keeps running from your file.
+1. Update to **v0.2.27** first. The update notice requires it, because it saves a checked copy of your configuration in the database while the site keeps running from your file.
 2. Open `https://<your-site>/healthz`. It should show `"migration": "ready"`.
-3. Update to **v0.3.0**. On its first run it moves the saved copy into the database. Monitor IDs, history, ping URLs and alert channels stay the same.
+3. Update to **v0.3.1** or later. On its first run it moves the saved copy into the database. Monitor IDs, history, ping URLs and alert channels stay the same.
 
 What happens next depends on your configuration:
 
@@ -34,7 +34,7 @@ Deploy, and check `/healthz` again.
 
 ## Doing it by hand instead
 
-On v0.2.26, export the configuration as YAML:
+On v0.2.27, export the configuration as YAML:
 
 ```bash
 npm run cli -- export-config --yaml > statusping.yaml
