@@ -51,6 +51,7 @@ describe('release Worker entrypoint', () => {
 
       const health = await worker.fetch(new Request('https://release.test/healthz'), env, { waitUntil: () => {} })
       expect(health.status).toBe(200)
+      expect(health.headers.get('access-control-allow-origin')).toBe('*')
       const ping = await worker.fetch(
         new Request('https://release.test/ping/test-token-0123456789', { method: 'POST', headers: { 'cf-connecting-ip': '198.51.100.12' }, body: 'completed' }),
         env,

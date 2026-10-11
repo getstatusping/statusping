@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { normalizeConfig } from '../src/config.ts'
-import { canonicalJson, checkForUpdate, loadUpdateCheck, OFFICIAL_MANIFEST_URL, OFFICIAL_RELEASE_PUBLIC_KEY } from '../src/updates.ts'
+import { canonicalJson, checkForUpdate, loadUpdateCheck, OFFICIAL_MANIFEST_URL, OFFICIAL_RELEASE_PUBLIC_KEY, verifySignedManifest } from '../src/updates.ts'
 import { createTestDb, fakeFetch, testConfig } from './helpers.ts'
 
 const base64 = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes))
@@ -49,6 +49,16 @@ describe('signed admin update checks', () => {
     expect(fetch.calls).toHaveLength(1)
     expect(await loadUpdateCheck(t.db)).toMatchObject({ result: 'available', targetVersion: '0.2.0', checkedAt: 100 })
     expect(await t.db.first<{ sql: string }>("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'update_checks'")).not.toBeNull()
+  })
+
+  it('exposes only the verified public facts of a signed manifest', async () => {
+    const signed = await signedManifest('0.2.0', '0.1.0')
+    expect(await verifySignedManifest(signed.body, signed.publicKey)).toEqual({
+      version: '0.2.0', minimumVersion: '0.1.0', schema: { from: 0, to: 99 }, releasedAt: '2026-10-10T00:00:00Z', notesUrl: 'https://example.test/notes', breaking: false,
+    })
+    expect(await verifySignedManifest(signed.body.replace('0.2.0', '0.3.0'), signed.publicKey)).toBeNull()
+    expect(await verifySignedManifest(signed.body, OFFICIAL_RELEASE_PUBLIC_KEY)).toBeNull()
+    expect(await verifySignedManifest('not json', signed.publicKey)).toBeNull()
   })
 
   it('fails closed for tampered, unsigned, or incompatible releases', async () => {

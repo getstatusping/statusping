@@ -12,7 +12,8 @@
     "node": ">=22.18"
   },
   "exports": {
-    "./config": "./src/config.ts"
+    "./config": "./src/config.ts",
+    "./updates": "./src/updates.ts"
   },
   "scripts": {
     "test": "vitest run",

@@ -37,7 +37,18 @@ function manifestCandidate(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null
 }
 
-async function verifyManifest(raw: string, publicKey: string): Promise<{ target: Version; minimum: Version; schemaFrom: number } | null> {
+/** The public, signature-verified facts of a release manifest. */
+export interface VerifiedRelease {
+  version: string
+  minimumVersion: string
+  schema: { from: number; to: number }
+  releasedAt: string | null
+  notesUrl: string | null
+  breaking: boolean
+}
+
+/** Verify a raw manifest against an Ed25519 public key; null for anything untrusted or malformed. */
+export async function verifySignedManifest(raw: string, publicKey: string): Promise<VerifiedRelease | null> {
   let parsed: unknown
   try { parsed = JSON.parse(raw) } catch { return null }
   const manifest = manifestCandidate(parsed)
@@ -55,7 +66,16 @@ async function verifyManifest(raw: string, publicKey: string): Promise<{ target:
     const schemaFrom = schema?.from
     const schemaTo = schema?.to
     if (!target || !minimum || !schema || typeof schemaFrom !== 'number' || typeof schemaTo !== 'number' || !Number.isSafeInteger(schemaFrom) || !Number.isSafeInteger(schemaTo) || schemaFrom < 0 || schemaTo < schemaFrom || typeof schema.strategy !== 'string') return null
-    return { target, minimum, schemaFrom }
+    const text = (value: unknown) => (typeof value === 'string' && value.length <= 200 ? value : null)
+    const notesUrl = text(manifest.notesUrl)
+    return {
+      version: target.join('.'),
+      minimumVersion: minimum.join('.'),
+      schema: { from: schemaFrom, to: schemaTo },
+      releasedAt: text(manifest.releasedAt),
+      notesUrl: notesUrl?.startsWith('https://') ? notesUrl : null,
+      breaking: manifest.breaking === true,
+    }
   } catch { return null }
 }
 
@@ -89,12 +109,12 @@ export async function checkForUpdate(opts: { db: Db; config: NormalizedConfig; f
     if (!response.ok || (Number.isFinite(length) && length > 64 * 1024)) throw new Error('unusable manifest response')
     const raw = await response.text()
     if (raw.length > 64 * 1024) throw new Error('manifest is too large')
-    const manifest = await verifyManifest(raw, updates.publicKey)
+    const manifest = await verifySignedManifest(raw, updates.publicKey)
     const installed = version(APP_VERSION)!
     if (!manifest) throw new Error('invalid manifest')
-    const targetVersion = manifest.target.join('.')
-    if (compare(installed, manifest.minimum) < 0 || SCHEMA_VERSION < manifest.schemaFrom) next = { result: 'incompatible', targetVersion, checkedAt: opts.now }
-    else next = { result: compare(manifest.target, installed) > 0 ? 'available' : 'current', targetVersion, checkedAt: opts.now }
+    const targetVersion = manifest.version
+    if (compare(installed, version(manifest.minimumVersion)!) < 0 || SCHEMA_VERSION < manifest.schema.from) next = { result: 'incompatible', targetVersion, checkedAt: opts.now }
+    else next = { result: compare(version(targetVersion)!, installed) > 0 ? 'available' : 'current', targetVersion, checkedAt: opts.now }
   } catch { /* failure is intentionally non-sensitive and compact */ }
   return store(opts.db, next)
 }

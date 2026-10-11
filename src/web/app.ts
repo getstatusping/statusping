@@ -140,9 +140,12 @@ export function createApp(deps: Deps): Hono {
       const templateVersion = deps.getEnv('STATUSPING_TEMPLATE_VERSION') ?? APP_VERSION
       return c.json({ ok, version: APP_VERSION, schemaVersion: SCHEMA_VERSION, channel, templateVersion, instanceId, role: deps.role, lastTickAt: last, lagSeconds: lag }, ok ? 200 : 503, {
         'cache-control': 'no-store',
+        // Public, credential-free facts: let statusp.ing/updates read them
+        // directly from the operator's browser.
+        'access-control-allow-origin': '*',
       })
     } catch (e) {
-      return c.json({ ok: false, error: (e as Error).message }, 503)
+      return c.json({ ok: false, error: 'health check failed' }, 503, { 'access-control-allow-origin': '*' })
     }
   })
 
