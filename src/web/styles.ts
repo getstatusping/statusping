@@ -11,7 +11,10 @@ const APP_STYLES = `
   background: color-mix(in oklab, var(--background) 85%, transparent); backdrop-filter: blur(8px); }
 .site-header-inner { display: flex; align-items: center; gap: 12px; height: 56px; }
 .account { margin-left: auto; display: flex; align-items: center; gap: 12px; }
-.header-link { font-size: 14px; font-weight: 500; color: var(--muted-foreground); } .header-link:hover, .header-link[aria-current="page"] { color: var(--foreground); text-decoration: none; }
+/* Ghost button (shadcn variant="ghost"), the same height as the Sign out button beside it. */
+.header-link { display: inline-flex; align-items: center; height: 36px; padding: 0 12px; border-radius: calc(var(--radius) - 2px); font-size: 14px; font-weight: 500; color: var(--foreground); }
+.header-link:hover { background: var(--accent); color: var(--accent-foreground); text-decoration: none; }
+.header-link[aria-current="page"] { background: var(--muted); }
 @media (max-width: 480px) { .account-email { display: none; } }
 
 /* ── Page heading + page dropdown ───────────────────────────────────────────── */
@@ -193,7 +196,8 @@ select.input option { background: var(--popover); color: var(--popover-foregroun
 .auth-card h1 { margin: 0 0 24px; font-size: 20px; font-weight: 600; letter-spacing: -0.01em; }
 .auth-form { display: grid; gap: 16px; }
 .auth-form label { display: grid; gap: 8px; font-size: 14px; font-weight: 500; }
-.auth-form .btn-primary { width: 100%; margin-top: 8px; }
+.auth-form .btn-primary, .auth-card .sso-button { width: 100%; margin-top: 8px; }
+.auth-card p.muted { margin: -12px 0 16px; }
 .form-error { margin: 0 0 16px; padding: 8px 12px; border: 1px solid color-mix(in oklab, var(--destructive) 40%, var(--border));
   border-radius: calc(var(--radius) - 2px); color: var(--destructive); font-size: 14px; }
 

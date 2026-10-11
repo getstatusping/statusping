@@ -69,7 +69,7 @@ textarea.code { min-height: 24rem; font: 13px/1.5 ui-monospace, SFMono-Regular, 
 .table { width: 100%; border-collapse: collapse; font-size: 14px; }
 .table th { padding: 0 12px 8px 0; text-align: left; font-weight: 500; color: var(--muted-foreground); border-bottom: 1px solid var(--border); }
 .table td { padding: 10px 12px 10px 0; border-bottom: 1px solid var(--border); vertical-align: middle; }
-.table tr:last-child td { border-bottom: 0; } .table td.end { text-align: right; white-space: nowrap; padding-right: 0; }
+.table tr:last-child td { border-bottom: 0; } .table tbody tr:hover { background: transparent; } .table td.end { text-align: right; white-space: nowrap; padding-right: 0; }
 .table .sub { display: block; color: var(--muted-foreground); font-size: 13px; overflow-wrap: anywhere; }
 .badge { display: inline-flex; align-items: center; height: 22px; padding: 0 8px; border: 1px solid var(--border); border-radius: 999px; font-size: 12px; font-weight: 500; white-space: nowrap; }
 .empty { padding: 24px; text-align: center; color: var(--muted-foreground); }
@@ -117,14 +117,19 @@ ${notice(opts.notice)}${notice(opts.error, 'error')}${opts.body}</div></div></ma
 
 export function generalPage(opts: { viewer: Viewer; csrf: string; title: string; baseUrl: string; timezone: string; updatesEnabled: boolean; installedVersion: string; update: UpdateState; notice?: string; error?: string; resetError?: string }): string {
   const u = opts.update
-  const updateLine = u.result === 'disabled' ? 'Update checks are off.'
-    : u.result === 'available' && u.targetVersion ? `Version <strong>v${escape(u.targetVersion)}</strong> is available. <a href="${escape(releaseNotesUrl(u.targetVersion))}">Release notes</a>
-<div class="actions" style="margin-top:12px"><a class="btn-primary" href="${escape(updateUrl(u.targetVersion, opts.baseUrl))}">Update to v${escape(u.targetVersion)}</a></div>
-<p class="hint" style="margin:8px 0 0">Opens statusp.ing, where you sign in with GitHub and choose to update directly or through a pull request. Your site's address stays in your browser.</p>`
+  const available = u.result === 'available' && u.targetVersion ? u.targetVersion : null
+  const status = u.result === 'disabled' ? 'Update checks are off.'
+    : available ? `Version <strong>v${escape(available)}</strong> is available.`
       : u.result === 'incompatible' && u.targetVersion ? `Version v${escape(u.targetVersion)} is available but needs a manual upgrade path for this installation.`
         : u.result === 'failed' ? 'The signed update manifest could not be checked. No update is being offered.'
           : 'This installation is up to date.'
-  const checked = u.checkedAt === null ? '' : `<p class="hint" style="margin:8px 0 0">Last checked ${escape(new Date(u.checkedAt * 1000).toISOString().replace('T', ' ').slice(0, 16))} UTC.</p>`
+  const checked = u.checkedAt === null ? '' : ` Last checked ${escape(new Date(u.checkedAt * 1000).toISOString().replace('T', ' ').slice(0, 16))} UTC.`
+  // Every update action in one row: update, re-check, and the release notes.
+  const actions = [
+    available ? `<a class="btn-primary" href="${escape(updateUrl(available, opts.baseUrl))}">Update to v${escape(available)}</a>` : '',
+    u.result === 'disabled' ? '' : `<form method="post" action="/admin/updates/check" style="display:contents">${hidden(opts.csrf)}<button class="btn-outline" type="submit">Check for updates</button></form>`,
+    available ? `<a class="btn-outline" href="${escape(releaseNotesUrl(available))}">Release notes</a>` : '',
+  ].filter(Boolean).join('')
   return layout({ ...opts, section: 'general', title: 'General', description: 'Your status site and its software.', body: `
 <section class="card"><h2>Site</h2><p class="lead">Shown on your status pages and used in alert links.</p>
 <form class="form" method="post" action="/admin/general">${hidden(opts.csrf)}
@@ -133,8 +138,9 @@ ${field('Address', textInput('baseUrl', opts.baseUrl, 'type="url" required'), 'T
 ${field('Timezone', timezoneSelect('timezone', opts.timezone, 'required'), 'Used for times on your status pages and for scheduled jobs.')}
 <label class="check"><input type="checkbox" name="updates" value="1"${opts.updatesEnabled ? ' checked' : ''}><span>Check for StatusPing updates (contacts GitHub at most once a day)</span></label>
 <div class="actions"><button class="btn-primary" type="submit">Save</button></div></form></section>
-<section class="card"><h2>Software</h2><p class="lead">Installed version <code>v${escape(opts.installedVersion)}</code>.</p><p style="margin:0">${updateLine}</p>${checked}
-${u.result === 'disabled' ? '' : `<form method="post" action="/admin/updates/check" style="margin-top:12px">${hidden(opts.csrf)}<button class="btn-outline" type="submit">Check for updates</button></form>`}</section>
+<section class="card"><h2>Software</h2><p class="lead">Installed version <code>v${escape(opts.installedVersion)}</code>. ${status}</p>
+${actions ? `<div class="actions">${actions}</div>` : ''}
+<p class="hint" style="margin:12px 0 0">${available ? 'Update opens statusp.ing, where you sign in with GitHub and update directly or through a pull request. Your site\'s address stays in your browser.' : ''}${checked}</p></section>
 ${resetCard(opts.csrf, opts.resetError)}` })
 }
 

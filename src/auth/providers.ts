@@ -8,7 +8,7 @@ import { nowSeconds } from '../util/time.ts'
 import { b64urlEncode, verifyJwt } from './jwt.ts'
 import { sign, unsign } from './session.ts'
 import { buildChrome } from '../web/chrome.ts'
-import { signInPage } from '../web/pages.ts'
+import { signInPage, ssoSignInPage } from '../web/pages.ts'
 import { type Viewer, referencedGroups } from './viewer.ts'
 
 const SESSION_COOKIE = 'sp_session'
@@ -389,7 +389,18 @@ export function mountAuthRoutes(app: Hono, deps: Deps) {
   app.get('/auth/login', async (c) => {
     const p = deps.config.access?.provider
     if (!p) return notFound(c)
-    if (p.type === 'oidc') return oidcHandlers(deps, p).login(c)
+    if (p.type === 'oidc') {
+      // Explain where the visitor is going before leaving the site; ?go=1 starts the hand-over.
+      if (c.req.query('go') !== '1') {
+        const next = safeNext(c.req.query('next'))
+        if (await sessionViewer(c, deps, 'oidc')) return c.redirect(next, 302)
+        const chrome = await buildChrome(deps, { viewer: null, current: next, signIn: false })
+        let provider = 'single sign-on'
+        try { provider = new URL(p.issuer).hostname } catch { /* keep the generic label */ }
+        return c.html(ssoSignInPage(chrome, { next, provider }), 200, { 'cache-control': 'no-store' })
+      }
+      return oidcHandlers(deps, p).login(c)
+    }
     if (p.type === 'basic') return password.form(c)
     // Cloudflare Access: Access itself shows the sign-in screen for protected paths.
     if (await currentViewer(c, deps)) return c.redirect(safeNext(c.req.query('next')), 302)

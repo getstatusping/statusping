@@ -249,9 +249,14 @@ describe('SSO / OIDC (groups or emails)', () => {
       },
     )
     close = s.close
+    const safe = (next: string) => (next.startsWith('/') && !next.startsWith('//') ? next : '/')
     /** Runs the browser side of the login flow; returns the session cookie. */
     const login = async (claims: Record<string, unknown>, next = '/pages/finance') => {
-      const start = await s.app.request(`/auth/login?next=${encodeURIComponent(next)}`)
+      // First a page that says where the visitor is going, then the hand-over to the provider.
+      const intro = await s.app.request(`/auth/login?next=${encodeURIComponent(next)}`)
+      expect(intro.status).toBe(200)
+      expect(await intro.text()).toContain(`href="/auth/login?go=1&next=${encodeURIComponent(safe(next))}">Continue with idp.test</a>`)
+      const start = await s.app.request(`/auth/login?go=1&next=${encodeURIComponent(next)}`)
       expect(start.status).toBe(302)
       const authorize = new URL(start.headers.get('location')!)
       expect(authorize.origin + authorize.pathname).toBe('https://idp.test/authorize')

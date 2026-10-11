@@ -839,6 +839,21 @@ export function signInPage(chrome: Chrome, opts: { next: string; email?: string;
   )
 }
 
+/** Single sign-on: say where the visitor is going before handing over to the identity provider. */
+export function ssoSignInPage(chrome: Chrome, opts: { next: string; provider: string; reason?: string }): Html {
+  return layout(
+    `Sign in · ${chrome.siteTitle}`,
+    html`<div class="auth">
+      <section class="card auth-card">
+        <h1>Sign in</h1>
+        <p class="muted">${opts.reason ?? 'This page is only available to signed-in people.'}</p>
+        <a class="btn-primary sso-button" href="/auth/login?go=1&next=${encodeURIComponent(opts.next)}">Continue with ${opts.provider}</a>
+      </section>
+    </div>`,
+    chrome,
+  )
+}
+
 export function messagePage(chrome: Chrome, title: string, message: string): Html {
   return layout(title, html`${pageHeading(title)}<p class="muted">${message}</p>`, chrome)
 }

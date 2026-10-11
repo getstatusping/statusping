@@ -61,6 +61,18 @@ describe('signed admin update checks', () => {
     expect(await verifySignedManifest('not json', signed.publicKey)).toBeNull()
   })
 
+  it('rechecks at once when the cached offer is not newer than the installed version', async () => {
+    const t = await createTestDb('libsql'); close = t.close
+    const signed = await signedManifest('99.0.0', '0.1.0')
+    const fetch = fakeFetch(() => new Response(signed.body))
+    const config = normalizeConfig(testConfig({ updates: { enabled: true, manifestUrl: 'https://updates.example.test/stable.json', publicKey: signed.publicKey } }))
+    await checkForUpdate({ db: t.db, config, fetch: fetch.fn, now: 100 })
+    // Simulate a check made before this installation was updated past the offered version.
+    await t.db.run(`UPDATE update_checks SET target_version = '0.0.1' WHERE id = 1`)
+    expect(await checkForUpdate({ db: t.db, config, fetch: fetch.fn, now: 160 })).toMatchObject({ result: 'available', targetVersion: '99.0.0', checkedAt: 160 })
+    expect(fetch.calls).toHaveLength(2)
+  })
+
   it('fails closed for tampered, unsigned, or incompatible releases', async () => {
     const t = await createTestDb('libsql'); close = t.close
     const signed = await signedManifest('99.0.0', '9.0.0')

@@ -95,7 +95,11 @@ export async function checkForUpdate(opts: { db: Db; config: NormalizedConfig; f
   const { updates } = opts.config
   if (!updates.enabled || !updates.manifestUrl || !updates.publicKey) return { result: 'disabled', targetVersion: null, checkedAt: null }
   const existing = await loadUpdateCheck(opts.db)
-  if (!opts.force && existing && opts.now - existing.checkedAt < DAY) return existing
+  // A cached offer of a version this installation has already reached (it was updated since
+  // the check) is stale, whatever its age.
+  const outdatedOffer = existing?.targetVersion && (existing.result === 'available' || existing.result === 'incompatible')
+    && compare(version(existing.targetVersion) ?? [0, 0, 0], version(APP_VERSION)!) <= 0
+  if (!opts.force && existing && !outdatedOffer && opts.now - existing.checkedAt < DAY) return existing
   let next: StoredUpdateCheck = { result: 'failed', targetVersion: null, checkedAt: opts.now }
   try {
     const response = await opts.fetch(updates.manifestUrl, {
