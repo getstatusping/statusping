@@ -12,6 +12,7 @@ const APP_STYLES = `
 .site-header-inner { display: flex; align-items: center; gap: 12px; height: 56px; }
 .account { margin-left: auto; display: flex; align-items: center; gap: 12px; }
 /* Ghost button (shadcn variant="ghost"), the same height as the Sign out button beside it. */
+.header-nav { display: flex; align-items: center; gap: 4px; margin-left: -12px; }
 .header-link { display: inline-flex; align-items: center; height: 36px; padding: 0 12px; border-radius: calc(var(--radius) - 2px); font-size: 14px; font-weight: 500; color: var(--foreground); }
 .header-link:hover { background: var(--accent); color: var(--accent-foreground); text-decoration: none; }
 .header-link[aria-current="page"] { background: var(--muted); }

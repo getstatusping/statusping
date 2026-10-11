@@ -68,13 +68,17 @@ function barClass(b: DayBar): string {
 
 function siteHeader(c: Chrome): Html {
   const account = c.viewer
-    ? html`${c.settingsLink ? html`<a class="header-link" href="/admin">Settings</a>` : ''}<span class="muted small account-email">${c.viewer.email}</span><a class="btn-outline" href="/auth/logout">Sign out</a>`
+    ? html`<span class="muted small account-email">${c.viewer.email}</span><a class="btn-outline" href="/auth/logout">Sign out</a>`
     : c.signInLink
       ? html`<a class="btn-outline" href="/auth/login?next=${enc(c.current)}">Sign in</a>`
       : ''
+  // Administrators get site navigation on the left: the status site, then Settings.
+  const nav = c.settingsLink
+    ? html`<nav class="header-nav" aria-label="Site"><a class="header-link" href="/">Home</a><a class="header-link" href="/admin">Settings</a></nav>`
+    : ''
   return html`<header class="site-header">
   <div class="wrap site-header-inner">
-    <div class="account">${account}</div>
+    ${nav}<div class="account">${account}</div>
   </div>
 </header>`
 }
