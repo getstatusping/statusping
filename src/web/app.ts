@@ -166,7 +166,9 @@ export function createApp(deps: Deps): Hono {
           'access-control-allow-origin': '*',
         })
       }
-      return c.json({ ok, version: APP_VERSION, schemaVersion: SCHEMA_VERSION, channel, templateVersion, instanceId, role: deps.role, lastTickAt: last, lagSeconds: lag }, ok ? 200 : 503, {
+      // A config-as-code site says whether it is ready for the automatic move to the database.
+      const legacy = deps.legacyMigration ? { config: 'code', migration: deps.legacyMigration } : {}
+      return c.json({ ok, version: APP_VERSION, schemaVersion: SCHEMA_VERSION, channel, templateVersion, instanceId, role: deps.role, lastTickAt: last, lagSeconds: lag, ...legacy }, ok ? 200 : 503, {
         'cache-control': 'no-store',
         // Public, credential-free facts: let statusp.ing/updates read them
         // directly from the operator's browser.

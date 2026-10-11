@@ -65,7 +65,15 @@ export interface Deps {
   /** What the last refreshAdminConfig() saw; an unchanged stamp skips reloading and re-validating. */
   configStamp?: string
   configLoaded: boolean
+  /**
+   * Set while the site still runs from config-as-code (statusping.config.ts or STATUSPING_CONFIG):
+   * whether a validated copy is saved for the automatic move to the database in v0.3.0.
+   */
+  legacyMigration?: 'ready' | 'blocked'
 }
+
+/** The saved copy of a config-as-code site's configuration, adopted by the release that drops config-as-code. */
+export const LEGACY_CONFIG_KEY = 'legacy_config'
 
 export interface CreateDepsOptions {
   db: Db
@@ -184,6 +192,31 @@ export async function refreshAdminConfig(deps: Deps, now: number): Promise<boole
   return loaded.loaded
 }
 
+let warnedLegacy = false
+
+/**
+ * Config-as-code is going away (plan 011). Keep a validated copy of it in the database so the next
+ * major release can adopt it without the owner re-entering anything. Returns whether it wrote.
+ */
+async function saveLegacyCopy(deps: Deps, now: number): Promise<boolean> {
+  let json: string
+  try {
+    json = JSON.stringify(validateAdminConfig({ ...deps.configInput, admin: true }, deps.getEnv, 'load').config)
+    deps.legacyMigration = 'ready'
+  } catch (error) {
+    deps.legacyMigration = 'blocked'
+    if (!warnedLegacy) deps.log('warn', 'statusping.config.ts / STATUSPING_CONFIG cannot move to the database automatically. Fix this before upgrading to v0.3.0', { problem: (error as Error).message })
+    warnedLegacy = true
+    return false
+  }
+  if (!warnedLegacy) deps.log('warn', 'Config-as-code (statusping.config.ts / STATUSPING_CONFIG) is deprecated. v0.3.0 moves this configuration into the database automatically: https://github.com/getstatusping/statusping/blob/main/MIGRATING-TO-YAML.md')
+  warnedLegacy = true
+  const saved = await deps.db.first<{ value: string }>(`SELECT value FROM instance_secrets WHERE name = ?`, [LEGACY_CONFIG_KEY])
+  if (saved?.value === json) return false
+  await deps.db.run(`INSERT INTO instance_secrets (name, value, created_at) VALUES (?, ?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value, created_at = excluded.created_at`, [LEGACY_CONFIG_KEY, json, now])
+  return true
+}
+
 async function loadAdminState(deps: Deps, now: number): Promise<{ loaded: boolean; wrote: boolean }> {
   await loadStoredEnv(deps)
   let setup = await loadSetupState(deps.db)
@@ -198,7 +231,7 @@ async function loadAdminState(deps: Deps, now: number): Promise<{ loaded: boolea
   deps.setupPending = setup?.status === 'pending'
   if (deps.setupPending) return { loaded: false, wrote }
   if (setup?.status === 'complete') deps.adminEnabled = true
-  if (!deps.adminEnabled) return { loaded: false, wrote }
+  if (!deps.adminEnabled) return { loaded: false, wrote: (await saveLegacyCopy(deps, now)) || wrote }
   let stored = await loadAdminConfig(deps.db)
   if (!stored) {
     // Validate before persisting: literal credentials never enter admin_config or audit_log.

@@ -4,7 +4,7 @@
  *
  *   npm run cli -- check                 validate statusping.config.ts
  *   npm run cli -- check --json-config <file>  validate JSON config without a TS config file
- *   npm run cli -- export-config          print statusping.config.ts as JSON
+ *   npm run cli -- export-config [--yaml] print statusping.config.ts as JSON (or YAML for import)
  *   npm run cli -- tokens                generate PING_TOKENS (keeps tokens already in $PING_TOKENS)
  *   npm run cli -- urls                  print ping URLs from $PING_TOKENS
  *   npm run cli -- migrate               apply the schema to $TURSO_DATABASE_URL (Node + Turso setups)
@@ -31,7 +31,7 @@ import { loadNodeConfig } from '../adapters/node/config.ts'
 import { hashUserPassword } from '../src/auth/providers.ts'
 import { type AdminConfig, validateAdminConfig } from '../src/admin/security.ts'
 import { revisionStatements } from '../src/admin/service.ts'
-import { locateProblems, parseAdminYaml } from '../src/admin/yaml.ts'
+import { locateProblems, parseAdminYaml, stringifyAdminYaml } from '../src/admin/yaml.ts'
 import type { NormalizedConfig } from '../src/config.ts'
 
 const [command, ...args] = process.argv.slice(2)
@@ -172,7 +172,9 @@ async function main() {
     }
 
     case 'export-config': {
-      console.log(JSON.stringify(sourceConfig, null, 2))
+      // --yaml prints the file the setup wizard and Settings → Configuration import (plan 011 §7).
+      if (args.includes('--yaml')) console.log(stringifyAdminYaml(sourceConfig).trimEnd())
+      else console.log(JSON.stringify(sourceConfig, null, 2))
       break
     }
 

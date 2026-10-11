@@ -130,6 +130,10 @@ Checks are off by default, so an installation never contacts GitHub unless an op
 
 This repository is self-contained: the shared UI is included as a local dependency, so the Deploy Button does not fetch any StatusPing package from npm.
 
+## Moving off config-as-code
+
+`statusping.config.ts` and `STATUSPING_CONFIG` are deprecated. v0.3.0 stops reading them and moves the configuration into the database automatically. Update to v0.2.26 first; see [MIGRATING-TO-YAML.md](MIGRATING-TO-YAML.md).
+
 ## Manage configuration in the app
 
 To enable the browser admin, include `admin: true` in the initial configuration and configure an administrator under `access.admins` plus a supported sign-in provider. After that first deployment, sign in at `/admin` to edit or import the configuration as YAML.
