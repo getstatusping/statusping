@@ -225,6 +225,65 @@ Passwords chosen in the wizard are stored as
 PBKDF2-SHA256 (50,000 iterations, which fits the Workers free plan's CPU limit), and password
 sign-in is limited to 10 attempts per minute per address.
 
+## Use your own domain
+
+A status page reads best at an address like `status.example.com`. How you connect a
+domain depends on where StatusPing runs. In every case, finish by updating the
+site's address:
+
+1. Check that `https://status.example.com/healthz` answers.
+2. In **Settings → General**, set **Address** to `https://status.example.com`.
+   StatusPing uses it in alert links, ping URLs, secure cookies and sign-in
+   callbacks.
+3. If pages are restricted with single sign-on, add
+   `https://status.example.com/auth/callback` as a redirect URI at your identity
+   provider.
+4. Sign in once and open a link from a test alert to confirm both work. Ping
+   URLs you already handed to cron jobs keep working at the old address.
+
+### Cloudflare Workers
+
+The domain's DNS must be on Cloudflare. In the dashboard, open **Workers & Pages →
+_your Worker_ → Settings → Domains & Routes → Add → Custom domain**, and enter
+`status.example.com`. Cloudflare creates the DNS record and the certificate; this
+usually takes a few minutes. Don't give StatusPing a Cloudflare API token for
+this: set the domain up yourself in the dashboard.
+
+### Node
+
+Put a reverse proxy that handles TLS in front of the server. For example, with
+[Caddy](https://caddyserver.com):
+
+```
+status.example.com {
+    reverse_proxy localhost:8000
+}
+```
+
+Point an `A`/`AAAA` record for `status.example.com` at that machine. Set
+`STATUSPING_TRUST_PROXY=true` so ping rate limits see visitors' real IPs from
+`X-Forwarded-For`. Only set it when the proxy is the sole way in, since a
+direct client could otherwise spoof the header.
+
+### Hosted on statusp.ing
+
+Sites on the Pro and Team plans can connect their own domain under **Your sites →
+Custom domain** at `app.statusp.ing`:
+
+1. Enter the domain, such as `status.example.com`, and choose **Connect domain**.
+2. At your DNS provider, add a `CNAME` record from `status` to `cname.statusp.ing`.
+   With Cloudflare DNS, leave the record **DNS only** (grey cloud).
+3. StatusPing checks every minute and shows **Connected** once the name resolves
+   and its certificate is issued. **Check now** checks at once.
+4. Update **Address** in the site's Settings as above. The `<name>.statusp.ing`
+   address keeps working.
+
+A domain at the zone apex (`example.com` itself) needs a DNS provider that supports
+CNAME flattening or `ALIAS` records; a subdomain is simpler. If a domain shows
+**Could not connect**, check its record, remove it, and add it again. If the
+domain has `CAA` records, they must allow one of the certificate authorities
+Cloudflare uses (Let's Encrypt, Google Trust Services or SSL.com).
+
 ## Hosted platform tenants
 
 StatusPing can also run as one tenant of a hosted, multi-tenant platform. Each tenant
