@@ -43,6 +43,16 @@ describe('template upgrade preflight', () => {
     ]))
   })
 
+  it('keeps untrusted marker versions and unsafe path text out of preflight diagnostics', () => {
+    expect(() => validateTemplateMarker(marker, 'target-token-should-not-be-reflected')).toThrow('marker release does not match the expected version')
+    const result = calculateUpgradePreflight({
+      currentVersion: '0.1.0', currentMarker: marker, targetVersion: '0.2.0', targetMarker: newerMarker(),
+      changedPaths: ['../token-should-not-be-reflected'],
+    })
+    expect(result.errors).toContain('changed path is unsafe')
+    expect(result.errors.join('\n')).not.toContain('token-should-not-be-reflected')
+  })
+
   it('preserves the exact local README region and rejects ambiguous markers', () => {
     const region = marker.ownership.preservedRegions['README.md']!
     const local = `before\n${region.start}\nprivate local notes\n${region.end}\nafter\n`

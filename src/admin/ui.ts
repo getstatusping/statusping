@@ -8,16 +8,15 @@ import { releaseNotesUrl } from '../updates.ts'
 const escape = (value: string) => value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
 
 /** Minimal no-JS management shell; API clients use the same underlying operations. */
-export function adminPage(opts: { viewer: Viewer; csrf: string; config: unknown; configText?: string; audit: AuditEntry[]; monitorIds: string[]; sinkNames: string[]; installedVersion: string; instanceUrl: string; update: StoredUpdateCheck | { result: 'disabled'; targetVersion: null; checkedAt: null }; message?: string }): string {
+export function adminPage(opts: { viewer: Viewer; csrf: string; config: unknown; configText?: string; audit: AuditEntry[]; monitorIds: string[]; sinkNames: string[]; installedVersion: string; update: StoredUpdateCheck | { result: 'disabled'; targetVersion: null; checkedAt: null }; message?: string }): string {
   const config = opts.configText ?? stringifyAdminYaml(opts.config)
   const audit = opts.audit.map((event) => `<li><time datetime="${new Date(event.at * 1000).toISOString()}">${new Date(event.at * 1000).toISOString()}</time> <strong>${escape(event.actor)}</strong> ${escape(event.action)} <span>${escape(event.target)}</span></li>`).join('') || '<li>No changes recorded yet.</li>'
   const update = opts.update
   const lastChecked = update.checkedAt === null ? 'Not checked yet.' : `Last checked ${escape(new Date(update.checkedAt * 1000).toISOString())}.`
-  const reviewUrl = update.result === 'available' && update.targetVersion ? `https://statusp.ing/updates#${new URLSearchParams({ instance: opts.instanceUrl, version: opts.installedVersion, target: update.targetVersion }).toString()}` : null
   const updateDetail = update.result === 'disabled'
     ? 'Checks are disabled. Add an <code>updates</code> block with an HTTPS manifest URL and public signing key to enable them.'
     : update.result === 'available' && update.targetVersion
-      ? `Update available: <strong>v${escape(update.targetVersion)}</strong>. <a href="${escape(reviewUrl!)}">Review update</a> · <a href="${escape(releaseNotesUrl(update.targetVersion))}">Release notes</a>`
+      ? `Update available: <strong>v${escape(update.targetVersion)}</strong>. <a href="${escape(releaseNotesUrl(update.targetVersion))}">Release notes</a>`
       : update.result === 'incompatible' && update.targetVersion
         ? `Version v${escape(update.targetVersion)} is available but requires a manual recovery path for this installation.`
         : update.result === 'failed'

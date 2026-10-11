@@ -95,7 +95,9 @@ export function validateTemplateMarker(value: unknown, expectedVersion?: string)
   const template = string(marker.template, 'template')
   compareVersions(release, template)
   if (release !== template) throw new TemplateMarkerError('release and template must match')
-  if (expectedVersion !== undefined && release !== expectedVersion) throw new TemplateMarkerError(`marker version ${release} does not match expected version ${expectedVersion}`)
+  // Both marker versions originate outside a future updater boundary.  Keep
+  // the diagnostic useful without reflecting arbitrary manifest text.
+  if (expectedVersion !== undefined && release !== expectedVersion) throw new TemplateMarkerError('marker release does not match the expected version')
   if (marker.channel !== 'stable') throw new TemplateMarkerError('only the stable channel is supported')
 
   const source = object(marker.source, 'source')
@@ -165,7 +167,7 @@ export function calculateUpgradePreflight(input: {
     const seen = new Set<string>()
     const customerPaths = [...current.ownership.customerOwnedPaths, ...target.ownership.customerOwnedPaths]
     for (const changedPath of input.changedPaths) {
-      if (!pathIsSafe(changedPath) || changedPath.endsWith('/')) { errors.push(`changed path is unsafe: ${JSON.stringify(changedPath)}`); continue }
+      if (!pathIsSafe(changedPath) || changedPath.endsWith('/')) { errors.push('changed path is unsafe'); continue }
       if (seen.has(changedPath)) continue
       seen.add(changedPath)
       if (ownerOf(changedPath, customerPaths)) { errors.push(`customer-owned path would be overwritten: ${changedPath}`); continue }

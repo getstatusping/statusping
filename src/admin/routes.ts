@@ -35,7 +35,7 @@ export function mountAdminRoutes(app: Hono, deps: Deps): void {
     // field. Audit records use redaction separately. Presentation-only fields would break an
     // unchanged textarea round-trip, so never add them here.
     const update = await checkForUpdate({ db: deps.db, config: deps.config, fetch: deps.fetch, now: nowSeconds() })
-    return adminPage({ viewer, csrf, config, configText, audit: await listAudit(deps.db, 50), message, sinkNames: Object.keys(config.sinks ?? {}), monitorIds: deps.config.monitors.filter((monitor) => monitor.kind === 'push').map((monitor) => monitor.id), installedVersion: APP_VERSION, instanceUrl: deps.config.baseUrl, update })
+    return adminPage({ viewer, csrf, config, configText, audit: await listAudit(deps.db, 50), message, sinkNames: Object.keys(config.sinks ?? {}), monitorIds: deps.config.monitors.filter((monitor) => monitor.kind === 'push').map((monitor) => monitor.id), installedVersion: APP_VERSION, update })
   }
   const bodyJson = async (c: Context): Promise<unknown | null> => {
     try { return await c.req.json() } catch { return null }

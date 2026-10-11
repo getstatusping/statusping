@@ -632,7 +632,11 @@ export function normalizeConfig(config: StatusPingConfig): NormalizedConfig {
       if (typeof manifestUrl === 'string') {
         try {
           const url = new URL(manifestUrl)
-          if (url.protocol !== 'https:' || url.username || url.password) problems.push('updates.manifestUrl: must be an HTTPS URL without credentials')
+          // A manifest is public, static release metadata.  Keeping its URL
+          // free of userinfo, queries, and fragments prevents an operator
+          // accidentally placing a bearer-like value in editable config (or
+          // subsequently sending it as part of an outbound request).
+          if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash) problems.push('updates.manifestUrl: must be an HTTPS URL without credentials, query parameters, or fragments')
         } catch { problems.push('updates.manifestUrl: must be a valid HTTPS URL') }
       }
       let keyIsValid = false

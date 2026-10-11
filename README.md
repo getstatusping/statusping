@@ -67,7 +67,7 @@ updates:
   publicKey: BASE64_RAW_ED25519_PUBLIC_KEY
 ```
 
-This is disabled by default so an installation never contacts an update service without an operator choosing to enable it. The admin page offers a cached check (at most once per 24 hours) and a deliberate **Check for updates** action; an available release opens a review link rather than changing the Worker.
+This is disabled by default so an installation never contacts an update service without an operator choosing to enable it. The manifest URL must be an HTTPS URL with no credentials, query parameters, or fragment. The admin page offers a cached check (at most once per 24 hours) and a deliberate **Check for updates** action; an available release links only to its public release notes rather than changing the Worker or transmitting installation details.
 
 This repository is self-contained: the shared UI is included as a local dependency, so the Deploy Button does not fetch any StatusPing package from npm.
 
