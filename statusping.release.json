@@ -1,0 +1,43 @@
+{
+  "format": "statusping-template/v1",
+  "release": "0.1.0",
+  "template": "0.1.0",
+  "channel": "stable",
+  "source": {
+    "repository": "https://github.com/getstatusping/statusping",
+    "deployUrl": "https://deploy.workers.cloudflare.com/?url=https://github.com/getstatusping/statusping"
+  },
+  "ownership": {
+    "updaterOwnedPaths": [
+      ".github/",
+      "adapters/",
+      "cli/",
+      "packages/",
+      "scripts/",
+      "src/",
+      "test/",
+      "LICENSE",
+      "package-lock.json",
+      "package.json",
+      "tsconfig.json",
+      "vitest.config.ts"
+    ],
+    "customerOwnedPaths": [
+      ".dev.vars",
+      "statusping.config.ts",
+      "wrangler.toml"
+    ],
+    "optionalCustomerOwnedPaths": [
+      ".dev.vars"
+    ],
+    "updaterOwnedWranglerBindings": [
+      "STATUSPING_TEMPLATE_VERSION"
+    ],
+    "preservedRegions": {
+      "README.md": {
+        "start": "<!-- statusping:local-notes:start -->",
+        "end": "<!-- statusping:local-notes:end -->"
+      }
+    }
+  }
+}

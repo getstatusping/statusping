@@ -22,7 +22,8 @@
     "cf:deploy": "wrangler deploy --config adapters/cloudflare/wrangler.toml",
     "release:bundle": "node scripts/build-release-bundle.ts",
     "release:verify": "node scripts/verify-release-bundle.ts",
-    "template:generate": "node scripts/build-deploy-template.ts"
+    "template:generate": "node scripts/build-deploy-template.ts",
+    "template:verify": "node scripts/verify-template-contract.ts"
   },
   "dependencies": {
     "@statusping/ui": "file:packages/ui",

@@ -18,6 +18,34 @@ The Worker creates its schema on the first request or scheduled tick. The includ
 
 `/healthz` reports the running app version, schema version, release channel, template version, and (if set) an opaque `STATUSPING_INSTANCE_ID`. These values are deliberately public deployment metadata: do not use a secret for the instance ID. `STATUSPING_TEMPLATE_VERSION` is a release-managed marker for future upgrade tooling; leave it unchanged in normal deployments.
 
+## Template ownership and supported upgrades
+
+Deploy Button installations create a repository that you own. The checked-in
+[`statusping.release.json`](statusping.release.json) records the release,
+template, canonical source, and file-ownership contract used by future
+reviewable upgrade pull requests.
+
+- **Updater-owned:** the runtime, adapters, scripts, package metadata, CI, and
+  tests. A supported upgrade may replace only these paths.
+- **Customer-owned:** `statusping.config.ts`, `wrangler.toml`, and `.dev.vars`.
+  Upgrade tooling must not replace them. Its sole documented exception is the
+  public `STATUSPING_TEMPLATE_VERSION` line in `wrangler.toml`.
+- **Secrets and data:** secrets stay in Cloudflare/your local `.dev.vars`; D1
+  data, Cloudflare resources, domains, and monitor configuration are never
+  files an updater replaces.
+
+Before accepting an upgrade PR, retain any custom runtime edits separately: a
+supported updater will surface conflicts rather than force-push or overwrite
+them. Run `npm run template:verify` to validate the ownership marker in a
+checkout. The release marker contains no secrets.
+
+### Local deployment notes
+
+<!-- statusping:local-notes:start -->
+Add local setup, domain, or operational notes here. Supported upgrades preserve
+the text between these two markers.
+<!-- statusping:local-notes:end -->
+
 ## Release update manifest
 
 `npm run release:bundle` writes a portable Worker bundle and a checksummed `update-manifest.json` under `dist/releases/<version>/`. The manifest is public, reproducible metadata for update tooling: stable channel, conservative minimum compatible version, forward-only schema range, bundle and migration filenames/checksums, template marker, and release-notes URL. It never contains configuration or secret values. Verify the full artifact contract with `npm run release:verify` before publishing a release.
