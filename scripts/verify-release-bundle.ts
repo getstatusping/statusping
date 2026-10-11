@@ -64,7 +64,8 @@ async function main() {
   assertion(update.notesUrl === `https://github.com/getstatusping/statusping/releases/tag/v${packageJson.version}`, 'invalid release notes URL')
   // Breaking releases are declared in package.json and must name the transition release that prepares for them.
   assertion(update.breaking === (packageJson.statusping.breaking === true), 'breaking flag does not match package.json')
-  assertion(!update.breaking || update.minimumVersion !== '0.1.0', 'a breaking release must raise minimumUpgradeVersion to its transition release')
+  // Every release upgrades directly from any older one: migrations run on first start, never via a stepping-stone release.
+  assertion(update.minimumVersion === '0.1.0', 'minimumUpgradeVersion must stay 0.1.0; migrate on first start instead of requiring an intermediate release')
   if (update.signature !== undefined) {
     assertion(update.signature.algorithm === 'Ed25519' && /^[A-Za-z0-9+/]+={0,2}$/.test(update.signature.value), 'invalid release signature metadata')
   }

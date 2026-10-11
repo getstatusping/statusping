@@ -133,7 +133,7 @@ This repository is self-contained: the shared UI is included as a local dependen
 
 ## Coming from config-as-code
 
-v0.3.0 removed `statusping.config.ts` and `STATUSPING_CONFIG`. A site that ran v0.2.27 moves its configuration into the database automatically on first start; see [MIGRATING-TO-YAML.md](MIGRATING-TO-YAML.md).
+Since v0.3 the configuration lives in the database. A site configured by `statusping.config.ts` or `STATUSPING_CONFIG` can update straight to the latest release: on first start it moves that configuration into the database by itself. See [MIGRATING-TO-YAML.md](MIGRATING-TO-YAML.md).
 
 ## Manage configuration in the app
 

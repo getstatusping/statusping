@@ -68,6 +68,8 @@ export interface Deps {
   configLoaded: boolean
   /** A deployed site: configured only through its database. */
   fromDatabase: boolean
+  /** Reads an old statusping.config.ts, if the repository still has one (migration source only). */
+  legacyConfig?: () => Promise<StatusPingConfig | undefined>
 }
 
 /** What a site serves before setup or a migration has stored its configuration. */
@@ -83,6 +85,8 @@ export interface CreateDepsOptions {
    * Settings, and the YAML API are the only ways to configure it (plan 011).
    */
   config?: StatusPingConfig
+  /** Adapters pass a reader for an old statusping.config.ts; it is used once, to migrate. */
+  legacyConfig?: () => Promise<StatusPingConfig | undefined>
   getEnv: EnvGetter
   fetch?: typeof fetch
   log?: Logger
@@ -124,6 +128,7 @@ export function createDeps(opts: CreateDepsOptions): Deps {
     configInput: input,
     adminEnabled: opts.config === undefined || opts.config.admin === true,
     fromDatabase: opts.config === undefined,
+    legacyConfig: opts.legacyConfig,
     setupPending: false,
     role: roleEnv,
     // A Worker secret or env var always wins over a value stored by setup.
@@ -199,8 +204,9 @@ export async function refreshAdminConfig(deps: Deps, now: number): Promise<boole
 }
 
 /**
- * v0.3.0 dropped config-as-code. A site that ran v0.2.26 or v0.2.27 saved a validated copy of it; a site
- * configured by STATUSPING_CONFIG still has the variable. Either is adopted once, keeping monitor
+ * v0.3 dropped config-as-code. On the first start of an empty database the site adopts, once, the
+ * copy v0.2.26/v0.2.27 saved, else an old statusping.config.ts still in the repository, else
+ * STATUSPING_CONFIG. No intermediate release is needed. The configuration keeps monitor
  * IDs, history and ping URLs. With a sign-in method and administrators the site carries on as
  * before; without, setup opens with the configuration already imported. Otherwise setup starts
  * from scratch. Hosted tenants always start in setup (plan 005).
@@ -210,7 +216,9 @@ async function firstRun(deps: Deps, now: number): Promise<void> {
   if (!deps.tenant) {
     const saved = (await deps.db.first<{ value: string }>(`SELECT value FROM instance_secrets WHERE name = ?`, [LEGACY_CONFIG_KEY]))?.value
     try {
-      const raw = saved ? JSON.parse(saved) : deps.hasRealEnv('STATUSPING_CONFIG') ? parseJsonConfig(deps.getEnv('STATUSPING_CONFIG')!) : undefined
+      const raw = saved ? JSON.parse(saved)
+        : (await deps.legacyConfig?.().catch(() => undefined))
+          ?? (deps.hasRealEnv('STATUSPING_CONFIG') ? parseJsonConfig(deps.getEnv('STATUSPING_CONFIG')!) : undefined)
       if (raw) legacy = validateAdminConfig({ ...raw, admin: true }, deps.getEnv, 'load').config
     } catch (error) {
       deps.log('warn', 'The old configuration could not be moved to the database; starting setup instead. Import it in the setup wizard after fixing it.', { problem: (error as Error).message })

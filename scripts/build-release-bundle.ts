@@ -124,8 +124,8 @@ async function main() {
     version,
     channel: 'stable',
     releasedAt: releasedAt(),
-    // The oldest installed release that can move straight to this one. Raise
-    // it in package.json when a release drops an upgrade path.
+    // The oldest installed release that can move straight to this one. It stays
+    // 0.1.0: releases migrate on first start rather than through a stepping stone.
     minimumVersion: packageJson.statusping.minimumUpgradeVersion,
     schema: {
       from: 0,
@@ -139,7 +139,7 @@ async function main() {
       marker: 'STATUSPING_TEMPLATE_VERSION',
     },
     notesUrl: `https://github.com/getstatusping/statusping/releases/tag/v${version}`,
-    // A breaking release must also raise minimumUpgradeVersion to the release that prepares for it.
+    // Breaking releases still upgrade directly; the flag tells owners to read the notes.
     breaking: packageJson.statusping.breaking === true,
   }
   // Signing is deliberately release-job-only. The public key is configured by an

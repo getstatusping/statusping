@@ -2,7 +2,7 @@
   "name": "@statusping/app",
   "version": "0.3.1",
   "statusping": {
-    "minimumUpgradeVersion": "0.2.27",
+    "minimumUpgradeVersion": "0.1.0",
     "breaking": true
   },
   "private": true,

@@ -7,13 +7,13 @@ describe('first run of v0.3.0 on a former config-as-code site (plan 011)', () =>
   let close: (() => Promise<void>) | undefined
   afterEach(async () => close?.())
 
-  async function site(env: Record<string, string> = {}, saved?: unknown) {
+  async function site(env: Record<string, string> = {}, saved?: unknown, file?: unknown) {
     const t = await createTestDb('libsql'); close = t.close
     const { migrate } = await import('../src/schema.ts')
     await migrate(t.db)
     if (saved) await t.db.run(`INSERT INTO instance_secrets (name, value, created_at) VALUES (?, ?, 0)`, [LEGACY_CONFIG_KEY, JSON.stringify(saved)])
     const logs: string[] = []
-    const deps = createDeps({ db: t.db, getEnv: (name) => env[name], log: (_l, message) => { logs.push(message) } })
+    const deps = createDeps({ db: t.db, getEnv: (name) => env[name], log: (_l, message) => { logs.push(message) }, legacyConfig: async () => file as never })
     return { db: t.db, app: createApp(deps), logs }
   }
   const admins = { access: { provider: { type: 'basic' as const }, admins: { emails: ['owner@example.test'] } } }
@@ -26,6 +26,12 @@ describe('first run of v0.3.0 on a former config-as-code site (plan 011)', () =>
     expect(await s.db.first(`SELECT name FROM instance_secrets WHERE name = ?`, [LEGACY_CONFIG_KEY])).toBeNull()
     expect(await s.db.first<{ status: string }>(`SELECT status FROM setup_state`)).toEqual({ status: 'complete' })
     expect(await s.db.first<{ actor: string }>(`SELECT actor FROM config_revisions`)).toEqual({ actor: 'migration' })
+  })
+
+  it('adopts an old statusping.config.ts directly, without an intermediate release, ahead of STATUSPING_CONFIG', async () => {
+    const s = await site({ STATUSPING_CONFIG: JSON.stringify(testConfig({ sinks: {}, title: 'From the variable', ...admins })) }, undefined, testConfig({ sinks: {}, title: 'From the old file', ...admins }))
+    expect(await (await s.app.request('/')).text()).toContain('From the old file')
+    expect(await s.db.first<{ status: string }>(`SELECT status FROM setup_state`)).toEqual({ status: 'complete' })
   })
 
   it('starts setup when the old configuration cannot be adopted, saying why in the log', async () => {
