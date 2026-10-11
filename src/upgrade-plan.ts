@@ -1,0 +1,129 @@
+/**
+ * File-level three-way upgrade planning for a Deploy Button repository.
+ *
+ * Like the preflight, this is pure: the caller supplies file contents from the
+ * installed release (base), the target release, and the customer's repository
+ * (current). Both the local `npm run upgrade` command and a future review-PR
+ * service apply the resulting plan; neither may write anything it omits.
+ */
+import { calculateUpgradePreflight, preserveMarkedRegion, validateTemplateMarker, type PreservedRegion } from './upgrade-preflight.ts'
+
+export type Files = ReadonlyMap<string, Uint8Array>
+
+export type UpgradeConflict = {
+  path: string
+  reason: 'modified-locally' | 'deleted-locally' | 'added-locally' | 'template-marker-missing' | 'changed-upstream'
+}
+
+export type UpgradePlan = {
+  safe: boolean
+  currentVersion: string
+  targetVersion: string
+  /** Files to create or replace, with their complete new contents. */
+  writes: Map<string, Uint8Array>
+  /** Files the target release removed and the customer had not changed. */
+  deletes: string[]
+  /** Files left untouched because the customer changed them; resolve by hand. */
+  conflicts: UpgradeConflict[]
+  errors: string[]
+}
+
+export const MARKER_PATH = 'statusping.release.json'
+export const WRANGLER_PATH = 'wrangler.toml'
+const TEMPLATE_VERSION_LINE = /^STATUSPING_TEMPLATE_VERSION\s*=\s*"[^"\n]*"[ \t]*$/m
+
+const encoder = new TextEncoder()
+const decoder = new TextDecoder('utf-8', { fatal: true })
+
+function same(a: Uint8Array | undefined, b: Uint8Array | undefined): boolean {
+  if (a === undefined || b === undefined) return a === b
+  if (a.byteLength !== b.byteLength) return false
+  for (let i = 0; i < a.byteLength; i++) if (a[i] !== b[i]) return false
+  return true
+}
+
+function json(bytes: Uint8Array | undefined): unknown {
+  if (!bytes) return undefined
+  try { return JSON.parse(decoder.decode(bytes)) } catch { return undefined }
+}
+
+/**
+ * Merge one updater-owned file. A file the customer has not changed since the
+ * installed release takes the target contents; anything else is a conflict.
+ * A preserved region (the README local notes) is carried across and ignored
+ * when deciding whether the customer changed the file.
+ */
+function mergeFile(base: Uint8Array | undefined, target: Uint8Array | undefined, current: Uint8Array | undefined, region: PreservedRegion | undefined):
+  { kind: 'unchanged' } | { kind: 'write'; content: Uint8Array } | { kind: 'delete' } | { kind: 'conflict'; reason: UpgradeConflict['reason'] } {
+  if (region && base && target && current) {
+    try {
+      const [b, t, c] = [decoder.decode(base), decoder.decode(target), decoder.decode(current)]
+      if (preserveMarkedRegion(c, b, region) !== c) return { kind: 'conflict', reason: 'modified-locally' }
+      const merged = encoder.encode(preserveMarkedRegion(c, t, region))
+      return same(merged, current) ? { kind: 'unchanged' } : { kind: 'write', content: merged }
+    } catch { return { kind: 'conflict', reason: 'modified-locally' } }
+  }
+  if (same(current, target)) return { kind: 'unchanged' }
+  if (same(base, target)) return { kind: 'unchanged' }
+  if (base === undefined) return current === undefined ? { kind: 'write', content: target! } : { kind: 'conflict', reason: 'added-locally' }
+  if (current === undefined) return { kind: 'conflict', reason: 'deleted-locally' }
+  if (!same(current, base)) return { kind: 'conflict', reason: 'modified-locally' }
+  return target === undefined ? { kind: 'delete' } : { kind: 'write', content: target }
+}
+
+export function planUpgrade(input: { base: Files; target: Files; current: Files; currentWrangler: Uint8Array | undefined }): UpgradePlan {
+  const baseMarker = json(input.base.get(MARKER_PATH))
+  const targetMarker = json(input.target.get(MARKER_PATH))
+  const record = (value: unknown) => (value && typeof value === 'object' ? value as Record<string, unknown> : {})
+  const currentVersion = String(record(baseMarker).release ?? '')
+  const targetVersion = String(record(targetMarker).release ?? '')
+  const plan: UpgradePlan = { safe: false, currentVersion, targetVersion, writes: new Map(), deletes: [], conflicts: [], errors: [] }
+
+  // The customer's marker must still describe the release used as the base;
+  // otherwise the base contents do not represent what they installed.
+  if (!same(input.current.get(MARKER_PATH), input.base.get(MARKER_PATH))) {
+    plan.errors.push(`${MARKER_PATH} does not match the installed release v${currentVersion}`)
+    return plan
+  }
+
+  // Customer-owned files are never written. Upstream changes to them (beyond
+  // the template version line) are reported so the customer can apply them.
+  const ownership = record(record(targetMarker).ownership)
+  const customerPaths = Array.isArray(ownership.customerOwnedPaths) ? ownership.customerOwnedPaths.filter((p): p is string => typeof p === 'string') : []
+  const customerOwned = (path: string) => customerPaths.some((p) => path === p || (p.endsWith('/') && path.startsWith(p)))
+  const withoutVersionLine = (bytes: Uint8Array | undefined) => (bytes ? decoder.decode(bytes).replace(TEMPLATE_VERSION_LINE, '') : '')
+  const changedPaths: string[] = []
+  for (const path of [...new Set([...input.base.keys(), ...input.target.keys()])].sort()) {
+    const [base, next] = [input.base.get(path), input.target.get(path)]
+    if (same(base, next)) continue
+    if (!customerOwned(path)) changedPaths.push(path)
+    else if (path !== WRANGLER_PATH || withoutVersionLine(base) !== withoutVersionLine(next)) plan.conflicts.push({ path, reason: 'changed-upstream' })
+  }
+  const preflight = calculateUpgradePreflight({ currentVersion, currentMarker: baseMarker, targetVersion, targetMarker, changedPaths })
+  if (!preflight.safe) {
+    plan.errors.push(...preflight.errors)
+    plan.conflicts = []
+    return plan
+  }
+  const target = validateTemplateMarker(targetMarker, targetVersion)
+
+  for (const path of preflight.updaterOwnedChanges) {
+    const result = mergeFile(input.base.get(path), input.target.get(path), input.current.get(path), target.ownership.preservedRegions[path])
+    if (result.kind === 'write') plan.writes.set(path, result.content)
+    else if (result.kind === 'delete') plan.deletes.push(path)
+    else if (result.kind === 'conflict') plan.conflicts.push({ path, reason: result.reason })
+  }
+
+  // The template version line is the only updater-owned part of the
+  // customer's wrangler.toml; everything else in it is left byte-for-byte.
+  const wrangler = input.currentWrangler ? decoder.decode(input.currentWrangler) : ''
+  if (TEMPLATE_VERSION_LINE.test(wrangler)) {
+    const updated = wrangler.replace(TEMPLATE_VERSION_LINE, `STATUSPING_TEMPLATE_VERSION = "${targetVersion}"`)
+    if (updated !== wrangler) plan.writes.set(WRANGLER_PATH, encoder.encode(updated))
+  } else {
+    plan.conflicts.push({ path: WRANGLER_PATH, reason: 'template-marker-missing' })
+  }
+
+  plan.safe = plan.errors.length === 0
+  return plan
+}

@@ -22,8 +22,8 @@ The Worker creates its schema on the first request or scheduled tick. The includ
 
 Deploy Button installations create a repository that you own. The checked-in
 [`statusping.release.json`](statusping.release.json) records the release,
-template, canonical source, and file-ownership contract used by future
-reviewable upgrade pull requests.
+template, canonical source, and file-ownership contract used by
+`npm run upgrade` and reviewable upgrade pull requests.
 
 - **Updater-owned:** the runtime, adapters, scripts, package metadata, CI,
   tests, release marker, and this README outside its marked local-notes region.
@@ -46,6 +46,32 @@ changed paths. It refuses missing or unsupported markers, non-forward version
 changes, customer-owned paths, and unowned paths. The preflight reports the
 updater-owned files it may write and preserves the marked README region
 byte-for-byte before a review PR is created.
+
+### Upgrade a Deploy Button repository
+
+Cloudflare's Deploy Button creates an independent copy of this repository, so
+it does not receive upstream changes automatically. From a clean checkout of
+your repository, run:
+
+```sh
+npm run upgrade              # latest stable release
+npm run upgrade -- 0.2.0     # or a specific release
+```
+
+The command fetches your installed release and the target release from
+`getstatusping/statusping`, then commits the upgrade on a new
+`statusping/upgrade-vX.Y.Z` branch. It changes only updater-owned files you
+have not edited, removes files the release deleted, carries your README local
+notes across, and updates only the `STATUSPING_TEMPLATE_VERSION` line in
+`wrangler.toml`. It never pushes. Review the commit, push the branch, and merge
+it through a pull request; Cloudflare deploys the merge, and `/healthz` then
+reports the new version. To roll back the code, revert that pull request;
+database migrations are forward-only and are never rolled back.
+
+If you edited an updater-owned file, the command lists it and stops. Restore
+the file, or rerun with `--skip-conflicts` to upgrade everything else and merge
+that file by hand. Upstream changes to your own files (`statusping.config.ts`,
+`wrangler.toml`) are listed for you to apply; they are never overwritten.
 
 ### Local deployment notes
 

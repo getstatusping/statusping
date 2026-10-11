@@ -10,6 +10,7 @@
   "ownership": {
     "updaterOwnedPaths": [
       ".github/",
+      ".gitignore",
       "adapters/",
       "cli/",
       "packages/",
