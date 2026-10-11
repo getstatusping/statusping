@@ -229,7 +229,42 @@ export interface SmtpViaInput {
   password?: Secret
   from: string
 }
+/** A Microsoft Teams Workflows ("Post to a channel when a webhook request is received") URL. */
+export interface TeamsSinkInput {
+  type: 'teams'
+  webhookUrl: Secret
+}
+export interface GoogleChatSinkInput {
+  type: 'googlechat'
+  webhookUrl: Secret
+}
+export interface MattermostSinkInput {
+  type: 'mattermost'
+  webhookUrl: Secret
+}
+export interface MatrixSinkInput {
+  type: 'matrix'
+  /** Such as https://matrix.org. */
+  homeserver: string
+  accessToken: Secret
+  /** Room ID, such as !abc123:matrix.org. The bot account must have joined the room. */
+  roomId: string
+}
+export interface GotifySinkInput {
+  type: 'gotify'
+  server: string
+  /** An application token. */
+  token: Secret
+}
+/** PagerDuty Events API v2. Outages trigger an incident; recovery resolves it. */
+export interface PagerDutySinkInput {
+  type: 'pagerduty'
+  routingKey: Secret
+}
 export type SinkInput = PushoverSinkInput | NtfySinkInput | TelegramSinkInput | WebhookSinkInput | DiscordSinkInput | SlackSinkInput | EmailSinkInput
+  | TeamsSinkInput | GoogleChatSinkInput | MattermostSinkInput | MatrixSinkInput | GotifySinkInput | PagerDutySinkInput
+/** Every alert channel type, in the order Settings lists them. */
+export const SINK_TYPES = ['slack', 'discord', 'teams', 'googlechat', 'mattermost', 'telegram', 'matrix', 'pushover', 'ntfy', 'gotify', 'pagerduty', 'email', 'webhook'] as const
 
 /** Delivery settings for status-page subscribers.  This intentionally does not
  * reuse an arbitrary alert sink: subscribers need a provider that can deliver
@@ -671,9 +706,15 @@ export function normalizeConfig(config: StatusPingConfig): NormalizedConfig {
     }
   }
   for (const [name, sink] of Object.entries(sinks)) {
-    if (!['pushover', 'ntfy', 'telegram', 'webhook', 'discord', 'slack', 'email'].includes(sink.type)) {
+    if (!(SINK_TYPES as readonly string[]).includes(sink.type)) {
       problems.push(`sinks.${name}: unknown type "${(sink as { type: string }).type}"`)
     }
+    if (sink.type === 'matrix' || sink.type === 'gotify') {
+      const base = sink.type === 'matrix' ? sink.homeserver : sink.server
+      const key = sink.type === 'matrix' ? 'homeserver' : 'server'
+      try { if (new URL(base).protocol !== 'https:') problems.push(`sinks.${name}.${key}: must be an https:// URL`) } catch { problems.push(`sinks.${name}.${key}: "${base}" is not a valid URL`) }
+    }
+    if (sink.type === 'matrix' && (typeof sink.roomId !== 'string' || !/^![^:\s]+:\S+$/.test(sink.roomId))) problems.push(`sinks.${name}.roomId: must look like !abc123:example.org`)
     if (sink.type === 'webhook') {
       try {
         const url = new URL(sink.url)

@@ -146,4 +146,63 @@ describe('sinks', () => {
       .catch((e: Error) => e)
     expect((err as Error).message).toBe('missing environment variable NOPE')
   })
+  it('Teams, Google Chat and Mattermost post to their webhooks', async () => {
+    const f = fakeFetch(() => new Response('ok'))
+    const ack = { ...down, acknowledgeUrl: 'https://statusp.ing/ack/abc' }
+    await createSink('t', { type: 'teams', webhookUrl: 'https://prod.example.logic.azure.com/workflows/secret' }, getEnv).send(ack, f.fn)
+    const teams = JSON.parse(f.calls[0]!.body!)
+    expect(teams.attachments[0]).toMatchObject({ contentType: 'application/vnd.microsoft.card.adaptive', content: { type: 'AdaptiveCard', body: [{ text: down.title, color: 'Attention' }, { text: down.body }] } })
+    expect(teams.attachments[0].content.actions.map((a: { title: string }) => a.title)).toEqual(['Open status page', 'Acknowledge'])
+
+    await createSink('g', { type: 'googlechat', webhookUrl: 'https://chat.googleapis.com/v1/spaces/X/messages?key=k&token=secret' }, getEnv).send(down, f.fn)
+    expect(JSON.parse(f.calls[1]!.body!).text).toBe(`*Backup missed a ping*\n${down.body}\n<${down.url}|Open status page>`.replace('Backup', '🔴 Backup'))
+
+    await createSink('m', { type: 'mattermost', webhookUrl: 'https://mm.example.test/hooks/secret' }, getEnv).send(down, f.fn)
+    expect(JSON.parse(f.calls[2]!.body!)).toEqual({ text: `#### ${down.title}\n${down.body}\n[Open status page](${down.url})`, username: 'StatusPing' })
+  })
+
+  it('Matrix sends an HTML message to the room with the bot token', async () => {
+    const f = fakeFetch(() => new Response('{"event_id":"$1"}'))
+    await createSink('mx', { type: 'matrix', homeserver: 'https://matrix.example.test/', accessToken: 'syt_secret_token', roomId: '!room:example.test' }, getEnv).send(down, f.fn)
+    expect(f.calls[0]).toMatchObject({ method: 'PUT', headers: { authorization: 'Bearer syt_secret_token' } })
+    expect(f.calls[0]!.url).toMatch(/^https:\/\/matrix\.example\.test\/_matrix\/client\/v3\/rooms\/!room%3Aexample\.test\/send\/m\.room\.message\/statusping-/)
+    expect(JSON.parse(f.calls[0]!.body!)).toMatchObject({ msgtype: 'm.text', format: 'org.matrix.custom.html', formatted_body: expect.stringContaining('&lt;b&gt;&amp;&lt;/b&gt;') })
+    const err = await createSink('mx', { type: 'matrix', homeserver: 'https://m.test', accessToken: 'syt_secret_token', roomId: '!r:m.test' }, getEnv).send(down, fakeFetch(() => new Response('bad syt_secret_token', { status: 401 })).fn).catch((e: Error) => e)
+    expect((err as Error).message).not.toContain('syt_secret_token')
+  })
+
+  it('Gotify posts with the application token header', async () => {
+    const f = fakeFetch(() => new Response('{}'))
+    await createSink('go', { type: 'gotify', server: 'https://gotify.example.test', token: 'A1b2C3secret' }, getEnv).send(down, f.fn)
+    expect(f.calls[0]).toMatchObject({ url: 'https://gotify.example.test/message', headers: { 'x-gotify-key': 'A1b2C3secret' } })
+    expect(JSON.parse(f.calls[0]!.body!)).toMatchObject({ title: down.title, priority: 8, extras: { 'client::notification': { click: { url: down.url } } } })
+  })
+
+  it('PagerDuty triggers one incident per outage and resolves it on recovery', async () => {
+    const f = fakeFetch(() => new Response('{"status":"success"}', { status: 202 }))
+    const sink = createSink('pd', { type: 'pagerduty', routingKey: 'R0UTINGKEY0123456789abcdef012345' }, getEnv)
+    const incident = { reason: 'missed', detail: null, startedAt: 1_000, resolvedAt: null }
+    await sink.send({ ...down, monitor: { id: 'backup-db', name: 'Backup' }, incident }, f.fn)
+    await sink.send({ ...down, kind: 'up', title: 'Backup is back', priority: 'normal', monitor: { id: 'backup-db', name: 'Backup' }, incident: { ...incident, resolvedAt: 2_000 } }, f.fn)
+    const [trigger, resolve] = f.calls.map((c) => JSON.parse(c.body!))
+    expect(f.calls[0]!.url).toBe('https://events.pagerduty.com/v2/enqueue')
+    expect(trigger).toMatchObject({ event_action: 'trigger', dedup_key: 'statusping:backup-db:1000', payload: { summary: down.title, source: 'Backup', severity: 'critical' } })
+    expect(resolve).toEqual({ routing_key: 'R0UTINGKEY0123456789abcdef012345', event_action: 'resolve', dedup_key: 'statusping:backup-db:1000' })
+
+    // A test opens and immediately closes a low-severity event.
+    const t = fakeFetch(() => new Response('{}', { status: 202 }))
+    await sink.send({ kind: 'test', title: 'Test', body: '', url: 'https://s.test', priority: 'normal' }, t.fn)
+    expect(t.calls.map((c) => JSON.parse(c.body!).event_action)).toEqual(['trigger', 'resolve'])
+    expect(JSON.parse(t.calls[0]!.body!).payload.severity).toBe('info')
+  })
+  it('validates the new channel types in the configuration', async () => {
+    const { normalizeConfig } = await import('../src/config.ts')
+    const { testConfig } = await import('./helpers.ts')
+    const with_ = (sink: unknown) => () => normalizeConfig(testConfig({ sinks: { x: sink as never } }))
+    expect(with_({ type: 'matrix', homeserver: 'https://m.test', accessToken: 't', roomId: '!r:m.test' })).not.toThrow()
+    expect(with_({ type: 'matrix', homeserver: 'https://m.test', accessToken: 't', roomId: 'general' })).toThrow(/roomId/)
+    expect(with_({ type: 'gotify', server: 'http://gotify.test', token: 't' })).toThrow(/https/)
+    expect(with_({ type: 'pagerduty', routingKey: 'k' })).not.toThrow()
+    expect(with_({ type: 'carrier-pigeon' })).toThrow(/unknown type/)
+  })
 })

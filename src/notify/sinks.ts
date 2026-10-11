@@ -237,6 +237,153 @@ function slack(name: string, cfg: Extract<SinkInput, { type: 'slack' }>, getEnv:
   }
 }
 
+// Teams Workflows webhooks take an Adaptive Card wrapped in a message.
+function teams(name: string, cfg: Extract<SinkInput, { type: 'teams' }>, getEnv: EnvGetter): Sink {
+  return {
+    name,
+    type: 'teams',
+    async send(msg, fetchFn) {
+      const webhookUrl = resolveSecret(cfg.webhookUrl, getEnv)!
+      await withScrub([webhookUrl], async () => {
+        const colour = msg.kind === 'up' ? 'Good' : msg.kind === 'down' ? 'Attention' : msg.kind === 'warning' || msg.kind === 'renotify' ? 'Warning' : 'Accent'
+        const res = await fetchFn(webhookUrl, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            type: 'message',
+            attachments: [{
+              contentType: 'application/vnd.microsoft.card.adaptive',
+              content: {
+                $schema: 'http://adaptivecards.io/schemas/adaptive-card.json', type: 'AdaptiveCard', version: '1.4',
+                body: [
+                  { type: 'TextBlock', text: clip(msg.title, 250), weight: 'Bolder', size: 'Medium', color: colour, wrap: true },
+                  ...(msg.body ? [{ type: 'TextBlock', text: clip(msg.body, 3000), wrap: true }] : []),
+                ],
+                actions: [
+                  { type: 'Action.OpenUrl', title: 'Open status page', url: msg.url },
+                  ...(msg.acknowledgeUrl ? [{ type: 'Action.OpenUrl', title: 'Acknowledge', url: msg.acknowledgeUrl }] : []),
+                ],
+              },
+            }],
+          }),
+        })
+        await ensureOk(res, 'teams')
+      })
+    },
+  }
+}
+
+// https://developers.google.com/workspace/chat/format-messages — *bold* and <url|text> links.
+function googleChat(name: string, cfg: Extract<SinkInput, { type: 'googlechat' }>, getEnv: EnvGetter): Sink {
+  return {
+    name,
+    type: 'googlechat',
+    async send(msg, fetchFn) {
+      const webhookUrl = resolveSecret(cfg.webhookUrl, getEnv)!
+      const plain = (s: string) => s.replace(/[<>|*_~`]/g, '')
+      await withScrub([webhookUrl], async () => {
+        const text = [`*${plain(clip(msg.title, 250))}*`, msg.body ? clip(msg.body, 3000) : null, `<${msg.url}|Open status page>`, msg.acknowledgeUrl ? `<${msg.acknowledgeUrl}|Acknowledge>` : null].filter(Boolean).join('\n')
+        const res = await fetchFn(webhookUrl, { method: 'POST', headers: { 'content-type': 'application/json; charset=UTF-8' }, body: JSON.stringify({ text }) })
+        await ensureOk(res, 'googlechat')
+      })
+    },
+  }
+}
+
+// Mattermost incoming webhooks take Markdown text.
+function mattermost(name: string, cfg: Extract<SinkInput, { type: 'mattermost' }>, getEnv: EnvGetter): Sink {
+  return {
+    name,
+    type: 'mattermost',
+    async send(msg, fetchFn) {
+      const webhookUrl = resolveSecret(cfg.webhookUrl, getEnv)!
+      await withScrub([webhookUrl], async () => {
+        const text = [`#### ${clip(msg.title, 250)}`, msg.body ? clip(msg.body, 3000) : null, `[Open status page](${msg.url})${msg.acknowledgeUrl ? ` · [Acknowledge](${msg.acknowledgeUrl})` : ''}`].filter(Boolean).join('\n')
+        const res = await fetchFn(webhookUrl, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text, username: 'StatusPing' }) })
+        await ensureOk(res, 'mattermost')
+      })
+    },
+  }
+}
+
+// https://spec.matrix.org/latest/client-server-api/#put_matrixclientv3roomsroomidsendeventtypetxnid
+function matrix(name: string, cfg: Extract<SinkInput, { type: 'matrix' }>, getEnv: EnvGetter): Sink {
+  return {
+    name,
+    type: 'matrix',
+    async send(msg, fetchFn) {
+      const token = resolveSecret(cfg.accessToken, getEnv)!
+      await withScrub([token], async () => {
+        const links = `${msg.url}${msg.acknowledgeUrl ? `\nAcknowledge: ${msg.acknowledgeUrl}` : ''}`
+        const body = `${msg.title}${msg.body ? `\n${msg.body}` : ''}\n${links}`
+        const html = `<strong>${escapeHtml(clip(msg.title, 250))}</strong>${msg.body ? `<br>${escapeHtml(clip(msg.body, 3000))}` : ''}<br><a href="${escapeHtml(msg.url)}">Open status page</a>${msg.acknowledgeUrl ? ` · <a href="${escapeHtml(msg.acknowledgeUrl)}">Acknowledge</a>` : ''}`
+        const url = `${cfg.homeserver.replace(/\/+$/, '')}/_matrix/client/v3/rooms/${encodeURIComponent(cfg.roomId)}/send/m.room.message/statusping-${crypto.randomUUID()}`
+        const res = await fetchFn(url, {
+          method: 'PUT',
+          headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+          body: JSON.stringify({ msgtype: msg.kind === 'test' || msg.kind === 'announcement' ? 'm.notice' : 'm.text', body: clip(body, 4000), format: 'org.matrix.custom.html', formatted_body: html }),
+        })
+        await ensureOk(res, 'matrix')
+      })
+    },
+  }
+}
+
+// https://gotify.net/api-docs#/message/createMessage
+function gotify(name: string, cfg: Extract<SinkInput, { type: 'gotify' }>, getEnv: EnvGetter): Sink {
+  return {
+    name,
+    type: 'gotify',
+    async send(msg, fetchFn) {
+      const token = resolveSecret(cfg.token, getEnv)!
+      await withScrub([token], async () => {
+        const res = await fetchFn(`${cfg.server.replace(/\/+$/, '')}/message`, {
+          method: 'POST',
+          headers: { 'x-gotify-key': token, 'content-type': 'application/json' },
+          body: JSON.stringify({
+            title: clip(msg.title, 250),
+            message: clip(`${msg.body || msg.title}${msg.acknowledgeUrl ? `\n\nAcknowledge: ${msg.acknowledgeUrl}` : ''}`, 4000),
+            priority: msg.priority === 'high' ? 8 : 5,
+            extras: { 'client::notification': { click: { url: msg.url } } },
+          }),
+        })
+        await ensureOk(res, 'gotify')
+      })
+    },
+  }
+}
+
+/**
+ * PagerDuty Events API v2. One incident per outage (dedup key from the monitor and start time):
+ * down and renotify trigger it, recovery resolves it. Announcements trigger and resolve with
+ * their own status; a test triggers and immediately resolves a low-severity event.
+ */
+function pagerduty(name: string, cfg: Extract<SinkInput, { type: 'pagerduty' }>, getEnv: EnvGetter): Sink {
+  return {
+    name,
+    type: 'pagerduty',
+    async send(msg, fetchFn) {
+      const routingKey = resolveSecret(cfg.routingKey, getEnv)!
+      const dedupKey = msg.monitor && msg.incident ? `statusping:${msg.monitor.id}:${msg.incident.startedAt}`
+        : msg.announcement ? `statusping:announcement:${msg.announcement.id}` : `statusping:${msg.kind}:${crypto.randomUUID()}`
+      const resolve = msg.kind === 'up' || (msg.kind === 'warning' && msg.incident?.resolvedAt != null) || msg.announcement?.status === 'resolved'
+      const severity = msg.kind === 'down' || msg.kind === 'renotify' ? 'critical' : msg.kind === 'warning' ? 'warning' : 'info'
+      const event = (action: 'trigger' | 'resolve') => fetchFn('https://events.pagerduty.com/v2/enqueue', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          routing_key: routingKey, event_action: action, dedup_key: dedupKey,
+          ...(action === 'trigger' ? { payload: { summary: clip(msg.title, 1024), source: msg.monitor?.name ?? 'StatusPing', severity, component: msg.monitor?.id, custom_details: { detail: msg.body || null } }, links: [{ href: msg.url, text: 'Open status page' }] } : {}),
+        }),
+      })
+      await withScrub([routingKey], async () => {
+        await ensureOk(await event(resolve ? 'resolve' : 'trigger'), 'pagerduty')
+        if (msg.kind === 'test') await ensureOk(await event('resolve'), 'pagerduty')
+      })
+    },
+  }
+}
+
 function email(
   name: string,
   cfg: Extract<SinkInput, { type: 'email' }>,
@@ -292,5 +439,17 @@ export function createSink(name: string, input: SinkInput, getEnv: EnvGetter, ru
       return slack(name, input, getEnv)
     case 'email':
       return email(name, input, getEnv, runtime)
+    case 'teams':
+      return teams(name, input, getEnv)
+    case 'googlechat':
+      return googleChat(name, input, getEnv)
+    case 'mattermost':
+      return mattermost(name, input, getEnv)
+    case 'matrix':
+      return matrix(name, input, getEnv)
+    case 'gotify':
+      return gotify(name, input, getEnv)
+    case 'pagerduty':
+      return pagerduty(name, input, getEnv)
   }
 }

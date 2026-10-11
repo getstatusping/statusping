@@ -4,7 +4,7 @@
  * (Show/Hide on secret fields, loading an import file).
  */
 import type { Viewer } from '../auth/viewer.ts'
-import type { MonitorInput, PageInput, SinkInput } from '../config.ts'
+import { type MonitorInput, type PageInput, type SinkInput, SINK_TYPES } from '../config.ts'
 import type { AuditEntry } from './service.ts'
 import type { MonitorRow, SinkType } from './forms.ts'
 import { SINK_FIELDS } from './forms.ts'
@@ -261,7 +261,7 @@ ${editing ? `<section class="card danger"><h2>Delete page</h2><p class="lead">Mo
 // ── Alert channels ──────────────────────────────────────────────────────────────────────────
 
 export function channelsPage(opts: { viewer: Viewer; csrf: string; sinks: Array<{ name: string; type: SinkType }>; notice?: string; error?: string }): string {
-  const add = `<div class="add-menu">${(Object.keys(SINK_FIELDS) as SinkType[]).map((type, i) => `<a class="${i === 0 ? 'btn-primary' : 'btn-outline'}" href="/admin/channels/new?type=${type}">${SINK_FIELDS[type].label}</a>`).join('')}</div>`
+  const add = `<div class="add-menu">${(SINK_TYPES as readonly SinkType[]).map((type, i) => `<a class="${i === 0 ? 'btn-primary' : 'btn-outline'}" href="/admin/channels/new?type=${type}">${SINK_FIELDS[type].label}</a>`).join('')}</div>`
   const rows = opts.sinks.map((s) => `<tr><td><a href="/admin/channels/${encodeURIComponent(s.name)}"><strong>${escape(s.name)}</strong></a></td><td><span class="badge">${SINK_FIELDS[s.type]?.label ?? s.type}</span></td>
 <td class="end"><form method="post" action="/admin/sinks/${encodeURIComponent(s.name)}/test" style="display:inline">${hidden(opts.csrf)}<button class="btn-outline" type="submit">Send test</button></form> <a class="btn-outline" href="/admin/channels/${encodeURIComponent(s.name)}">Edit</a></td></tr>`).join('')
   return layout({ ...opts, section: 'channels', title: 'Alert channels', description: 'Where StatusPing sends alerts. Monitors use every channel unless they choose otherwise.', body: `

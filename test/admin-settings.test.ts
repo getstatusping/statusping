@@ -133,6 +133,16 @@ describe('admin Settings pages', () => {
     expect(((await stored(db)).sinks!.mail as { via: { password: unknown } }).via.password).toEqual({ $env: 'SINK_MAIL_PASSWORD' })
   })
 
+  it('lists every channel type and saves a Matrix channel with a write-only token', async () => {
+    const { b, db } = await signedIn()
+    const channels = (await b.get('/admin/channels')).body
+    for (const type of ['teams', 'googlechat', 'mattermost', 'matrix', 'gotify', 'pagerduty']) expect(channels).toContain(`/admin/channels/new?type=${type}`)
+    await b.get('/admin/channels/new?type=matrix')
+    expect((await b.post('/admin/channels/new', { type: 'matrix', name: 'chat', homeserver: 'https://matrix.example.test', roomId: '!room:example.test', accessToken: 'syt_matrix_secret' })).res.headers.get('location')).toBe('/admin/channels?notice=channel-added')
+    expect((await stored(db)).sinks!.chat).toEqual({ type: 'matrix', homeserver: 'https://matrix.example.test', roomId: '!room:example.test', accessToken: { $env: 'SINK_CHAT_ACCESSTOKEN' } })
+    expect((await b.get('/admin/channels/chat')).body).not.toContain('syt_matrix_secret')
+  })
+
   it('refuses changes that lock the signed-in administrator out', async () => {
     const { b, db } = await signedIn()
     await b.get('/admin/access')

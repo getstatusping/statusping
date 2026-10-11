@@ -49,6 +49,10 @@ export function validateAdminSecrets(value: unknown): string[] {
         break
       case 'telegram': ref('botToken'); ref('chatId'); break
       case 'discord': ref('webhookUrl'); break
+      case 'teams': case 'googlechat': case 'mattermost': ref('webhookUrl'); break
+      case 'matrix': ref('accessToken'); break
+      case 'gotify': ref('token'); break
+      case 'pagerduty': ref('routingKey'); break
       case 'slack': ref('webhookUrl'); break
       case 'email': {
         const via = sink.via
