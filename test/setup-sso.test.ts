@@ -208,6 +208,34 @@ describe('setup wizard: Cloudflare Access and OpenID Connect', () => {
     expect(await db.first(`SELECT name FROM instance_secrets WHERE name LIKE 'env:%'`)).toBeNull()
   })
 
+  it('accepts an unverified email only when the owner trusts the provider (e.g. Pocket ID)', async () => {
+    const idp = await signer('pocket-1')
+    let nonce = ''
+    const handler = async (call: FetchCall) => {
+      if (call.url === 'https://id.pocket.test/.well-known/openid-configuration') {
+        return Response.json({ issuer: 'https://id.pocket.test', authorization_endpoint: 'https://id.pocket.test/authorize', token_endpoint: 'https://id.pocket.test/api/oidc/token', jwks_uri: 'https://id.pocket.test/.well-known/jwks.json' })
+      }
+      if (call.url === 'https://id.pocket.test/.well-known/jwks.json') return Response.json({ keys: [idp.jwk] })
+      if (call.url === 'https://id.pocket.test/api/oidc/token') return Response.json({ id_token: await idp.sign({ iss: 'https://id.pocket.test', aud: 'pocket-client', email: 'owner@acme.test', email_verified: false, nonce, exp: now() + 300 }) })
+      return new Response('not found', { status: 404 })
+    }
+    const { b, csrf, db } = await claimedWizard({ OIDC_CLIENT_ID: 'pocket-client', OIDC_CLIENT_SECRET: 'pocket-secret' }, handler, 'oidc')
+    const signInOnce = async () => {
+      const start = new URL((await b.get('/setup/oidc/start')).res.headers.get('location')!)
+      nonce = start.searchParams.get('nonce')!
+      return (await b.get(`/auth/callback?code=c&state=${start.searchParams.get('state')}`)).res.headers.get('location')
+    }
+    await b.post('/setup/oidc', { csrf, preset: 'pocket-id', issuer: 'https://id.pocket.test' })
+    expect(await signInOnce()).toBe('/setup?step=account&error=oidc-email')
+    expect((await b.get('/setup?step=account&error=oidc-email')).body).toContain('Accept emails this provider has not verified')
+
+    await b.post('/setup/oidc', { csrf, preset: 'pocket-id', issuer: 'https://id.pocket.test', trustUnverifiedEmail: '1' })
+    expect(await signInOnce()).toBe('/setup?step=account')
+    expect((await finish(b, csrf)).res.headers.get('location')).toBe('/')
+    const config = JSON.parse((await db.first<{ config_json: string }>(`SELECT config_json FROM admin_config`))!.config_json)
+    expect(config.access.provider).toMatchObject({ type: 'oidc', issuer: 'https://id.pocket.test', trustUnverifiedEmail: true })
+  })
+
   it('prefers a Worker secret over a saved value and hides the form for it', async () => {
     const { b, csrf, db } = await claimedWizard({ CF_ACCESS_AUD: 'from-env' }, () => new Response('not found', { status: 404 }), 'cloudflare-access')
     const page = (await b.get('/setup')).body

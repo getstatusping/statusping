@@ -251,6 +251,12 @@ export type AuthProviderInput =
       groupsClaim?: string
       /** Default ['openid', 'email', 'profile']. Add e.g. 'groups' if your IdP needs it. */
       scopes?: string[]
+      /**
+       * Accept the email even when the provider does not mark it verified. Only for providers
+       * where administrators control every account's email (for example a self-hosted Pocket
+       * ID); otherwise someone could claim another person's address. Default false.
+       */
+      trustUnverifiedEmail?: boolean
     }
 
 /** Who matches: emails (exact or `*@domain.com`) and — SSO only — groups. */
@@ -1183,6 +1189,7 @@ function normalizeAccess(input: AccessInput | undefined, problems: string[]): No
     problems.push(`access.provider.teamDomain: expected "<team>.cloudflareaccess.com", got "${p.teamDomain}"`)
   }
   if (p.type === 'oidc') {
+    if (p.trustUnverifiedEmail !== undefined && typeof p.trustUnverifiedEmail !== 'boolean') problems.push('access.provider.trustUnverifiedEmail: must be true or false')
     try {
       const u = new URL(p.issuer)
       if (u.protocol !== 'https:' && u.hostname !== 'localhost') problems.push('access.provider.issuer: must be https')

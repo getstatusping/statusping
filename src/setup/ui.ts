@@ -203,7 +203,7 @@ ${field('Team domain', `<input class="input" id="teamDomain" name="teamDomain" t
 ${verifySection(4, { ready, verified: Boolean(opts.verifiedEmail), href: '/auth/setup-verify', label: 'Verify with Cloudflare Access', intro: 'Access asks you to sign in, then StatusPing checks the token against your team domain and audience.', blocked: 'Add CF_ACCESS_AUD and save the team domain first.' })}`)
 }
 
-export function oidcPage(opts: { csrf: string; completed: ReadonlySet<SetupStep>; origin: string; preset?: string; issuer?: string; env: Record<string, EnvSource>; clientId?: string; sessionKeyNote: boolean; verifiedEmail?: string; error?: string }): string {
+export function oidcPage(opts: { csrf: string; completed: ReadonlySet<SetupStep>; origin: string; preset?: string; issuer?: string; trustUnverifiedEmail?: boolean; env: Record<string, EnvSource>; clientId?: string; sessionKeyNote: boolean; verifiedEmail?: string; error?: string }): string {
   const preset = presetById(opts.preset) ?? OIDC_PRESETS[0]!
   const callback = `${opts.origin}/auth/callback`
   const workersDev = /\.workers\.dev$/i.test(new URL(opts.origin).hostname)
@@ -223,6 +223,8 @@ ${opts.env.OIDC_CLIENT_SECRET === 'env' ? '' : field('Client secret', `<input cl
 ${opts.sessionKeyNote ? '<p class="hint"><code>SESSION_SECRET</code> is optional: without it StatusPing generates and stores a session signing key.</p>' : ''}`)}
 ${section(3, 'Enter the issuer', `<form class="setup-form" method="post" action="/setup/oidc">${hidden(opts.csrf)}<input type="hidden" name="preset" value="${preset.id}">
 ${field('Issuer URL', `<input class="input" id="issuer" name="issuer" type="url" value="${escape(opts.issuer ?? preset.issuer ?? '')}" placeholder="https://…" spellcheck="false" required>`, preset.issuer ? 'Pre-filled for this provider.' : preset.issuerHint ?? '')}
+<label class="check"><input type="checkbox" name="trustUnverifiedEmail" value="1"${opts.trustUnverifiedEmail ? ' checked' : ''}><span>Accept emails this provider has not verified</span></label>
+<p class="hint">Only for a provider you run yourself where you control every account's email, such as Pocket ID. Otherwise someone could use another person's address to sign in as them.</p>
 <div class="actions"><button class="btn-outline" type="submit">Save and check issuer</button></div></form>`)}
 ${verifySection(4, { ready, verified: Boolean(opts.verifiedEmail), href: '/setup/oidc/start', label: 'Test sign-in', intro: 'Sign in with your provider. Setup continues once the callback returns your verified email address.', blocked: missing.length ? `Add ${missing.join(' and ')} and save the issuer first.` : 'Save the issuer first.' })}`)
 }

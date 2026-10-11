@@ -23,6 +23,8 @@ export interface SetupDraft {
   teamDomain?: string
   oidcPreset?: string
   issuer?: string
+  /** Accept emails the provider has not verified (self-hosted providers only). */
+  trustUnverifiedEmail?: boolean
   title?: string
   baseUrl?: string
   timezone?: string

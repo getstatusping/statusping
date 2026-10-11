@@ -46,7 +46,7 @@ const VERIFY_ERRORS: Record<string, string> = {
   'oidc-denied': 'The provider did not complete the sign-in. Check that your account is allowed to use the application, then try again.',
   'oidc-token': 'The provider rejected the code exchange. Check OIDC_CLIENT_ID, OIDC_CLIENT_SECRET, and that the callback URL is registered exactly.',
   'oidc-id-token': 'The ID token could not be verified. Check that the issuer URL matches your provider.',
-  'oidc-email': 'Your account has no verified email address at the provider. Verify it there, then try again.',
+  'oidc-email': 'Your provider says your email address is not verified. Verify it there, or, if you run the provider yourself and control every account (for example Pocket ID), tick "Accept emails this provider has not verified" in step 3 and save.',
 }
 const SETUP_SESSION_SECONDS = 2 * 60 * 60
 const ATTEMPTS_PER_MINUTE = 5
@@ -59,7 +59,7 @@ const field = (form: Form, name: string) => (typeof form[name] === 'string' ? (f
 /** The sign-in provider the draft verified. Secrets are only ever named, never stored. */
 function draftProvider(draft: SetupDraft): AuthProviderInput {
   if (draft.method === 'cloudflare-access') return { type: 'cloudflare-access', teamDomain: draft.teamDomain!, audience: { $env: 'CF_ACCESS_AUD' } }
-  if (draft.method === 'oidc') return { type: 'oidc', issuer: draft.issuer!, clientId: { $env: 'OIDC_CLIENT_ID' }, clientSecret: { $env: 'OIDC_CLIENT_SECRET' } }
+  if (draft.method === 'oidc') return { type: 'oidc', issuer: draft.issuer!, clientId: { $env: 'OIDC_CLIENT_ID' }, clientSecret: { $env: 'OIDC_CLIENT_SECRET' }, ...(draft.trustUnverifiedEmail ? { trustUnverifiedEmail: true } : {}) }
   return { type: 'basic' }
 }
 
@@ -202,7 +202,7 @@ export function mountSetupRoutes(app: Hono, deps: Deps): void {
       const previewed = presetById(c.req.query('preset'))
       const preset = previewed?.id ?? draft.oidcPreset
       const issuer = previewed && previewed.id !== draft.oidcPreset ? previewed.issuer : draft.issuer
-      return html(c, oidcPage({ csrf, completed, origin, preset, issuer, env: oidcEnv(), clientId: deps.storedEnv.OIDC_CLIENT_ID, sessionKeyNote: !sessionSecretSet(), verifiedEmail, error }))
+      return html(c, oidcPage({ csrf, completed, origin, preset, issuer, trustUnverifiedEmail: draft.trustUnverifiedEmail ?? false, env: oidcEnv(), clientId: deps.storedEnv.OIDC_CLIENT_ID, sessionKeyNote: !sessionSecretSet(), verifiedEmail, error }))
     }
     switch (step) {
       case 'method': return html(c, methodPage({ csrf, completed, current: draft.method }))
@@ -253,7 +253,7 @@ export function mountSetupRoutes(app: Hono, deps: Deps): void {
     // Kept as typed: discovery tolerates a trailing slash, and tokens are checked against the
     // issuer the discovery document declares (Auth0's includes the slash).
     const issuer = field(r.form, 'issuer')
-    const draft = { ...r.state.draft, oidcPreset: preset, issuer, verified: false, email: undefined }
+    const draft = { ...r.state.draft, oidcPreset: preset, issuer, trustUnverifiedEmail: field(r.form, 'trustUnverifiedEmail') === '1', verified: false, email: undefined }
     let error: string | undefined
     try {
       if (new URL(issuer).protocol !== 'https:') error = 'The issuer must be an https:// URL.'
@@ -583,7 +583,7 @@ export function mountSetupAuthRoutes(app: Hono, deps: Deps): void {
     } catch { return back(c, 'oidc-discovery') }
     if (claims.nonce !== login.nonce) return back(c, 'oidc-state')
     const email = typeof claims.email === 'string' ? claims.email.toLowerCase() : ''
-    if (!email || claims.email_verified === false) return back(c, 'oidc-email')
+    if (!email || (claims.email_verified === false && !draft.trustUnverifiedEmail)) return back(c, 'oidc-email')
     await saveDraft(deps.db, { ...draft, email, verified: true }, nowSeconds())
     return back(c)
   })

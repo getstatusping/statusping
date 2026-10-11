@@ -288,7 +288,7 @@ function oidcHandlers(deps: Deps, p: Oidc) {
     }
     if (claims.nonce !== login.nonce) return c.text('Sign-in failed (nonce mismatch).', 401)
     const email = typeof claims.email === 'string' ? claims.email.toLowerCase() : null
-    if (!email || claims.email_verified === false) return c.text('Your account has no verified email address.', 403)
+    if (!email || (claims.email_verified === false && !p.trustUnverifiedEmail)) return c.text('Your account has no verified email address.', 403)
 
     // Keep only groups the config refers to: keeps the cookie small (Entra/Okta can send hundreds).
     const wanted = deps.config.access ? referencedGroups(deps.config.pages, deps.config.access) : new Set<string>()
