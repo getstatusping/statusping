@@ -150,14 +150,21 @@ you create in the browser:
 3. Open `/setup` and enter the **setup code**. StatusPing writes it to the logs every minute
    while setup is pending (Cloudflare: the Worker's **Logs**, or `npx wrangler tail`). To choose
    your own code instead, set the `STATUSPING_SETUP_TOKEN` secret.
-4. Choose a sign-in method, save the generated administrator password, describe the site, and
-   optionally add a first monitor. **Finish** saves the configuration and signs you in to
-   `/admin`; checks start on the next minute.
-5. Remove the `STATUSPING_RESET_TOKEN` secret. Without it, `/setup/reset` does not exist.
+4. Choose a sign-in method and connect it:
+   - **Email + password:** choose the administrator's password (at least 12 characters).
+   - **Cloudflare Access:** create the Access application, store its audience tag as
+     `CF_ACCESS_AUD`, and verify by signing in through Access.
+   - **OpenID Connect:** register StatusPing with Google, Microsoft Entra ID, Okta, Auth0,
+     Keycloak or another provider, store `OIDC_CLIENT_ID` and `OIDC_CLIENT_SECRET`, and run a
+     test sign-in.
+5. Describe the site and optionally add a first monitor. **Finish** saves the configuration and
+   signs you in to `/admin`; checks start on the next minute.
+6. Remove the `STATUSPING_RESET_TOKEN` secret. Without it, `/setup/reset` does not exist.
 
 After setup, the configuration lives in the database and is edited as YAML in `/admin`;
-`statusping.config.ts` is no longer used. The wizard currently sets up the built-in email +
-password sign-in; Cloudflare Access or OIDC can then be configured in the YAML.
+`statusping.config.ts` is no longer used. Passwords chosen in the wizard are stored as
+PBKDF2-SHA256 (50,000 iterations, which fits the Workers free plan's CPU limit), and password
+sign-in is limited to 10 attempts per minute per address.
 
 ## Run on Node and use an independent confirmation peer
 

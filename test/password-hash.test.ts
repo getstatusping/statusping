@@ -10,7 +10,7 @@ describe('password hashes', () => {
   it('hashUserPassword produces a salted PBKDF2 entry', async () => {
     const a = await hashUserPassword('a chosen password')
     const b = await hashUserPassword('a chosen password')
-    expect(a).toMatch(/^pbkdf2-sha256:100000:[0-9a-f]{32}:[0-9a-f]{64}$/)
+    expect(a).toMatch(/^pbkdf2-sha256:50000:[0-9a-f]{32}:[0-9a-f]{64}$/)
     expect(a).not.toBe(b)
     expect(await passwordMatches('a chosen password', a)).toBe(true)
     expect(await passwordMatches('a chosen passworD', a)).toBe(false)

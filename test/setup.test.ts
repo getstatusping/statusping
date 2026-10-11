@@ -113,7 +113,7 @@ describe('first-run setup wizard and reset', () => {
     expect(account.res.headers.get('location')).toBe('/setup')
     const draft = (await loadSetupState(db))!.draft
     expect(draft).toMatchObject({ email: 'owner@example.test', verified: true })
-    expect(draft.passwordHash).toMatch(/^pbkdf2-sha256:100000:[0-9a-f]{32}:[0-9a-f]{64}$/)
+    expect(draft.passwordHash).toMatch(/^pbkdf2-sha256:50000:[0-9a-f]{32}:[0-9a-f]{64}$/)
 
     // Basics and monitor.
     expect((await b.post('/setup/basics', { csrf, title: 'Acme', baseUrl: 'http://status.example.com', timezone: 'UTC' })).res.status).toBe(400)

@@ -34,8 +34,13 @@ export async function hashPassword(password: string, salt = randomToken(16)): Pr
   return `sha256:${salt}:${await sha256Hex(`${salt}:${password}`)}`
 }
 
-/** 100,000 is the most iterations Cloudflare Workers' WebCrypto PBKDF2 accepts. */
-const PBKDF2_ITERATIONS = 100_000
+/**
+ * Iterations for new hashes. 50,000 keeps a sign-in near 5-6 ms of CPU, inside the Workers
+ * free plan's 10 ms limit; stored hashes carry their own count and verify up to the
+ * 100,000 that Workers' WebCrypto PBKDF2 accepts.
+ */
+const PBKDF2_ITERATIONS = 50_000
+const PBKDF2_MAX_ITERATIONS = 100_000
 const toHex = (bytes: Uint8Array) => [...bytes].map((b) => b.toString(16).padStart(2, '0')).join('')
 
 async function pbkdf2Hex(password: string, salt: string, iterations: number): Promise<string> {
@@ -46,8 +51,8 @@ async function pbkdf2Hex(password: string, salt: string, iterations: number): Pr
 }
 
 /**
- * Hash for a password a person chose (setup wizard): PBKDF2-HMAC-SHA256, 100,000 iterations,
- * 16-byte random salt, 32-byte output, encoded `pbkdf2-sha256:100000:<salt hex>:<hex>`.
+ * Hash for a password a person chose (setup wizard): PBKDF2-HMAC-SHA256, 50,000 iterations,
+ * 16-byte random salt, 32-byte output, encoded `pbkdf2-sha256:50000:<salt hex>:<hex>`.
  */
 export async function hashUserPassword(password: string): Promise<string> {
   const salt = toHex(crypto.getRandomValues(new Uint8Array(16)))
@@ -62,7 +67,7 @@ export async function passwordMatches(password: string, entry: string): Promise<
   }
   if (parts[0] === 'pbkdf2-sha256' && parts.length === 4 && parts[2] && /^\d{1,6}$/.test(parts[1] ?? '')) {
     const iterations = Number(parts[1])
-    if (iterations < 1 || iterations > PBKDF2_ITERATIONS) return false
+    if (iterations < 1 || iterations > PBKDF2_MAX_ITERATIONS) return false
     return timingSafeEqual(await pbkdf2Hex(password, parts[2], iterations), parts[3] ?? '')
   }
   return false
