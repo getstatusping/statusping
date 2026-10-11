@@ -122,7 +122,7 @@ describe('sinks', () => {
   it('email uses the Cloudflare binding or Resend HTTP API', async () => {
     const delivered: Array<{ to: string[]; subject: string; text: string; html: string }> = []
     const cloudflare = { send: async (message: { to: string[]; subject: string; text: string; html: string }) => { delivered.push(message) } }
-    await createSink('mail', { type: 'email', to: ['ops@example.com'], via: 'cloudflare' }, getEnv, cloudflare).send(down, fakeFetch().fn)
+    await createSink('mail', { type: 'email', to: ['ops@example.com'], via: 'cloudflare' }, getEnv, { cloudflareEmail: cloudflare }).send(down, fakeFetch().fn)
     expect(delivered).toEqual([expect.objectContaining({ to: ['ops@example.com'], subject: down.title, text: expect.stringContaining(down.url) })])
 
     const f = fakeFetch(() => new Response('{"id":"email_1"}', { status: 200 }))

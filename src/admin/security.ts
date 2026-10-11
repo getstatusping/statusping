@@ -54,6 +54,9 @@ export function validateAdminSecrets(value: unknown): string[] {
         if (via && typeof via === 'object' && !Array.isArray(via) && (via as Record<string, unknown>).provider === 'resend') {
           envRef((via as Record<string, unknown>).apiKey, `sinks.${name}.via.apiKey`, problems)
         }
+        if (via && typeof via === 'object' && !Array.isArray(via) && (via as Record<string, unknown>).provider === 'smtp' && (via as Record<string, unknown>).password !== undefined) {
+          envRef((via as Record<string, unknown>).password, `sinks.${name}.via.password`, problems)
+        }
         break
       }
       case 'webhook': {

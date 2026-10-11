@@ -333,7 +333,7 @@ export function mountAdminRoutes(app: Hono, deps: Deps): void {
     const out: Record<string, { source: SecretSource; envName?: string }> = {}
     if (!sink) return out
     const s = sink as unknown as Record<string, unknown>
-    const refs: Record<string, unknown> = { ...s, ...(s.via && typeof s.via === 'object' ? { apiKey: (s.via as Record<string, unknown>).apiKey } : {}) }
+    const refs: Record<string, unknown> = { ...s, ...(s.via && typeof s.via === 'object' ? s.via as Record<string, unknown> : {}) }
     for (const [key, value] of Object.entries(refs)) {
       const name = value && typeof value === 'object' && typeof (value as { $env?: unknown }).$env === 'string' ? (value as { $env: string }).$env : undefined
       if (!name) continue
@@ -411,7 +411,7 @@ export function mountAdminRoutes(app: Hono, deps: Deps): void {
     if (p instanceof Response) return p
     const name = c.req.param('name')
     try {
-      await sendSinkTest(name, p.config, deps.getEnv, deps.fetch, deps.cloudflareEmail)
+      await sendSinkTest(name, p.config, deps.getEnv, deps.fetch, deps)
       await appendAudit(deps.db, { actor: p.viewer.email, action: 'sink.test', target: `sink:${name}`, before: null, after: null, at: nowSeconds() })
       return done(c, '/admin/channels', 'test-sent')
     } catch (error) {
@@ -586,7 +586,7 @@ export function mountAdminRoutes(app: Hono, deps: Deps): void {
     if (!ok) return c.text('Unauthorized', 401, noStore)
     const name = c.req.param('name')
     try {
-      await sendSinkTest(name, await storedConfig(), deps.getEnv, deps.fetch, deps.cloudflareEmail)
+      await sendSinkTest(name, await storedConfig(), deps.getEnv, deps.fetch, deps)
       await appendAudit(deps.db, { actor: 'api-token', action: 'sink.test', target: `sink:${name}`, before: null, after: null, at: nowSeconds() })
       return c.json({ ok: true }, 200, noStore)
     } catch (error) {

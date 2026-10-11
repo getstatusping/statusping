@@ -170,7 +170,7 @@ export const SINK_FIELDS: Record<SinkType, { label: string; help: string; fields
   telegram: { label: 'Telegram', help: 'Create a bot with @BotFather, add it to your chat, and use the chat ID.', fields: [{ key: 'botToken', label: 'Bot token', secret: true }, { key: 'chatId', label: 'Chat ID', secret: true }] },
   pushover: { label: 'Pushover', help: 'Create an application at pushover.net for its API token; your user key is on the dashboard.', fields: [{ key: 'appToken', label: 'Application API token', secret: true }, { key: 'userKey', label: 'User key', secret: true }, { key: 'device', label: 'Device', optional: true, hint: 'Leave empty for all your devices.' }] },
   ntfy: { label: 'ntfy', help: 'Subscribe to a hard-to-guess topic in the ntfy app.', fields: [{ key: 'topic', label: 'Topic', secret: true }, { key: 'server', label: 'Server', optional: true, placeholder: 'https://ntfy.sh' }, { key: 'token', label: 'Access token', secret: true, optional: true, hint: 'Recommended on ntfy.sh, which rate-limits anonymous senders.' }] },
-  email: { label: 'Email', help: 'Sends through Cloudflare Email Routing (recipients must be verified there) or Resend.', fields: [{ key: 'to', label: 'Recipients', placeholder: 'ops@example.com, me@example.com' }, { key: 'via', label: 'Send with' }, { key: 'apiKey', label: 'Resend API key', secret: true, optional: true }, { key: 'from', label: 'From address (Resend)', optional: true, placeholder: 'StatusPing <alerts@example.com>' }] },
+  email: { label: 'Email', help: 'Sends through your own mail server (SMTP), Resend, or Cloudflare Email Routing (recipients must be verified there).', fields: [{ key: 'to', label: 'Recipients', placeholder: 'ops@example.com, me@example.com' }, { key: 'via', label: 'Send with' }, { key: 'apiKey', label: 'Resend API key', secret: true, optional: true }, { key: 'password', label: 'SMTP password', secret: true, optional: true }, { key: 'from', label: 'From address', optional: true, placeholder: 'StatusPing <alerts@example.com>' }] },
   webhook: { label: 'Webhook', help: 'StatusPing POSTs a JSON alert to your URL, optionally signed with a shared secret.', fields: [{ key: 'url', label: 'URL', secret: true, placeholder: 'https://example.com/hooks/statusping' }, { key: 'secret', label: 'Signing secret', secret: true, optional: true }] },
 }
 
@@ -191,7 +191,7 @@ export function sinkFromForm(form: Form, name: string, existing: SinkInput | und
   const old = (existing ?? {}) as Record<string, unknown>
   const secrets: SinkFormResult['secrets'] = []
   for (const field of spec.fields) {
-    if (field.key === 'to' || field.key === 'via' || field.key === 'apiKey' || field.key === 'from') continue
+    if (type === 'email') continue
     const value = text(form, field.key)
     if (field.secret) {
       if (value) {
@@ -208,12 +208,29 @@ export function sinkFromForm(form: Form, name: string, existing: SinkInput | und
     const to = lines(text(form, 'to'))
     if (!to.length || to.some((address) => !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(address))) throw new FormError('List one or more valid recipient email addresses.')
     sink.to = to
-    if (text(form, 'via') === 'resend') {
-      const previous = typeof old.via === 'object' && old.via ? old.via as Record<string, unknown> : {}
+    const via = text(form, 'via')
+    const previous = typeof old.via === 'object' && old.via ? old.via as Record<string, unknown> : {}
+    if (via === 'smtp') {
+      const from = text(form, 'from')
+      if (!/^[^@\s<>]+@[^@\s<>]+\.[^@\s<>]+$/.test(from.replace(/^.*<([^<>]+)>$/, '$1'))) throw new FormError('Enter the From address, such as StatusPing <alerts@example.com>.')
+      const host = text(form, 'smtpHost')
+      if (!/^[a-z0-9.-]+$/i.test(host)) throw new FormError('Enter the mail server, such as smtp.example.com.')
+      const port = Number(text(form, 'smtpPort') || '587')
+      if (!Number.isInteger(port) || port < 1 || port > 65535) throw new FormError('Enter the mail server port, usually 587 or 465.')
+      if (port === 25) throw new FormError('Port 25 is blocked on Cloudflare. Use 587 (STARTTLS) or 465 (TLS).')
+      const security = text(form, 'smtpSecurity') === 'tls' ? 'tls' : 'starttls'
+      const username = text(form, 'smtpUsername')
+      const password = text(form, 'password')
+      // Keep the saved password only while the same server and account are used.
+      let passwordRef = previous.provider === 'smtp' && previous.host === host && previous.username === username ? previous.password : undefined
+      if (password) { const envName = sinkEnvName(name, 'password'); secrets.push({ name: envName, value: password }); passwordRef = { $env: envName } }
+      if (username && !passwordRef) throw new FormError('Enter the SMTP password.')
+      sink.via = { provider: 'smtp', host, port, security, ...(username ? { username, password: passwordRef } : {}), from }
+    } else if (via === 'resend') {
       const apiKey = text(form, 'apiKey')
       const from = text(form, 'from')
       if (!from) throw new FormError('Enter the From address for Resend.')
-      let keyRef = previous.apiKey
+      let keyRef = previous.provider === 'resend' ? previous.apiKey : undefined
       if (apiKey) { const envName = sinkEnvName(name, 'apiKey'); secrets.push({ name: envName, value: apiKey }); keyRef = { $env: envName } }
       if (!keyRef) throw new FormError('Enter the Resend API key.')
       sink.via = { provider: 'resend', apiKey: keyRef, from }

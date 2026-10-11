@@ -1,6 +1,6 @@
 import type { StatusPingConfig } from '../config.ts'
 import type { Db } from '../db/types.ts'
-import { createSink, type CloudflareEmailSender } from '../notify/sinks.ts'
+import { createSink, type SinkRuntime } from '../notify/sinks.ts'
 import { randomToken, sha256Hex } from '../util/crypto.ts'
 import { type AdminConfig, validateAdminConfig } from './security.ts'
 
@@ -128,11 +128,11 @@ export async function sendSinkTest(
   config: AdminConfig,
   getEnv: (name: string) => string | undefined,
   fetchFn: typeof fetch,
-  cloudflareEmail?: CloudflareEmailSender,
+  runtime: SinkRuntime = {},
 ): Promise<void> {
   const sinkConfig = config.sinks?.[name]
   if (!sinkConfig) throw new Error(`unknown sink "${name}"`)
-  const sink = createSink(name, sinkConfig, getEnv, cloudflareEmail)
+  const sink = createSink(name, sinkConfig, getEnv, runtime)
   await sink.send({
     kind: 'test',
     title: 'StatusPing test alert',

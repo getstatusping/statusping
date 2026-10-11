@@ -256,7 +256,7 @@ export async function dispatchNotifications(deps: Deps, now: number, onlyMonitor
         : undefined
       const message = buildMessage(deps, monitor.name, monitor.id, incident, messageKind, now, acknowledgeUrl)
       try {
-        await createSink(sinkName, sinkConfig, deps.getEnv, deps.cloudflareEmail).send(message, deps.fetch)
+        await createSink(sinkName, sinkConfig, deps.getEnv, deps).send(message, deps.fetch)
         await db.run(`UPDATE notifications SET ok = 1, error = NULL WHERE incident_id = ? AND event = ? AND sink = ?`, [
           incident.id,
           event,

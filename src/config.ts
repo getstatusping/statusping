@@ -217,7 +217,17 @@ export interface EmailSinkInput {
   type: 'email'
   /** Recipients must be verified when using Cloudflare Email Routing. */
   to: string[]
-  via: 'cloudflare' | { provider: 'resend'; apiKey: Secret; from: string }
+  via: 'cloudflare' | { provider: 'resend'; apiKey: Secret; from: string } | SmtpViaInput
+}
+/** Your own mail server. Port 465 uses TLS from the start; 587 upgrades with STARTTLS. Plaintext is not supported. */
+export interface SmtpViaInput {
+  provider: 'smtp'
+  host: string
+  port: number
+  security: 'tls' | 'starttls'
+  username?: string
+  password?: Secret
+  from: string
 }
 export type SinkInput = PushoverSinkInput | NtfySinkInput | TelegramSinkInput | WebhookSinkInput | DiscordSinkInput | SlackSinkInput | EmailSinkInput
 
@@ -682,9 +692,18 @@ export function normalizeConfig(config: StatusPingConfig): NormalizedConfig {
         problems.push(`sinks.${name}.to: must contain one or more email addresses`)
       }
       if (sink.via !== 'cloudflare') {
-        if (!sink.via || sink.via.provider !== 'resend') problems.push(`sinks.${name}.via: provider must be "resend"`)
+        if (!sink.via || (sink.via.provider !== 'resend' && sink.via.provider !== 'smtp')) problems.push(`sinks.${name}.via: provider must be "resend" or "smtp"`)
         else if (typeof sink.via.from !== 'string' || !isMailbox(sink.via.from)) {
           problems.push(`sinks.${name}.via.from: must be an email address`)
+        }
+        if (sink.via && typeof sink.via === 'object' && sink.via.provider === 'smtp') {
+          const smtp = sink.via
+          if (typeof smtp.host !== 'string' || !/^[a-z0-9.-]+$/i.test(smtp.host)) problems.push(`sinks.${name}.via.host: must be a host name`)
+          if (!Number.isInteger(smtp.port) || smtp.port < 1 || smtp.port > 65535) problems.push(`sinks.${name}.via.port: must be a port number`)
+          else if (smtp.port === 25) problems.push(`sinks.${name}.via.port: port 25 is blocked on Cloudflare; use 465 or 587`)
+          if (smtp.security !== 'tls' && smtp.security !== 'starttls') problems.push(`sinks.${name}.via.security: must be "tls" or "starttls"`)
+          if (smtp.username !== undefined && typeof smtp.username !== 'string') problems.push(`sinks.${name}.via.username: must be a string`)
+          if (smtp.username && smtp.password === undefined) problems.push(`sinks.${name}.via.password: required with a username`)
         }
       }
     }

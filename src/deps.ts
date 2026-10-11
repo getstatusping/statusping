@@ -1,3 +1,4 @@
+import type { SmtpConnector } from './notify/smtp.ts'
 import {
   type EnvGetter,
   type NormalizedConfig,
@@ -49,6 +50,8 @@ export interface Deps {
   location?: string
   /** Optional Cloudflare Email Routing binding adapter. */
   cloudflareEmail?: CloudflareEmailSender
+  /** Opens SMTP connections for email channels that use your own mail server. */
+  smtpConnect?: SmtpConnector
   log: Logger
   /** Runs a promise after the response is sent where the platform supports it. */
   waitUntil?: (p: Promise<unknown>) => void
@@ -67,6 +70,7 @@ export interface CreateDepsOptions {
   confirmationProbe?: ConfirmationProbe
   location?: string
   cloudflareEmail?: CloudflareEmailSender
+  smtpConnect?: SmtpConnector
   clientIp?: (request: Request) => string | null
 }
 
@@ -108,6 +112,7 @@ export function createDeps(opts: CreateDepsOptions): Deps {
     confirmationProbe: opts.confirmationProbe,
     location: opts.location,
     cloudflareEmail: opts.cloudflareEmail,
+    smtpConnect: opts.smtpConnect,
     clientIp: opts.clientIp ?? (() => null),
     log: opts.log ?? consoleLogger,
   }

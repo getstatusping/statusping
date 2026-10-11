@@ -11,6 +11,7 @@ import { tick } from '../../src/tick.ts'
 import { createApp } from '../../src/web/app.ts'
 import { cloudflareTcpConnect } from './tcp.ts'
 import { cloudflareEmailSender } from './email.ts'
+import { cloudflareSmtpConnect } from './smtp.ts'
 import { cloudflareConfirmationProbe, RegionalProbe, type DurableObjectNamespaceLike } from './confirmation.ts'
 import { normalizeClientIp } from '../../src/rate-limit.ts'
 
@@ -46,6 +47,7 @@ function init(env: Env) {
         return typeof value === 'string' ? value : undefined
       },
       tcpConnect: cloudflareTcpConnect,
+      smtpConnect: cloudflareSmtpConnect,
       confirmationProbe: env.REGIONAL_PROBE ? cloudflareConfirmationProbe(env.REGIONAL_PROBE) : undefined,
       cloudflareEmail: cloudflareEmailSender(env.SEND_EMAIL, typeof env.STATUSPING_EMAIL_FROM === 'string' ? env.STATUSPING_EMAIL_FROM : undefined),
       clientIp: (request) => normalizeClientIp(request.headers.get('cf-connecting-ip')),

@@ -36,6 +36,7 @@ const SECTIONS: Array<[Section, string, string]> = [
 ]
 
 const ADMIN_STYLES = `
+[hidden] { display: none !important; }
 .settings { display: grid; grid-template-columns: 200px minmax(0, 1fr); gap: 32px; align-items: start; }
 .settings-nav ul { margin: 0; padding: 0; list-style: none; display: grid; gap: 2px; }
 .settings-nav a { display: block; padding: 6px 10px; border-radius: calc(var(--radius) - 4px); font-size: 14px; color: var(--muted-foreground); }
@@ -265,12 +266,35 @@ export function channelsPage(opts: { viewer: Viewer; csrf: string; sinks: Array<
 <section class="card">${opts.sinks.length ? `<table class="table"><thead><tr><th>Channel</th><th>Type</th><th></th></tr></thead><tbody>${rows}</tbody></table>` : '<p class="empty">No alert channels yet.</p>'}</section>` })
 }
 
+/** Email has three ways to send; only the chosen one's fields are shown. */
+function emailFields(opts: { sources: Record<string, { source: SecretSource; envName?: string }>; values?: Record<string, string> }, s: Record<string, unknown>, editing: boolean): string {
+  const via = s.via && typeof s.via === 'object' ? s.via as Record<string, unknown> : {}
+  const v = (key: string, saved: unknown) => opts.values?.[key] ?? (saved === undefined ? '' : String(saved))
+  const chosen = opts.values?.via ?? (typeof via.provider === 'string' ? via.provider : editing ? 'cloudflare' : 'smtp')
+  const secret = (key: string, label: string) => {
+    const state = opts.sources[key]
+    const status = !state?.source ? '' : state.source === 'env' ? `<span class="secret-state ok">✓ From the Worker secret <code>${escape(state.envName ?? '')}</code></span>` : '<span class="secret-state ok">✓ Saved. Leave blank to keep it.</span>'
+    return field(label, `<input class="input" id="${key}" name="${key}" type="password" autocomplete="off">`, status)
+  }
+  return `${field('Recipients', `<textarea class="input" id="to" name="to" placeholder="ops@example.com">${escape(opts.values?.to ?? (Array.isArray(s.to) ? (s.to as string[]).join('\n') : ''))}</textarea>`, 'One per line.')}
+${field('Send with', selectInput('via', [['smtp', 'Your mail server (SMTP)'], ['resend', 'Resend'], ['cloudflare', 'Cloudflare Email Routing']], chosen))}
+<div data-via="smtp resend">${field('From address', textInput('from', v('from', via.from), 'placeholder="StatusPing &lt;alerts@example.com&gt;"'))}</div>
+<div data-via="smtp" class="form">
+${field('Mail server', textInput('smtpHost', v('smtpHost', via.host), 'placeholder="smtp.example.com" spellcheck="false"'))}
+<div class="grid-2">${field('Port', textInput('smtpPort', v('smtpPort', via.port ?? 587), 'inputmode="numeric"'), '587 for STARTTLS, 465 for TLS. Port 25 is blocked on Cloudflare.')}
+${field('Encryption', selectInput('smtpSecurity', [['starttls', 'STARTTLS'], ['tls', 'TLS']], v('smtpSecurity', via.security ?? 'starttls')))}</div>
+${field('Username', textInput('smtpUsername', v('smtpUsername', via.username), 'autocomplete="off" spellcheck="false"'), 'Leave blank if the server does not need you to sign in.')}
+${secret('password', 'Password')}</div>
+<div data-via="resend">${secret('apiKey', 'Resend API key')}</div>
+<script>(function(){var s=document.getElementById('via');function u(){document.querySelectorAll('[data-via]').forEach(function(e){e.hidden=e.getAttribute('data-via').split(' ').indexOf(s.value)<0})}s.addEventListener('change',u);u()})()</script>`
+}
+
 export function channelForm(opts: { viewer: Viewer; csrf: string; type: SinkType; name?: string; sink?: SinkInput; sources: Record<string, { source: SecretSource; envName?: string }>; values?: Record<string, string>; error?: string }): string {
   const spec = SINK_FIELDS[opts.type]
   const editing = Boolean(opts.sink)
   const s = (opts.sink ?? {}) as Record<string, unknown>
   const via = s.via && typeof s.via === 'object' ? s.via as Record<string, unknown> : null
-  const fields = spec.fields.map((f) => {
+  const fields = opts.type === 'email' ? emailFields(opts, s, editing) : spec.fields.map((f) => {
     if (f.key === 'to') return field('Recipients', `<textarea class="input" id="to" name="to" placeholder="${escape(f.placeholder ?? '')}">${escape(opts.values?.to ?? (Array.isArray(s.to) ? (s.to as string[]).join('\n') : ''))}</textarea>`, 'One per line.')
     if (f.key === 'via') return field('Send with', selectInput('via', [['cloudflare', 'Cloudflare Email Routing'], ['resend', 'Resend']], opts.values?.via ?? (via ? 'resend' : 'cloudflare')))
     if (f.key === 'from') return field(f.label, textInput('from', opts.values?.from ?? (via?.from as string | undefined), `placeholder="${escape(f.placeholder ?? '')}"`))

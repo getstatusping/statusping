@@ -81,7 +81,7 @@ export async function dispatchAnnouncementNotifications(deps: Deps, now: number)
     const sinkConfig = deps.config.sinks[row.sink]
     if (!sinkConfig) continue
     try {
-      await createSink(row.sink, sinkConfig, deps.getEnv, deps.cloudflareEmail).send(announcementMessage(row, deps.config.baseUrl), deps.fetch)
+      await createSink(row.sink, sinkConfig, deps.getEnv, deps).send(announcementMessage(row, deps.config.baseUrl), deps.fetch)
       await deps.db.run('UPDATE announcement_notifications SET ok = 1, error = NULL WHERE id = ?', [row.id])
       sent++
     } catch (error) {

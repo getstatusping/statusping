@@ -7,7 +7,15 @@ declare module 'cloudflare:sockets' {
   export interface Socket {
     readonly opened: Promise<unknown>
     readonly closed: Promise<void>
+    readonly readable: ReadableStream<Uint8Array>
+    readonly writable: WritableStream<Uint8Array>
     close(): void
+    startTls(): Socket
+  }
+
+  export interface SocketOptions {
+    secureTransport?: 'off' | 'on' | 'starttls'
+    allowHalfOpen?: boolean
   }
 
   export interface SocketAddress {
@@ -15,5 +23,5 @@ declare module 'cloudflare:sockets' {
     port: number
   }
 
-  export function connect(address: SocketAddress): Socket
+  export function connect(address: SocketAddress, options?: SocketOptions): Socket
 }

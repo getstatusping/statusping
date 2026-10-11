@@ -11,6 +11,7 @@ import { createDeps } from '../../src/deps.ts'
 import { loadNodeConfig } from './config.ts'
 import { lookupNodeCertificateExpiry } from './expiry.ts'
 import { nodeTcpConnect } from './tcp.ts'
+import { nodeSmtpConnect } from './smtp.ts'
 import { startNodeServer } from './server.ts'
 import { normalizeClientIp } from '../../src/rate-limit.ts'
 import { nodeConfirmationProbe, nodeConfirmationSettings } from './confirmation.ts'
@@ -26,6 +27,7 @@ const deps = createDeps({
   getEnv: env,
   certificateExpiry: lookupNodeCertificateExpiry,
   tcpConnect: nodeTcpConnect,
+  smtpConnect: nodeSmtpConnect,
   confirmationProbe: confirmation ? nodeConfirmationProbe(confirmation) : undefined,
   location: env('STATUSPING_LOCATION'),
   // A direct Node listener cannot authenticate a forwarding header. Opt in only

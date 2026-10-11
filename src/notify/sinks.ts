@@ -1,4 +1,5 @@
 import { type EnvGetter, type SinkInput, resolveSecret } from '../config.ts'
+import { type SmtpConnector, sendSmtp } from './smtp.ts'
 
 export interface AlertMessage {
   kind: 'down' | 'up' | 'renotify' | 'warning' | 'announcement' | 'test'
@@ -25,6 +26,12 @@ export interface Sink {
 /** Runtime adapter for Cloudflare's Email Routing `send_email` binding. */
 export interface CloudflareEmailSender {
   send(message: { to: string[]; subject: string; text: string; html: string }): Promise<void>
+}
+
+/** Runtime transports some channels need. `Deps` satisfies this. */
+export interface SinkRuntime {
+  cloudflareEmail?: CloudflareEmailSender
+  smtpConnect?: SmtpConnector
 }
 
 const clip = (s: string, max: number) => (s.length > max ? `${s.slice(0, max - 1)}…` : s)
@@ -234,8 +241,9 @@ function email(
   name: string,
   cfg: Extract<SinkInput, { type: 'email' }>,
   getEnv: EnvGetter,
-  cloudflareEmail: CloudflareEmailSender | undefined,
+  runtime: SinkRuntime,
 ): Sink {
+  const { cloudflareEmail, smtpConnect } = runtime
   return {
     name,
     type: 'email',
@@ -249,6 +257,12 @@ function email(
         return
       }
       const via = cfg.via
+      if (via.provider === 'smtp') {
+        if (!smtpConnect) throw new Error('email: SMTP is unavailable in this runtime')
+        const password = via.password === undefined ? undefined : resolveSecret(via.password, getEnv)
+        await withScrub(password ? [password] : [], () => sendSmtp(smtpConnect, { host: via.host, port: via.port, security: via.security, username: via.username, password }, { from: via.from, to: cfg.to, subject, text, html }))
+        return
+      }
       const apiKey = resolveSecret(via.apiKey, getEnv)!
       await withScrub([apiKey], async () => {
         const res = await fetchFn('https://api.resend.com/emails', {
@@ -262,7 +276,7 @@ function email(
   }
 }
 
-export function createSink(name: string, input: SinkInput, getEnv: EnvGetter, cloudflareEmail?: CloudflareEmailSender): Sink {
+export function createSink(name: string, input: SinkInput, getEnv: EnvGetter, runtime: SinkRuntime = {}): Sink {
   switch (input.type) {
     case 'pushover':
       return pushover(name, input, getEnv)
@@ -277,6 +291,6 @@ export function createSink(name: string, input: SinkInput, getEnv: EnvGetter, cl
     case 'slack':
       return slack(name, input, getEnv)
     case 'email':
-      return email(name, input, getEnv, cloudflareEmail)
+      return email(name, input, getEnv, runtime)
   }
 }
