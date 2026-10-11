@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { planUpgrade, type Files } from '../src/upgrade-plan.ts'
+import { mergeLines } from '../src/line-merge.ts'
 
 const realMarker = JSON.parse(readFileSync(new URL('../statusping.release.json', import.meta.url), 'utf8'))
 const encode = (text: string) => new TextEncoder().encode(text)
@@ -63,7 +64,7 @@ describe('three-way upgrade plan', () => {
       'src/added.ts': 'export const mine = true\n',
     }))
     expect(result.safe).toBe(true)
-    expect(result.conflicts).toEqual([
+    expect(result.conflicts.map(({ path, reason }) => ({ path, reason }))).toEqual([
       { path: 'README.md', reason: 'modified-locally' },
       { path: 'src/added.ts', reason: 'added-locally' },
       { path: 'src/app.ts', reason: 'modified-locally' },
@@ -93,7 +94,7 @@ describe('three-way upgrade plan', () => {
     expect(decode(added.writes.get('package-lock.json'))).toBe(lock('cardgem-statusping', '0.2.0'))
 
     const edited = { ...current, 'package.json': `{\n  "name": "cardgem-statusping",\n  "version": "0.1.0",\n  "scripts": {}\n}\n` }
-    expect(planUpgrade({ base: files(base), target: files(target), current: files(edited), currentWrangler: encode(wrangler('0.1.0')) }).conflicts)
+    expect(planUpgrade({ base: files(base), target: files(target), current: files(edited), currentWrangler: encode(wrangler('0.1.0')) }).conflicts.map(({ path, reason }) => ({ path, reason })))
       .toEqual([{ path: 'package.json', reason: 'modified-locally' }])
   })
 
@@ -110,7 +111,7 @@ describe('three-way upgrade plan', () => {
     expect(result.conflicts).toEqual([])
     expect(decode(result.writes.get('README.md'))).toBe(readme('Release 0.2.0'))
     const edited = planUpgrade({ base: files(base), target: files(release('0.2.0')), current: files({ ...base, 'README.md': `${oldReadme}mine\n` }), currentWrangler: encode(wrangler('0.1.0')) })
-    expect(edited.conflicts).toEqual([{ path: 'README.md', reason: 'modified-locally' }])
+    expect(edited.conflicts.map(({ path, reason }) => ({ path, reason }))).toEqual([{ path: 'README.md', reason: 'modified-locally' }])
   })
 
   it('reports a locally deleted file and a missing template version line', () => {
@@ -150,5 +151,70 @@ describe('three-way upgrade plan', () => {
     expect(result.safe).toBe(false)
     expect(result.errors).toContain('path is not updater-owned: unowned.txt')
     expect(result.writes.size).toBe(0)
+  })
+
+  it('merges customer edits and release edits that touch different lines', () => {
+    const app = (head: string, tail: string) => `// ${head}\nexport const a = 1\nexport const b = 2\nexport const c = 3\n// ${tail}\n`
+    const base = release('0.1.0', { 'src/app.ts': app('header', 'footer') })
+    const target = release('0.2.0', { 'src/app.ts': app('header', 'footer v2') })
+    const run = (current: string) => planUpgrade({ base: files(base), target: files(target), current: files({ ...base, 'src/app.ts': current }), currentWrangler: encode(wrangler('0.1.0')) })
+    const clean = run(app('our header', 'footer'))
+    expect(clean.conflicts).toEqual([])
+    expect(clean.merged).toEqual(['src/app.ts'])
+    expect(decode(clean.writes.get('src/app.ts'))).toBe(app('our header', 'footer v2'))
+
+    const overlapping = run(app('header', 'our footer'))
+    expect(overlapping.merged).toEqual([])
+    expect(overlapping.writes.has('src/app.ts')).toBe(false)
+    expect(overlapping.conflicts).toHaveLength(1)
+    expect(overlapping.conflicts[0]).toMatchObject({ path: 'src/app.ts', reason: 'modified-locally' })
+    expect(decode(overlapping.conflicts[0]!.markers)).toBe('// header\nexport const a = 1\nexport const b = 2\nexport const c = 3\n<<<<<<< your version\n// our footer\n=======\n// footer v2\n>>>>>>> StatusPing\n')
+  })
+})
+
+describe('line-level merge', () => {
+  const text = (...l: string[]) => l.map((x) => `${x}\n`).join('')
+  it('combines non-overlapping edits, insertions, and deletions', () => {
+    const base = text('a', 'b', 'c', 'd', 'e', 'f')
+    expect(mergeLines(base, text('a', 'B', 'c', 'd', 'e', 'f'), text('a', 'b', 'c', 'd', 'E', 'f'))).toEqual({ clean: true, text: text('a', 'B', 'c', 'd', 'E', 'f') })
+    expect(mergeLines(base, text('x', 'a', 'b', 'c', 'd', 'e', 'f'), text('a', 'b', 'c', 'e', 'f', 'g'))).toEqual({ clean: true, text: text('x', 'a', 'b', 'c', 'e', 'f', 'g') })
+    expect(mergeLines(base, text('a', 'b', 'Z', 'd', 'e', 'f'), text('a', 'b', 'Z', 'd', 'e', 'f'))).toEqual({ clean: true, text: text('a', 'b', 'Z', 'd', 'e', 'f') })
+    expect(mergeLines('a\nx\nb', 'A\nx\nb', 'a\nx\nB')).toEqual({ clean: true, text: 'A\nx\nB' })
+  })
+
+  it('marks overlapping edits as conflicts', () => {
+    const result = mergeLines(text('a', 'b', 'c'), text('a', 'mine', 'c'), text('a', 'theirs', 'c'))
+    expect(result).toEqual({ clean: false, text: text('a', '<<<<<<< your version', 'mine', '=======', 'theirs', '>>>>>>> StatusPing', 'c') })
+  })
+
+  it('handles larger files', () => {
+    const base = Array.from({ length: 3000 }, (_, i) => `line ${i}\n`)
+    const ours = [...base]; ours[10] = 'ours\n'; ours.splice(1500, 5)
+    const theirs = [...base]; theirs[2990] = 'theirs\n'; theirs.splice(700, 0, 'new\n')
+    const expected = [...base]; expected[10] = 'ours\n'; expected[2990] = 'theirs\n'; expected.splice(1500, 5); expected.splice(700, 0, 'new\n')
+    expect(mergeLines(base.join(''), ours.join(''), theirs.join(''))).toEqual({ clean: true, text: expected.join('') })
+  })
+
+  it('returns one side unchanged when only that side edited (random edits)', () => {
+    let seed = 7
+    const rand = (n: number) => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed % n }
+    const edit = (lines: string[]) => {
+      const out = [...lines]
+      for (let n = rand(8); n >= 0; n--) {
+        const at = rand(out.length + 1)
+        const op = rand(3)
+        if (op === 0) out.splice(at, 0, `new ${rand(1000)}\n`)
+        else if (op === 1) out.splice(at, 1)
+        else out[at] = `changed ${rand(1000)}\n`
+      }
+      return out.join('')
+    }
+    for (let round = 0; round < 200; round++) {
+      const base = Array.from({ length: rand(40) }, () => `l${rand(6)}\n`)
+      const changed = edit(base)
+      expect(mergeLines(base.join(''), changed, base.join(''))).toEqual({ clean: true, text: changed })
+      expect(mergeLines(base.join(''), base.join(''), changed)).toEqual({ clean: true, text: changed })
+      expect(mergeLines(base.join(''), changed, changed)).toEqual({ clean: true, text: changed })
+    }
   })
 })

@@ -60,13 +60,14 @@ npm run upgrade -- 0.2.0     # or a specific release
 
 The command fetches your installed release and the target release from
 `getstatusping/statusping`, then commits the upgrade on a new
-`statusping/upgrade-vX.Y.Z` branch. It changes only updater-owned files you
-have not edited, removes files the release deleted, carries your README local
-notes across, and updates only the `STATUSPING_TEMPLATE_VERSION` line in
-`wrangler.toml`. It never pushes. Review the commit, push the branch, and merge
-it through a pull request; Cloudflare deploys the merge, and `/healthz` then
-reports the new version. To roll back the code, revert that pull request;
-database migrations are forward-only and are never rolled back.
+`statusping/upgrade-vX.Y.Z` branch. It updates updater-owned files, merges the
+release into files you edited when the changes touch different lines, removes
+files the release deleted, carries your README local notes across, and updates
+only the `STATUSPING_TEMPLATE_VERSION` line in `wrangler.toml`. It never pushes.
+Review the commit, push the branch, and merge it through a pull request;
+Cloudflare deploys the merge, and `/healthz` then reports the new version. To
+roll back the code, revert that pull request; database migrations are
+forward-only and are never rolled back.
 
 If your Cloudflare project builds non-production branches, its preview build
 for the upgrade branch fails unless `wrangler.toml` has a `[previews]` block.
@@ -83,7 +84,8 @@ git clone --depth 1 https://github.com/getstatusping/statusping.git /tmp/statusp
 node /tmp/statusping-latest/scripts/upgrade.ts --adopt
 ```
 
-If you edited an updater-owned file, the command lists it and stops. Restore
+If your edits and the release change the same lines of an updater-owned file,
+the command lists it and stops. Restore
 the file, or rerun with `--skip-conflicts` to upgrade everything else and merge
 that file by hand. Upstream changes to your own files (`statusping.config.ts`,
 `wrangler.toml`) are listed for you to apply; they are never overwritten.

@@ -6,6 +6,7 @@
  * (current). Both the local `npm run upgrade` command and a future review-PR
  * service apply the resulting plan; neither may write anything it omits.
  */
+import { mergeLines } from './line-merge.ts'
 import { calculateUpgradePreflight, preserveMarkedRegion, validateTemplateMarker, type PreservedRegion } from './upgrade-preflight.ts'
 
 export type Files = ReadonlyMap<string, Uint8Array>
@@ -13,6 +14,8 @@ export type Files = ReadonlyMap<string, Uint8Array>
 export type UpgradeConflict = {
   path: string
   reason: 'modified-locally' | 'deleted-locally' | 'added-locally' | 'template-marker-missing' | 'changed-upstream'
+  /** For overlapping line edits: the file with both versions between conflict markers. */
+  markers?: Uint8Array
 }
 
 export type UpgradePlan = {
@@ -23,6 +26,8 @@ export type UpgradePlan = {
   writes: Map<string, Uint8Array>
   /** Files the target release removed and the customer had not changed. */
   deletes: string[]
+  /** Files the customer edited where both sets of edits were combined line by line (included in `writes`). */
+  merged: string[]
   /** Files left untouched because the customer changed them; resolve by hand. */
   conflicts: UpgradeConflict[]
   errors: string[]
@@ -72,12 +77,13 @@ function withCustomerName(base: Uint8Array, target: Uint8Array, current: Uint8Ar
 
 /**
  * Merge one updater-owned file. A file the customer has not changed since the
- * installed release takes the target contents; anything else is a conflict.
+ * installed release takes the target contents. An edited text file is merged
+ * line by line; overlapping edits, deletions, and additions are conflicts.
  * A preserved region (the README local notes) is carried across and ignored
  * when deciding whether the customer changed the file.
  */
 function mergeFile(base: Uint8Array | undefined, target: Uint8Array | undefined, current: Uint8Array | undefined, region: PreservedRegion | undefined):
-  { kind: 'unchanged' } | { kind: 'write'; content: Uint8Array } | { kind: 'delete' } | { kind: 'conflict'; reason: UpgradeConflict['reason'] } {
+  { kind: 'unchanged' } | { kind: 'write'; content: Uint8Array; merged?: true } | { kind: 'delete' } | { kind: 'conflict'; reason: UpgradeConflict['reason']; markers?: Uint8Array } {
   // A base from before the region existed has no notes to carry: compare it whole.
   if (region && base && target && current && decoder.decode(base).includes(region.start)) {
     try {
@@ -91,7 +97,15 @@ function mergeFile(base: Uint8Array | undefined, target: Uint8Array | undefined,
   if (same(base, target)) return { kind: 'unchanged' }
   if (base === undefined) return current === undefined ? { kind: 'write', content: target! } : { kind: 'conflict', reason: 'added-locally' }
   if (current === undefined) return { kind: 'conflict', reason: 'deleted-locally' }
-  if (!same(current, base)) return { kind: 'conflict', reason: 'modified-locally' }
+  if (!same(current, base)) {
+    if (target === undefined) return { kind: 'conflict', reason: 'modified-locally' }
+    let merge
+    try { merge = mergeLines(decoder.decode(base), decoder.decode(current), decoder.decode(target)) } catch { /* binary */ }
+    if (!merge) return { kind: 'conflict', reason: 'modified-locally' }
+    if (!merge.clean) return { kind: 'conflict', reason: 'modified-locally', markers: encoder.encode(merge.text) }
+    const content = encoder.encode(merge.text)
+    return same(content, current) ? { kind: 'unchanged' } : { kind: 'write', content, merged: true }
+  }
   return target === undefined ? { kind: 'delete' } : { kind: 'write', content: target }
 }
 
@@ -107,7 +121,7 @@ export function planUpgrade(input: {
   const targetMarker = json(input.target.get(MARKER_PATH))
   const currentVersion = String(record(baseMarker).release ?? '')
   const targetVersion = String(record(targetMarker).release ?? '')
-  const plan: UpgradePlan = { safe: false, currentVersion, targetVersion, writes: new Map(), deletes: [], conflicts: [], errors: [] }
+  const plan: UpgradePlan = { safe: false, currentVersion, targetVersion, writes: new Map(), deletes: [], merged: [], conflicts: [], errors: [] }
 
   // The customer's marker must still describe the release used as the base;
   // otherwise the base contents do not represent what they installed.
@@ -145,9 +159,9 @@ export function planUpgrade(input: {
     const projectName = input.current.get('package.json') && packageName(input.current.get('package.json')!)
     if (RENAMED_BY_DEPLOY.has(path) && !base && !current && next && projectName) next = renamePackage(next, packageName(next) ?? projectName, projectName)
     const result = mergeFile(base, next, current, target.ownership.preservedRegions[path])
-    if (result.kind === 'write') plan.writes.set(path, result.content)
+    if (result.kind === 'write') { plan.writes.set(path, result.content); if (result.merged) plan.merged.push(path) }
     else if (result.kind === 'delete') plan.deletes.push(path)
-    else if (result.kind === 'conflict') plan.conflicts.push({ path, reason: result.reason })
+    else if (result.kind === 'conflict') plan.conflicts.push({ path, reason: result.reason, ...(result.markers ? { markers: result.markers } : {}) })
   }
 
   // The template version line is the only updater-owned part of the

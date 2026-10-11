@@ -79,6 +79,9 @@ function main() {
   try {
     git(['fetch', '--quiet', '--no-tags', source, `+refs/${adopt ? 'heads/main' : `tags/v${installed}`}:${baseRef}`, `+refs/tags/${targetTag}:${targetRef}`])
     const next = tree(targetRef)
+    let minimum = ''
+    try { minimum = String((JSON.parse(new TextDecoder().decode(next.get('package.json'))) as { statusping?: { minimumUpgradeVersion?: unknown } }).statusping?.minimumUpgradeVersion ?? '') } catch { /* no minimum */ }
+    if (SEMVER.test(minimum) && compare(installed, minimum) < 0) fail(`${targetTag} cannot be applied directly to v${installed}. Upgrade to v${minimum} first:\n  npm run upgrade -- ${minimum}`)
     let base: Map<string, Uint8Array>
     const current = new Map<string, Uint8Array>()
     if (adopt) {
@@ -106,6 +109,10 @@ function main() {
     if (!plan.safe) fail(`Cannot prepare this upgrade:\n${plan.errors.map((error) => `  - ${error}`).join('\n')}`)
     const blocking = plan.conflicts.filter((conflict) => BLOCKING.has(conflict.reason))
     const skip = args.includes('--skip-conflicts')
+    if (plan.merged.length) {
+      console.log('\nYour edits were merged with the release in (review these):')
+      for (const path of plan.merged) console.log(`  - ${path}`)
+    }
     if (plan.conflicts.length) {
       console.log('\nFiles that need your attention:')
       for (const { path, reason } of plan.conflicts) console.log(`  - ${path} (${reason})`)
