@@ -2,16 +2,10 @@
 /**
  * StatusPing CLI (Node ≥ 22.18 runs this TypeScript file directly).
  *
- *   npm run cli -- check                 validate statusping.config.ts
- *   npm run cli -- check --json-config <file>  validate JSON config without a TS config file
- *   npm run cli -- export-config [--yaml] print statusping.config.ts as JSON (or YAML for import)
- *   npm run cli -- tokens                generate PING_TOKENS (keeps tokens already in $PING_TOKENS)
- *   npm run cli -- urls                  print ping URLs from $PING_TOKENS
  *   npm run cli -- migrate               apply the schema to $TURSO_DATABASE_URL (Node + Turso setups)
- *   npm run cli -- test-sink <name>      send a test notification through a sink
  *   npm run cli -- add-user <email>      add a Basic-auth user (keeps users already in $BASIC_AUTH_USERS)
  *
- * YAML configuration (sites set up with the wizard, or with `admin: true`):
+ * Configuration (it lives in the site's database; edit it in Settings or with these):
  *   npm run cli -- config check <file.yaml>            validate a YAML configuration offline
  *   npm run cli -- config pull [--url <site>]           print the site's configuration as YAML
  *   npm run cli -- config push [--url <site>] [--revision <n>] <file.yaml>
@@ -20,18 +14,15 @@
  * pull and push use $ADMIN_TOKEN, and $STATUSPING_URL when --url is not given.
  */
 import { readFile } from 'node:fs/promises'
-import { parseJsonConfig, normalizeConfig, parsePingTokens, resolveConfigEnv, type StatusPingConfig } from '../src/config.ts'
 import { hashPassword } from '../src/auth/providers.ts'
 import { LibsqlDb } from '../src/db/libsql.ts'
-import { createSink } from '../src/notify/sinks.ts'
 import { migrate } from '../src/schema.ts'
 import { randomToken } from '../src/util/crypto.ts'
 import { formatDuration } from '../src/util/time.ts'
-import { loadNodeConfig } from '../adapters/node/config.ts'
 import { hashUserPassword } from '../src/auth/providers.ts'
 import { type AdminConfig, validateAdminConfig } from '../src/admin/security.ts'
 import { revisionStatements } from '../src/admin/service.ts'
-import { locateProblems, parseAdminYaml, stringifyAdminYaml } from '../src/admin/yaml.ts'
+import { locateProblems, parseAdminYaml } from '../src/admin/yaml.ts'
 import type { NormalizedConfig } from '../src/config.ts'
 
 const [command, ...args] = process.argv.slice(2)
@@ -145,84 +136,27 @@ async function recover(email: string | undefined): Promise<void> {
   console.log(`Sign in at ${config.baseUrl.replace(/\/+$/, '')}/auth/login, then change the sign-in method under Settings → Access if you want another one.`)
 }
 
+/** Commands that read statusping.config.ts, which v0.3.0 no longer has. */
+const RETIRED: Record<string, string> = {
+  check: 'Use `config check <file.yaml>`.',
+  'export-config': 'The configuration lives in the database now. Use `config pull`, or Settings → Configuration → Export.',
+  tokens: 'Ping URLs are created in Settings when you add a scheduled job (and with Replace ping URL).',
+  urls: 'Ping URLs are shown once in Settings when created; replace one there if it was lost.',
+  'test-sink': 'Use Send test in Settings → Alert channels.',
+}
+
 async function main() {
   if (command === 'config') return configCommand(args[0], args.slice(1))
   if (command === 'recover') return recover(args[0])
-  let sourceConfig: StatusPingConfig
-  if (command === 'check' && args[0] === '--json-config') {
-    const path = args[1] ?? fail('usage: check --json-config <file>')
-    if (args[2]) fail('usage: check --json-config <file>')
-    let raw: string
-    try {
-      raw = await readFile(path, 'utf8')
-    } catch (error) {
-      fail(`cannot read JSON config "${path}": ${(error as Error).message}`)
-    }
-    sourceConfig = parseJsonConfig(raw, path)
-  } else {
-    sourceConfig = await loadNodeConfig(getEnv)
-  }
-  const normalized = normalizeConfig(resolveConfigEnv(sourceConfig, getEnv, true))
-  const pushMonitors = normalized.monitors.filter((m) => m.kind === 'push')
+  if (command && RETIRED[command]) fail(`"${command}" was removed in v0.3.0 with statusping.config.ts. ${RETIRED[command]}`)
 
   switch (command) {
-    case 'check': {
-      describe(normalized)
-      break
-    }
-
-    case 'export-config': {
-      // --yaml prints the file the setup wizard and Settings → Configuration import (plan 011 §7).
-      if (args.includes('--yaml')) console.log(stringifyAdminYaml(sourceConfig).trimEnd())
-      else console.log(JSON.stringify(sourceConfig, null, 2))
-      break
-    }
-
-    case 'tokens': {
-      const existing = parsePingTokens(getEnv('PING_TOKENS'))
-      const tokens: Record<string, string> = {}
-      for (const m of pushMonitors) tokens[m.id] = existing[m.id] ?? randomToken()
-      const json = JSON.stringify(tokens)
-      console.log('PING_TOKENS secret value (store it; it is not saved anywhere):\n')
-      console.log(json)
-      console.log('\nCloudflare:  npx wrangler secret put PING_TOKENS --config adapters/cloudflare/wrangler.toml')
-      console.log('Node:        add PING_TOKENS=<value> to .env (or the process environment)\n')
-      for (const m of pushMonitors) console.log(`${m.id.padEnd(24)} ${normalized.baseUrl}/ping/${tokens[m.id]}`)
-      break
-    }
-
-    case 'urls': {
-      const tokens = parsePingTokens(getEnv('PING_TOKENS'))
-      for (const m of pushMonitors) {
-        const t = tokens[m.id]
-        console.log(`${m.id.padEnd(24)} ${t ? `${normalized.baseUrl}/ping/${t}` : '(no token — run `tokens`)'}`)
-      }
-      break
-    }
-
     case 'migrate': {
       const url = getEnv('TURSO_DATABASE_URL') ?? fail('TURSO_DATABASE_URL is not set')
       const { createClient } = await import('@libsql/client')
       const db = new LibsqlDb(createClient({ url, authToken: getEnv('TURSO_AUTH_TOKEN') }))
       const applied = await migrate(db)
       console.log(applied ? `✓ applied ${applied} migration(s)` : '✓ schema up to date')
-      break
-    }
-
-    case 'test-sink': {
-      const name = args[0] ?? fail('usage: test-sink <sink-name>')
-      const sinkConfig = normalized.sinks[name] ?? fail(`unknown sink "${name}" (have: ${Object.keys(normalized.sinks).join(', ')})`)
-      await createSink(name, sinkConfig, getEnv).send(
-        {
-          kind: 'test',
-          title: `🔔 StatusPing test (${name})`,
-          body: 'If you can read this, notifications through this sink work.',
-          url: normalized.baseUrl,
-          priority: 'normal',
-        },
-        fetch,
-      )
-      console.log(`✓ test notification sent via ${name}`)
       break
     }
 
@@ -245,7 +179,7 @@ async function main() {
     }
 
     default:
-      console.log('usage: statusping <check [--json-config <file>] | export-config | tokens | urls | migrate | test-sink <name> | add-user <email> | config <check|pull|push> | recover <email>>')
+      console.log('usage: statusping <config <check|pull|push> | recover <email> | add-user <email> | migrate>')
       process.exit(command ? 1 : 0)
   }
 }

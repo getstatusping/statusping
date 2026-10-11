@@ -136,17 +136,20 @@ export function layout(opts: { viewer: Viewer; section: Section; title: string; 
 export function generalPage(opts: { viewer: Viewer; csrf: string; title: string; baseUrl: string; timezone: string; updatesEnabled: boolean; installedVersion: string; update: UpdateState; notice?: string; error?: string; resetError?: string }): string {
   const u = opts.update
   const available = u.result === 'available' && u.targetVersion ? u.targetVersion : null
+  // A release that needs an intermediate one first: statusp.ing offers that release, then this one.
+  const stepped = u.result === 'incompatible' && u.targetVersion ? u.targetVersion : null
+  const offered = available ?? stepped
   const status = u.result === 'disabled' ? 'Update checks are off.'
     : available ? `Version <strong>v${escape(available)}</strong> is available.`
-      : u.result === 'incompatible' && u.targetVersion ? `Version v${escape(u.targetVersion)} is available but needs a manual upgrade path for this installation.`
+      : u.result === 'incompatible' && u.targetVersion ? `Version <strong>v${escape(u.targetVersion)}</strong> is available. It needs a newer intermediate release installed first; Update takes you through both.`
         : u.result === 'failed' ? 'The signed update manifest could not be checked. No update is being offered.'
           : 'This installation is up to date.'
   const checked = u.checkedAt === null ? '' : ` Last checked ${escape(new Date(u.checkedAt * 1000).toISOString().replace('T', ' ').slice(0, 16))} UTC.`
   // Every update action in one row: update, re-check, and the release notes.
   const actions = [
-    available ? `<a class="btn-primary" href="${escape(updateUrl(available, opts.baseUrl))}">Update to v${escape(available)}</a>` : '',
+    offered ? `<a class="btn-primary" href="${escape(updateUrl(offered, opts.baseUrl))}">Update to v${escape(offered)}</a>` : '',
     u.result === 'disabled' ? '' : `<form method="post" action="/admin/updates/check" style="display:contents">${hidden(opts.csrf)}<button class="btn-outline" type="submit">Check for updates</button></form>`,
-    available ? `<a class="btn-outline" href="${escape(releaseNotesUrl(available))}">Release notes</a>` : '',
+    offered ? `<a class="btn-outline" href="${escape(releaseNotesUrl(offered))}">Release notes</a>` : '',
   ].filter(Boolean).join('')
   return layout({ ...opts, section: 'general', title: 'General', description: 'Your status site and its software.', body: `
 <section class="card"><h2>Site</h2><p class="lead">Shown on your status pages and used in alert links.</p>
@@ -157,7 +160,7 @@ ${field('Timezone', timezoneSelect('timezone', opts.timezone, 'required'), 'Used
 <div class="actions"><button class="btn-primary" type="submit">Save</button></div></form></section>
 <section class="card"><h2>Software updates</h2><p class="lead">Installed version <code>v${escape(opts.installedVersion)}</code>. ${status}</p>
 ${actions ? `<div class="actions">${actions}</div>` : ''}
-<p class="hint" style="margin:12px 0 0">${available ? 'Update opens statusp.ing, where you sign in with GitHub and update directly or through a pull request. Your site\'s address stays in your browser.' : ''}${checked}</p>
+<p class="hint" style="margin:12px 0 0">${offered ? 'Update opens statusp.ing, where you sign in with GitHub and update directly or through a pull request. Your site\'s address stays in your browser.' : ''}${checked}</p>
 <form method="post" action="/admin/updates" style="margin-top:16px">${hidden(opts.csrf)}
 <label class="check"><input type="checkbox" name="updates" value="1"${opts.updatesEnabled ? ' checked' : ''} onchange="this.form.requestSubmit()"><span>Check for StatusPing updates (contacts GitHub at most once a day)</span></label>
 <noscript><div class="actions"><button class="btn-outline" type="submit">Save</button></div></noscript></form></section>

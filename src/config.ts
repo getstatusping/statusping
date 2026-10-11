@@ -3,7 +3,7 @@ import { parseJsonPath } from './evaluate/json.ts'
 import { isValidTimeZone, parseDuration } from './util/time.ts'
 import { OFFICIAL_MANIFEST_URL, OFFICIAL_RELEASE_PUBLIC_KEY } from './updates.ts'
 
-// ─── Public config types (what users write in statusping.config.ts) ────────────────────────
+// ─── Config types (the YAML document edited in Settings → Configuration) ───────────────────
 
 export type Duration = number | string
 /** Values accepted by JSON response assertions. */
@@ -399,16 +399,6 @@ export function parseJsonConfig(raw: string, source = 'STATUSPING_CONFIG'): Stat
 }
 
 /** Returns the runtime JSON configuration, with a useful error if it is absent. */
-export function configFromEnv(getEnv: EnvGetter): StatusPingConfig {
-  const raw = getEnv('STATUSPING_CONFIG')
-  if (!raw) throw new Error('STATUSPING_CONFIG is not set')
-  return parseJsonConfig(raw)
-}
-
-/** Prefer a checked-in TypeScript config when one is available (the Node adapter). */
-export function selectConfig(fileConfig: StatusPingConfig | undefined, getEnv: EnvGetter): StatusPingConfig {
-  return fileConfig ?? configFromEnv(getEnv)
-}
 
 // ─── Normalized form ────────────────────────────────────────────────────────────────────────
 

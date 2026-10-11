@@ -11,10 +11,10 @@ The Deploy Button opens Cloudflare's GitHub deployment flow. Review the requeste
 For a manual deployment:
 
 1. Create a D1 database and replace the placeholder `database_id` in `wrangler.toml`.
-2. Export a configuration to `STATUSPING_CONFIG` and set `PING_TOKENS` plus any notification or sign-in secrets with `wrangler secret put`.
-3. Run `npm run cf:deploy`.
+2. Run `npm run cf:deploy`.
+3. Open the site. It starts in the setup wizard: claim it with the setup code from Workers Logs (or a `STATUSPING_SETUP_TOKEN` secret you set), choose how administrators sign in, and add monitors, alert channels, or a YAML file.
 
-The Worker creates its schema on the first request or scheduled tick. The included cron trigger runs every minute.
+No configuration file ships with StatusPing: everything lives in the site's database and is changed in Settings, as YAML, or through the API. The Worker creates its schema on the first request or scheduled tick. The included cron trigger runs every minute.
 
 `/healthz` reports the running app version, schema version, release channel, template version, and (if set) an opaque `STATUSPING_INSTANCE_ID`. These values are deliberately public deployment metadata: do not use a secret for the instance ID. `STATUSPING_TEMPLATE_VERSION` is a release-managed marker for future upgrade tooling; leave it unchanged in normal deployments.
 
@@ -28,8 +28,9 @@ template, canonical source, and file-ownership contract used by
 - **Updater-owned:** the runtime, adapters, scripts, package metadata, CI,
   tests, release marker, and this README outside its marked local-notes region.
   A supported upgrade may replace only these paths.
-- **Customer-owned:** `statusping.config.ts`, `wrangler.toml`, and `.dev.vars`.
-  Upgrade tooling must not replace them. Its sole documented exception is the
+- **Customer-owned:** `wrangler.toml` and `.dev.vars` (and an old `statusping.config.ts`,
+  which v0.3.0 no longer reads; upgrades leave it in place and list it). Upgrade
+  tooling must not replace them. Its sole documented exception is the
   public `STATUSPING_TEMPLATE_VERSION` line in `wrangler.toml`.
 - **Secrets and data:** secrets stay in Cloudflare/your local `.dev.vars`; D1
   data, Cloudflare resources, domains, and monitor configuration are never
@@ -87,8 +88,8 @@ node /tmp/statusping-latest/scripts/upgrade.ts --adopt
 If your edits and the release change the same lines of an updater-owned file,
 the command lists it and stops. Restore
 the file, or rerun with `--skip-conflicts` to upgrade everything else and merge
-that file by hand. Upstream changes to your own files (`statusping.config.ts`,
-`wrangler.toml`) are listed for you to apply; they are never overwritten.
+that file by hand. Upstream changes to your own files (`wrangler.toml`) are
+listed for you to apply; they are never overwritten.
 
 ### If an upgrade goes wrong
 
@@ -130,17 +131,15 @@ Checks are off by default, so an installation never contacts GitHub unless an op
 
 This repository is self-contained: the shared UI is included as a local dependency, so the Deploy Button does not fetch any StatusPing package from npm.
 
-## Moving off config-as-code
+## Coming from config-as-code
 
-`statusping.config.ts` and `STATUSPING_CONFIG` are deprecated. v0.3.0 stops reading them and moves the configuration into the database automatically. Update to v0.2.26 first; see [MIGRATING-TO-YAML.md](MIGRATING-TO-YAML.md).
+v0.3.0 removed `statusping.config.ts` and `STATUSPING_CONFIG`. A site that ran v0.2.26 moves its configuration into the database automatically on first start; see [MIGRATING-TO-YAML.md](MIGRATING-TO-YAML.md).
 
 ## Manage configuration in the app
 
-To enable the browser admin, include `admin: true` in the initial configuration and configure an administrator under `access.admins` plus a supported sign-in provider. After that first deployment, sign in at `/admin` to edit or import the configuration as YAML.
+Sign in at `/admin`. Settings edits monitors, status pages, alert channels and access; **Settings → Configuration** exports and imports the whole configuration as YAML.
 
-Every YAML import is parsed as safe plain data, validated by the same StatusPing configuration schema used by code-based configuration, and checked for admin safety rules before it is saved. Invalid files leave the active configuration unchanged. Secrets stay in Cloudflare/Node environment variables: YAML may reference them with `$env: SECRET_NAME`, but never contains their values.
-
-When browser admin is enabled, the validated D1-backed configuration becomes the running configuration. The checked-in configuration or `STATUSPING_CONFIG` remains the initial seed and is still the recommended approach for automated or version-controlled deployments.
+Every YAML import is parsed as safe plain data, validated by the StatusPing configuration schema, and checked for admin safety rules before it is saved. Invalid files leave the active configuration unchanged. Secrets stay in Cloudflare/Node environment variables or are saved write-only in Settings: YAML may reference them with `$env: SECRET_NAME`, but never contains their values.
 
 Credentials are named, never written: webhook URLs and header values, HTTP monitor URLs and header values, and every channel credential accept `{ $env: NAME }`. A literal URL or header that carries a credential is refused. **Settings → Configuration** lists every `$env` name the configuration uses and whether it is set.
 
@@ -221,8 +220,8 @@ Access); everything else stays closed until you switch, and the recovery is reco
 Activity. Remove the secret afterwards. On Node, `npm run cli -- recover you@example.com`
 switches the site to email + password and prints a new password.
 
-After setup, the configuration lives in the database and is edited as YAML in `/admin`;
-`statusping.config.ts` is no longer used. Passwords chosen in the wizard are stored as
+After setup, the configuration lives in the database and is edited in Settings or as YAML.
+Passwords chosen in the wizard are stored as
 PBKDF2-SHA256 (50,000 iterations, which fits the Workers free plan's CPU limit), and password
 sign-in is limited to 10 attempts per minute per address.
 
@@ -257,6 +256,8 @@ Node 22.18+ can run StatusPing outside Cloudflare, which is useful for a watchdo
 npm install
 PORT=8000 STATUSPING_LOCATION='Portland, US' npm run dev
 ```
+
+On first start it opens the setup wizard at `/setup`; the setup code is printed in the terminal.
 
 For a real second vantage point, run a second Node instance on an independently operated network and give both instances the same monitor IDs and target configuration. On each instance set a unique, truthful `STATUSPING_LOCATION`, the same random `STATUSPING_CONFIRMATION_SECRET`, and peer URLs:
 

@@ -8,7 +8,6 @@
 import { createClient } from '@libsql/client'
 import { LibsqlDb } from '../../src/db/libsql.ts'
 import { createDeps } from '../../src/deps.ts'
-import { loadNodeConfig } from './config.ts'
 import { lookupNodeCertificateExpiry } from './expiry.ts'
 import { nodeTcpConnect } from './tcp.ts'
 import { nodeSmtpConnect } from './smtp.ts'
@@ -23,7 +22,6 @@ const deps = createDeps({
   db: new LibsqlDb(
     createClient({ url: env('TURSO_DATABASE_URL') ?? 'file:statusping.db', authToken: env('TURSO_AUTH_TOKEN') }),
   ),
-  config: await loadNodeConfig(env),
   getEnv: env,
   certificateExpiry: lookupNodeCertificateExpiry,
   tcpConnect: nodeTcpConnect,

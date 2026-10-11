@@ -1,5 +1,3 @@
-import fileConfig from '../../statusping.config.ts'
-import { selectConfig } from '../../src/config.ts'
 import { type D1DatabaseLike, D1Db } from '../../src/db/d1.ts'
 import { type Deps, createDeps } from '../../src/deps.ts'
 import { tick } from '../../src/tick.ts'
@@ -36,12 +34,7 @@ function init(env: Env) {
   if (!instance) {
     const deps = createDeps({
       db: new D1Db(env.DB),
-      // A release template can provide a config module whose default export is undefined;
-      // then this selects the per-instance JSON binding. A real config file wins everywhere.
-      config: selectConfig(fileConfig, (name) => {
-        const v = env[name]
-        return typeof v === 'string' ? v : undefined
-      }),
+      // No configuration ships with the Worker: it lives in D1 and is set up at /setup.
       getEnv: (name) => {
         const v = env[name]
         return typeof v === 'string' ? v : undefined

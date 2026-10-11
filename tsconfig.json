@@ -14,5 +14,5 @@
     "skipLibCheck": true,
     "types": ["node"]
   },
-  "include": ["src", "cli", "test", "adapters", "scripts", "statusping.config.ts", "vitest.config.ts"]
+  "include": ["src", "cli", "test", "adapters", "scripts", "vitest.config.ts"]
 }

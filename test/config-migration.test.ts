@@ -1,45 +1,44 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { LEGACY_CONFIG_KEY } from '../src/deps.ts'
+import { createDeps, LEGACY_CONFIG_KEY } from '../src/deps.ts'
 import { createApp } from '../src/web/app.ts'
-import { createTestDb, makeDeps, testConfig } from './helpers.ts'
+import { createTestDb, testConfig } from './helpers.ts'
 
-describe('moving config-as-code sites to the database (plan 011)', () => {
+describe('first run of v0.3.0 on a former config-as-code site (plan 011)', () => {
   let close: (() => Promise<void>) | undefined
   afterEach(async () => close?.())
 
-  const health = async (app: ReturnType<typeof createApp>) => (await app.request('/healthz')).json() as Promise<Record<string, unknown>>
-  const saved = async (db: Awaited<ReturnType<typeof createTestDb>>['db']) => (await db.first<{ value: string }>(`SELECT value FROM instance_secrets WHERE name = ?`, [LEGACY_CONFIG_KEY]))?.value
-
-  it('v0.2.26: a config-as-code site keeps running from its file and saves a validated copy', async () => {
+  async function site(env: Record<string, string> = {}, saved?: unknown) {
     const t = await createTestDb('libsql'); close = t.close
+    const { migrate } = await import('../src/schema.ts')
+    await migrate(t.db)
+    if (saved) await t.db.run(`INSERT INTO instance_secrets (name, value, created_at) VALUES (?, ?, 0)`, [LEGACY_CONFIG_KEY, JSON.stringify(saved)])
     const logs: string[] = []
-    const deps = makeDeps(t.db, { config: testConfig({ sinks: {} }) })
-    deps.log = (_level, message, data) => { logs.push(`${message} ${JSON.stringify(data ?? {})}`) }
-    const app = createApp(deps)
-    const h = await health(app)
-    expect(h, logs.join('\n')).toMatchObject({ config: 'code', migration: 'ready' })
-    const copy = JSON.parse((await saved(t.db))!)
-    expect(copy).toMatchObject({ title: 'Test Status', admin: true })
-    expect(logs.some((l) => l.includes('deprecated'))).toBe(true)
-    // Still config-as-code: nothing moved into admin_config.
-    expect(await t.db.first(`SELECT id FROM admin_config`)).toBeNull()
+    const deps = createDeps({ db: t.db, getEnv: (name) => env[name], log: (_l, message) => { logs.push(message) } })
+    return { db: t.db, app: createApp(deps), logs }
+  }
+  const admins = { access: { provider: { type: 'basic' as const }, admins: { emails: ['owner@example.test'] } } }
+
+  it('adopts the copy v0.2.26 saved, ahead of STATUSPING_CONFIG, and removes the copy', async () => {
+    const s = await site({ STATUSPING_CONFIG: JSON.stringify(testConfig({ sinks: {}, title: 'From the variable', ...admins })) }, { ...testConfig({ sinks: {}, title: 'From the saved copy', ...admins }), admin: true })
+    const home = await s.app.request('/')
+    expect(home.status).toBe(200)
+    expect(await home.text()).toContain('From the saved copy')
+    expect(await s.db.first(`SELECT name FROM instance_secrets WHERE name = ?`, [LEGACY_CONFIG_KEY])).toBeNull()
+    expect(await s.db.first<{ status: string }>(`SELECT status FROM setup_state`)).toEqual({ status: 'complete' })
+    expect(await s.db.first<{ actor: string }>(`SELECT actor FROM config_revisions`)).toEqual({ actor: 'migration' })
   })
 
-  it('reports "blocked" and saves nothing when the file holds a literal credential', async () => {
-    const t = await createTestDb('libsql'); close = t.close
-    const config = testConfig({ sinks: { team: { type: 'slack', webhookUrl: 'https://hooks.slack.com/services/T0/B0/literal-secret' } } })
-    const deps = makeDeps(t.db, { config })
-    deps.log = () => {}
-    const app = createApp(deps)
-    expect(await health(app)).toMatchObject({ config: 'code', migration: 'blocked' })
-    expect(await saved(t.db)).toBeUndefined()
+  it('starts setup when the old configuration cannot be adopted, saying why in the log', async () => {
+    const s = await site({ STATUSPING_CONFIG: JSON.stringify(testConfig({ sinks: { team: { type: 'slack', webhookUrl: 'https://hooks.slack.com/services/T0/B0/literal' } }, ...admins })) })
+    expect((await s.app.request('/')).headers.get('location')).toBe('/setup')
+    expect(s.logs.some((l) => l.includes('could not be moved'))).toBe(true)
+    expect(JSON.parse((await s.db.first<{ draft_json: string }>(`SELECT draft_json FROM setup_state`))!.draft_json)).toEqual({})
   })
 
-  it('says nothing about migration on a site already configured in the database', async () => {
-    const t = await createTestDb('libsql'); close = t.close
-    const app = createApp(makeDeps(t.db, { config: { ...testConfig({ sinks: {}, access: { provider: { type: 'basic' as const }, admins: { emails: ['a@example.test'] } } }), admin: true } }))
-    const h = await health(app)
-    expect(h).not.toHaveProperty('config')
-    expect(h).not.toHaveProperty('migration')
+  it('never adopts STATUSPING_CONFIG on a hosted tenant', async () => {
+    const tenant = JSON.stringify({ tenantId: 'acme', plan: 'free', maxMonitors: 10, minIntervalMin: 5, maxPages: 2, historyDays: 30 })
+    const s = await site({ STATUSPING_TENANT: tenant, STATUSPING_SETUP_TOKEN: 'tenant-setup-token', STATUSPING_CONFIG: JSON.stringify(testConfig({ sinks: {}, ...admins })) })
+    expect((await s.app.request('/')).headers.get('location')).toBe('/setup')
+    expect(await s.db.first(`SELECT id FROM admin_config`)).toBeNull()
   })
 })

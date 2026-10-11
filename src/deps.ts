@@ -5,6 +5,7 @@ import {
   type Role,
   type StatusPingConfig,
   normalizeConfig,
+  parseJsonConfig,
   parsePingTokens,
   resolveConfigEnv,
 } from './config.ts'
@@ -65,19 +66,23 @@ export interface Deps {
   /** What the last refreshAdminConfig() saw; an unchanged stamp skips reloading and re-validating. */
   configStamp?: string
   configLoaded: boolean
-  /**
-   * Set while the site still runs from config-as-code (statusping.config.ts or STATUSPING_CONFIG):
-   * whether a validated copy is saved for the automatic move to the database in v0.3.0.
-   */
-  legacyMigration?: 'ready' | 'blocked'
+  /** A deployed site: configured only through its database. */
+  fromDatabase: boolean
 }
 
-/** The saved copy of a config-as-code site's configuration, adopted by the release that drops config-as-code. */
+/** What a site serves before setup or a migration has stored its configuration. */
+const UNCONFIGURED: StatusPingConfig = { title: 'StatusPing', baseUrl: 'http://localhost', groups: [] }
+
+/** The copy of a config-as-code site's configuration that v0.2.26 saved; adopted once on first run. */
 export const LEGACY_CONFIG_KEY = 'legacy_config'
 
 export interface CreateDepsOptions {
   db: Db
-  config: StatusPingConfig
+  /**
+   * Tests only. A deployed site passes nothing and runs from its database: the setup wizard,
+   * Settings, and the YAML API are the only ways to configure it (plan 011).
+   */
+  config?: StatusPingConfig
   getEnv: EnvGetter
   fetch?: typeof fetch
   log?: Logger
@@ -104,7 +109,8 @@ export function createDeps(opts: CreateDepsOptions): Deps {
   }
   // Read from the real environment only: a tenant can never store or override its own policy.
   const tenant = parseTenantPolicy(opts.getEnv(TENANT_ENV))
-  const normalized = normalizeConfig(resolveConfigEnv(opts.config, opts.getEnv))
+  const input = opts.config ?? UNCONFIGURED
+  const normalized = normalizeConfig(resolveConfigEnv(input, opts.getEnv))
   const config = tenant ? clampToTenantPolicy(normalized, tenant) : normalized
   if (config.monitors.some((monitor) => monitor.escalation) && !opts.getEnv('ACK_SECRET')) {
     throw new Error('ACK_SECRET must be set when escalation is configured')
@@ -115,8 +121,9 @@ export function createDeps(opts: CreateDepsOptions): Deps {
   const deps: Deps = {
     db: opts.db,
     config,
-    configInput: opts.config,
-    adminEnabled: opts.config.admin === true,
+    configInput: input,
+    adminEnabled: opts.config === undefined || opts.config.admin === true,
+    fromDatabase: opts.config === undefined,
     setupPending: false,
     role: roleEnv,
     // A Worker secret or env var always wins over a value stored by setup.
@@ -174,10 +181,9 @@ async function configStamp(deps: Deps): Promise<{ stamp: string; revision: numbe
 }
 
 /**
- * Applies the instance's setup state, then loads the one DB-backed configuration when admin mode
- * is on: either `admin: true` in config-as-code, or a finished setup wizard. While setup is
- * pending, nothing is loaded. With neither, statusping.config.ts / STATUSPING_CONFIG stays
- * authoritative. Call after migrations, before work that reads `deps.config`. Nothing is reloaded
+ * Applies the instance's setup state, then loads the configuration from the database. While setup
+ * is pending, nothing is loaded; a fresh database first adopts an old configuration or starts setup
+ * (see firstRun). Tests that inject a config without `admin: true` keep it as is. Call after migrations, before work that reads `deps.config`. Nothing is reloaded
  * or re-validated while the revision, setup state and stored settings are unchanged.
  */
 export async function refreshAdminConfig(deps: Deps, now: number): Promise<boolean> {
@@ -192,46 +198,63 @@ export async function refreshAdminConfig(deps: Deps, now: number): Promise<boole
   return loaded.loaded
 }
 
-let warnedLegacy = false
-
 /**
- * Config-as-code is going away (plan 011). Keep a validated copy of it in the database so the next
- * major release can adopt it without the owner re-entering anything. Returns whether it wrote.
+ * v0.3.0 dropped config-as-code. A site that ran v0.2.26 saved a validated copy of it; a site
+ * configured by STATUSPING_CONFIG still has the variable. Either is adopted once, keeping monitor
+ * IDs, history and ping URLs. With a sign-in method and administrators the site carries on as
+ * before; without, setup opens with the configuration already imported. Otherwise setup starts
+ * from scratch. Hosted tenants always start in setup (plan 005).
  */
-async function saveLegacyCopy(deps: Deps, now: number): Promise<boolean> {
-  let json: string
-  try {
-    json = JSON.stringify(validateAdminConfig({ ...deps.configInput, admin: true }, deps.getEnv, 'load').config)
-    deps.legacyMigration = 'ready'
-  } catch (error) {
-    deps.legacyMigration = 'blocked'
-    if (!warnedLegacy) deps.log('warn', 'statusping.config.ts / STATUSPING_CONFIG cannot move to the database automatically. Fix this before upgrading to v0.3.0', { problem: (error as Error).message })
-    warnedLegacy = true
-    return false
+async function firstRun(deps: Deps, now: number): Promise<void> {
+  let legacy: StatusPingConfig | undefined
+  if (!deps.tenant) {
+    const saved = (await deps.db.first<{ value: string }>(`SELECT value FROM instance_secrets WHERE name = ?`, [LEGACY_CONFIG_KEY]))?.value
+    try {
+      const raw = saved ? JSON.parse(saved) : deps.hasRealEnv('STATUSPING_CONFIG') ? parseJsonConfig(deps.getEnv('STATUSPING_CONFIG')!) : undefined
+      if (raw) legacy = validateAdminConfig({ ...raw, admin: true }, deps.getEnv, 'load').config
+    } catch (error) {
+      deps.log('warn', 'The old configuration could not be moved to the database; starting setup instead. Import it in the setup wizard after fixing it.', { problem: (error as Error).message })
+    }
   }
-  if (!warnedLegacy) deps.log('warn', 'Config-as-code (statusping.config.ts / STATUSPING_CONFIG) is deprecated. v0.3.0 moves this configuration into the database automatically: https://github.com/getstatusping/statusping/blob/main/MIGRATING-TO-YAML.md')
-  warnedLegacy = true
-  const saved = await deps.db.first<{ value: string }>(`SELECT value FROM instance_secrets WHERE name = ?`, [LEGACY_CONFIG_KEY])
-  if (saved?.value === json) return false
-  await deps.db.run(`INSERT INTO instance_secrets (name, value, created_at) VALUES (?, ?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value, created_at = excluded.created_at`, [LEGACY_CONFIG_KEY, json, now])
-  return true
+  if (!legacy) {
+    await beginSetup(deps.db, deps.tenant ? 'platform' : 'first-run', now)
+    return
+  }
+  const admins = legacy.access?.admins
+  if (legacy.access?.provider && (admins?.emails?.length || admins?.teams?.length)) {
+    await seedAdminConfig(deps.db, legacy, 'migration', now)
+    await deps.db.batch([
+      { sql: `INSERT INTO setup_state (id, status, code, session_key, draft_json, failed_attempts, previous_config_json, updated_at) VALUES (1, 'complete', NULL, NULL, '{}', 0, NULL, ?) ON CONFLICT(id) DO NOTHING`, params: [now] },
+      { sql: `INSERT INTO audit_log (actor, action, target, before_json, after_json, at) VALUES ('migration', 'config.migrate', 'config', NULL, NULL, ?)`, params: [now] },
+      { sql: `DELETE FROM instance_secrets WHERE name = ?`, params: [LEGACY_CONFIG_KEY] },
+    ])
+    deps.log('info', 'Moved the configuration from statusping.config.ts / STATUSPING_CONFIG into the database. Edit it in Settings from now on.')
+    return
+  }
+  await beginSetup(deps.db, 'migration', now)
+  const draft = { imported: legacy, title: legacy.title, description: legacy.description, baseUrl: legacy.baseUrl, timezone: legacy.timezone }
+  await deps.db.batch([
+    { sql: `UPDATE setup_state SET draft_json = ? WHERE id = 1`, params: [JSON.stringify(draft)] },
+    { sql: `DELETE FROM instance_secrets WHERE name = ?`, params: [LEGACY_CONFIG_KEY] },
+  ])
+  deps.log('info', 'The old configuration has no administrators. Open /setup to choose how to sign in; your monitors are already imported.')
 }
 
 async function loadAdminState(deps: Deps, now: number): Promise<{ loaded: boolean; wrote: boolean }> {
   await loadStoredEnv(deps)
   let setup = await loadSetupState(deps.db)
   let wrote = false
-  if (!setup && deps.tenant && deps.hasRealEnv('STATUSPING_SETUP_TOKEN')) {
-    // A freshly provisioned hosted tenant starts in the setup wizard; the owner claims it with
-    // the STATUSPING_SETUP_TOKEN the platform issued at sign-up (plan 005).
-    await beginSetup(deps.db, 'platform', now)
+  if (!setup && deps.fromDatabase && !(await loadAdminConfig(deps.db))) {
+    // First run of this database: adopt a config-as-code site's configuration, or start setup.
+    // (A site configured with `admin: true` before setup existed has a config row and no setup row.)
+    await firstRun(deps, now)
     setup = await loadSetupState(deps.db)
     wrote = true
   }
   deps.setupPending = setup?.status === 'pending'
   if (deps.setupPending) return { loaded: false, wrote }
   if (setup?.status === 'complete') deps.adminEnabled = true
-  if (!deps.adminEnabled) return { loaded: false, wrote: (await saveLegacyCopy(deps, now)) || wrote }
+  if (!deps.adminEnabled) return { loaded: false, wrote }
   let stored = await loadAdminConfig(deps.db)
   if (!stored) {
     // Validate before persisting: literal credentials never enter admin_config or audit_log.

@@ -113,6 +113,10 @@ function main() {
       console.log('\nYour edits were merged with the release in (review these):')
       for (const path of plan.merged) console.log(`  - ${path}`)
     }
+    if (plan.retired.length) {
+      console.log('\nNo longer used by StatusPing (left in place; you can delete them):')
+      for (const path of plan.retired) console.log(`  - ${path}`)
+    }
     if (plan.conflicts.length) {
       console.log('\nFiles that need your attention:')
       for (const { path, reason } of plan.conflicts) console.log(`  - ${path} (${reason})`)

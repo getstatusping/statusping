@@ -12,6 +12,7 @@ import { runRetention } from '../src/retention.ts'
 import { tick } from '../src/tick.ts'
 import { DAY, nowSeconds } from '../src/util/time.ts'
 import { createApp } from '../src/web/app.ts'
+import { createDeps } from '../src/deps.ts'
 import { type CountingDb, TEST_TOKENS, createTestDb, fakeFetch, makeDeps, testConfig } from './helpers.ts'
 
 const SECRET = 'platform-secret-for-tests'
@@ -100,8 +101,9 @@ describe('hosted tenant instance', () => {
 
   it('a freshly provisioned tenant starts in the setup wizard, claimed with the platform token', async () => {
     ;({ db, close } = await createTestDb('libsql'))
-    const starter = { title: 'inkglance', baseUrl: 'https://inkglance.statusp.ing', groups: [] }
-    const deps = makeDeps(db, { config: starter, env: { ...tenantEnv(policy()), STATUSPING_SETUP_TOKEN: 'owner-setup-token-123' } })
+    // A tenant Worker ships no configuration: it starts empty and in setup (plan 011).
+    const env: Record<string, string> = { ...tenantEnv(policy()), STATUSPING_SETUP_TOKEN: 'owner-setup-token-123', PING_TOKENS: JSON.stringify(TEST_TOKENS) }
+    const deps = createDeps({ db, getEnv: (name) => env[name], log: () => {} })
     const app = createApp(deps)
     const res = await app.request('/')
     expect(res.status).toBe(302)

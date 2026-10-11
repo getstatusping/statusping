@@ -62,7 +62,9 @@ async function main() {
   }
   assertion(update.template.version === packageJson.version && update.template.marker === 'STATUSPING_TEMPLATE_VERSION', 'invalid template marker')
   assertion(update.notesUrl === `https://github.com/getstatusping/statusping/releases/tag/v${packageJson.version}`, 'invalid release notes URL')
-  assertion(update.breaking === false, 'breaking releases require an explicit updater policy')
+  // Breaking releases are declared in package.json and must name the transition release that prepares for them.
+  assertion(update.breaking === (packageJson.statusping.breaking === true), 'breaking flag does not match package.json')
+  assertion(!update.breaking || update.minimumVersion !== '0.1.0', 'a breaking release must raise minimumUpgradeVersion to its transition release')
   if (update.signature !== undefined) {
     assertion(update.signature.algorithm === 'Ed25519' && /^[A-Za-z0-9+/]+={0,2}$/.test(update.signature.value), 'invalid release signature metadata')
   }

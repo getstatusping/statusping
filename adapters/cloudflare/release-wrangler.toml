@@ -1,7 +1,7 @@
 # Build-only configuration for the portable release artifact. The target account
 # supplies its own D1 database ID and all variables/secrets during deployment.
 name = "statusping-release"
-main = "release-worker.ts"
+main = "worker.ts"
 compatibility_date = "2026-10-01"
 
 [triggers]

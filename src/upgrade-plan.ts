@@ -30,6 +30,8 @@ export type UpgradePlan = {
   merged: string[]
   /** Files left untouched because the customer changed them; resolve by hand. */
   conflicts: UpgradeConflict[]
+  /** Customer-owned files the target release no longer uses. Left in place; the customer may delete them. */
+  retired: string[]
   errors: string[]
 }
 
@@ -121,7 +123,7 @@ export function planUpgrade(input: {
   const targetMarker = json(input.target.get(MARKER_PATH))
   const currentVersion = String(record(baseMarker).release ?? '')
   const targetVersion = String(record(targetMarker).release ?? '')
-  const plan: UpgradePlan = { safe: false, currentVersion, targetVersion, writes: new Map(), deletes: [], merged: [], conflicts: [], errors: [] }
+  const plan: UpgradePlan = { safe: false, currentVersion, targetVersion, writes: new Map(), deletes: [], merged: [], conflicts: [], retired: [], errors: [] }
 
   // The customer's marker must still describe the release used as the base;
   // otherwise the base contents do not represent what they installed.
@@ -140,6 +142,8 @@ export function planUpgrade(input: {
   for (const path of [...new Set([...input.base.keys(), ...input.target.keys()])].sort()) {
     const [base, next] = [input.base.get(path), input.target.get(path)]
     if (same(base, next)) continue
+    // A customer file the release stopped using (statusping.config.ts in v0.3.0) is never deleted.
+    if (customerOwned(path) && base && !next) { plan.retired.push(path); continue }
     if (!customerOwned(path)) changedPaths.push(path)
     else if (path !== WRANGLER_PATH || withoutVersionLine(base) !== withoutVersionLine(next)) plan.conflicts.push({ path, reason: 'changed-upstream' })
   }

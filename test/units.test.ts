@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { ConfigError, configFromEnv, env, normalizeConfig, parseJsonConfig, selectConfig } from '../src/config.ts'
+import { ConfigError, env, normalizeConfig, parseJsonConfig } from '../src/config.ts'
 import type { PushMonitor } from '../src/config.ts'
 import { evaluatePush } from '../src/evaluate/push.ts'
 import { isDue } from '../src/evaluate/http.ts'
@@ -235,27 +235,17 @@ describe('maintenance-window configuration', () => {
   })
 })
 
-describe('JSON configuration', () => {
-  it('parses env JSON and validates it through the same normalizer', () => {
+describe('JSON configuration (the STATUSPING_CONFIG migration source)', () => {
+  it('parses JSON and validates it through the same normalizer', () => {
     const source = testConfig()
-    const parsed = configFromEnv((name) => (name === 'STATUSPING_CONFIG' ? JSON.stringify(source) : undefined))
-    expect(normalizeConfig(parsed)).toMatchObject({ title: source.title, baseUrl: source.baseUrl })
-
+    expect(normalizeConfig(parseJsonConfig(JSON.stringify(source)))).toMatchObject({ title: source.title, baseUrl: source.baseUrl })
     const invalid = parseJsonConfig(JSON.stringify({ title: 'missing the required fields' }))
     expect(() => normalizeConfig(invalid)).toThrow(ConfigError)
   })
 
-  it('reports missing, malformed, and non-object JSON sources clearly', () => {
-    expect(() => configFromEnv(() => undefined)).toThrow('STATUSPING_CONFIG is not set')
+  it('reports malformed and non-object JSON clearly', () => {
     expect(() => parseJsonConfig('{not json}')).toThrow('STATUSPING_CONFIG is not valid JSON')
     expect(() => parseJsonConfig('[]')).toThrow('STATUSPING_CONFIG must be a JSON object')
-  })
-
-  it('gives a present config file precedence over STATUSPING_CONFIG', () => {
-    const file = testConfig({ title: 'File configuration' })
-    const selected = selectConfig(file, () => JSON.stringify(testConfig({ title: 'Environment configuration' })))
-    expect(selected.title).toBe('File configuration')
-    expect(selectConfig(undefined, () => JSON.stringify(file))).toEqual(file)
   })
 })
 

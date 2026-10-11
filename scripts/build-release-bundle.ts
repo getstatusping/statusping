@@ -84,7 +84,7 @@ async function main() {
   if (result.status !== 0) {
     throw new Error(`Wrangler bundle build failed:\n${result.stdout}\n${result.stderr}`)
   }
-  const builtWorker = join(workerOut, 'release-worker.js')
+  const builtWorker = join(workerOut, 'worker.js')
   if (!existsSync(builtWorker)) throw new Error(`Expected Wrangler output was not found: ${builtWorker}`)
   await cp(builtWorker, join(stagingDir, bundleName))
   // The sourcemap and Wrangler's helper README are useful while building, but are
@@ -95,7 +95,8 @@ async function main() {
   const metadata = {
     version,
     entrypoint: bundleName,
-    configuration: 'STATUSPING_CONFIG',
+    // Configured at /setup and stored in D1; nothing ships with the bundle.
+    configuration: 'database',
     compatibilityDate: '2026-10-01',
     cron: '* * * * *',
     bindings: [
@@ -103,8 +104,8 @@ async function main() {
       { name: 'REGIONAL_PROBE', type: 'durable_object_namespace', required: false },
       { name: 'SEND_EMAIL', type: 'send_email', required: false },
     ],
-    requiredVariables: ['STATUSPING_CONFIG'],
-    optionalVariables: ['STATUSPING_ROLE', 'STATUSPING_EMAIL_FROM'],
+    requiredVariables: [],
+    optionalVariables: ['STATUSPING_ROLE', 'STATUSPING_EMAIL_FROM', 'STATUSPING_SETUP_TOKEN', 'STATUSPING_RECOVERY_TOKEN'],
     secrets: [
       'PING_TOKENS', 'BASIC_AUTH_USERS', 'SESSION_SECRET', 'ADMIN_TOKEN', 'ACK_SECRET',
       'SUBSCRIBER_TOKEN_SECRET', 'PUSHOVER_APP_TOKEN', 'PUSHOVER_USER_KEY',
@@ -138,7 +139,8 @@ async function main() {
       marker: 'STATUSPING_TEMPLATE_VERSION',
     },
     notesUrl: `https://github.com/getstatusping/statusping/releases/tag/v${version}`,
-    breaking: false,
+    // A breaking release must also raise minimumUpgradeVersion to the release that prepares for it.
+    breaking: packageJson.statusping.breaking === true,
   }
   // Signing is deliberately release-job-only. The public key is configured by an
   // operator on instances that opt into update checks; no private key enters this

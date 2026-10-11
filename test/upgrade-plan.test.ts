@@ -56,6 +56,14 @@ describe('three-way upgrade plan', () => {
     expect(result.writes.has('statusping.config.ts')).toBe(false)
   })
 
+  it('leaves a customer config file the release stopped using in place, and lists it', () => {
+    const current = release('0.1.0', { 'statusping.config.ts': 'export default { title: "Ours" }\n' })
+    const result = plan(current, release('0.2.0', { 'statusping.config.ts': null }))
+    expect(result).toMatchObject({ safe: true, retired: ['statusping.config.ts'], conflicts: [] })
+    expect(result.deletes).not.toContain('statusping.config.ts')
+    expect(result.writes.has('statusping.config.ts')).toBe(false)
+  })
+
   it('never overwrites customer edits to updater-owned files', () => {
     const result = plan(release('0.1.0', {
       'src/app.ts': "export const version = 'patched locally'\n",
