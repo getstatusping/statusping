@@ -13,7 +13,8 @@
   },
   "exports": {
     "./config": "./src/config.ts",
-    "./updates": "./src/updates.ts"
+    "./updates": "./src/updates.ts",
+    "./upgrade-plan": "./src/upgrade-plan.ts"
   },
   "scripts": {
     "test": "vitest run",

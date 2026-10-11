@@ -19,6 +19,9 @@ export type UpdateState = StoredUpdateCheck | { result: 'disabled'; targetVersio
 /** Where a credential comes from: a Worker secret, the database, or nowhere. */
 export type SecretSource = 'env' | 'db' | false
 
+/** statusp.ing's update flow. The site address rides in the fragment, which browsers never send to a server. */
+export const updateUrl = (target: string, baseUrl: string) => `https://statusp.ing/updates/apply?target=${encodeURIComponent(target)}#instance=${encodeURIComponent(baseUrl)}`
+
 const SECTIONS: Array<[Section, string, string]> = [
   ['general', 'General', '/admin'],
   ['monitors', 'Monitors', '/admin/monitors'],
@@ -114,7 +117,9 @@ ${notice(opts.notice)}${notice(opts.error, 'error')}${opts.body}</div></div></ma
 export function generalPage(opts: { viewer: Viewer; csrf: string; title: string; baseUrl: string; timezone: string; updatesEnabled: boolean; installedVersion: string; update: UpdateState; notice?: string; error?: string }): string {
   const u = opts.update
   const updateLine = u.result === 'disabled' ? 'Update checks are off.'
-    : u.result === 'available' && u.targetVersion ? `Version <strong>v${escape(u.targetVersion)}</strong> is available. <a href="${escape(releaseNotesUrl(u.targetVersion))}">Release notes</a>`
+    : u.result === 'available' && u.targetVersion ? `Version <strong>v${escape(u.targetVersion)}</strong> is available. <a href="${escape(releaseNotesUrl(u.targetVersion))}">Release notes</a>
+<div class="actions" style="margin-top:12px"><a class="btn-primary" href="${escape(updateUrl(u.targetVersion, opts.baseUrl))}">Update to v${escape(u.targetVersion)}</a></div>
+<p class="hint" style="margin:8px 0 0">Opens statusp.ing, where you sign in with GitHub and choose to update directly or through a pull request. Your site's address stays in your browser.</p>`
       : u.result === 'incompatible' && u.targetVersion ? `Version v${escape(u.targetVersion)} is available but needs a manual upgrade path for this installation.`
         : u.result === 'failed' ? 'The signed update manifest could not be checked. No update is being offered.'
           : 'This installation is up to date.'
