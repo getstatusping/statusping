@@ -87,6 +87,15 @@ textarea.code { min-height: 24rem; font: 13px/1.5 ui-monospace, SFMono-Regular, 
 .changes { margin: 0 0 16px; padding-left: 20px; } .changes li { margin: 4px 0; }
 .audit { margin: 0; padding: 0; list-style: none; font-size: 14px; } .audit li { display: grid; grid-template-columns: 170px 1fr; gap: 12px; padding: 8px 0; border-bottom: 1px solid var(--border); }
 .audit li:last-child { border-bottom: 0; } .audit time { color: var(--muted-foreground); font-size: 13px; }
+.form-error { white-space: pre-line; }
+.copy-btn { height: 28px; margin: -8px 0 16px; padding: 0 10px; font-size: 13px; }
+.banner { margin: 0 0 16px; }
+.diff { margin: 0; padding: 8px 0; border: 1px solid var(--border); border-radius: calc(var(--radius) - 2px); overflow-x: auto; font: 12.5px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--card); }
+.diff span { display: block; padding: 0 12px; white-space: pre; }
+.diff .add { background: color-mix(in oklab, var(--success) 14%, transparent); } .diff .del { background: color-mix(in oklab, var(--destructive) 14%, transparent); }
+.diff .gap { color: var(--muted-foreground); }
+.envlist { margin: 0; padding: 0; list-style: none; font-size: 14px; } .envlist li { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; padding: 8px 0; border-bottom: 1px solid var(--border); }
+.envlist li:last-child { border-bottom: 0; } .envlist .ok { color: var(--success); } .envlist .missing { color: var(--destructive); }
 `
 
 const REVEAL_SCRIPT = `document.querySelectorAll('.form input[type=password]').forEach(function(input){
@@ -94,6 +103,10 @@ var wrap=document.createElement('div');wrap.className='reveal';input.parentNode.
 var b=document.createElement('button');b.type='button';b.className='btn-outline reveal-toggle';b.textContent='Show';b.setAttribute('aria-pressed','false');
 b.addEventListener('click',function(){var s=input.type==='password';input.type=s?'text':'password';b.textContent=s?'Hide':'Show';b.setAttribute('aria-pressed',String(s));input.focus()});
 input.form&&input.form.addEventListener('submit',function(){input.type='password'});wrap.appendChild(b)})`
+
+/** Adds a Copy button next to each [data-copy] block; without JavaScript the text stays selectable. */
+export const COPY_SCRIPT = `document.querySelectorAll('[data-copy]').forEach(function(el){if(!navigator.clipboard)return;var b=document.createElement('button');b.type='button';b.className='btn-outline copy-btn';b.textContent='Copy';
+b.setAttribute('aria-label','Copy '+(el.getAttribute('data-copy')||'text'));b.addEventListener('click',function(){navigator.clipboard.writeText(el.textContent.trim()).then(function(){b.textContent='Copied';setTimeout(function(){b.textContent='Copy'},1500)})});el.insertAdjacentElement('afterend',b)})`
 
 export const hidden = (csrf: string) => `<input type="hidden" name="csrf" value="${escape(csrf)}">`
 export const field = (label: string, input: string, hint = '') => {
@@ -114,8 +127,8 @@ export function layout(opts: { viewer: Viewer; section: Section; title: string; 
 <main class="wrap" style="max-width:1080px"><div class="settings">
 <nav class="settings-nav" aria-label="Settings"><ul>${nav}</ul><div class="nav-foot"><a href="/">← View status page</a></div></nav>
 <div><div class="settings-head"><div><h1>${escape(opts.title)}</h1>${opts.description ? `<p>${opts.description}</p>` : ''}</div>${opts.actions ?? ''}</div>
-${notice(opts.notice)}${notice(opts.error, 'error')}${opts.body}</div></div></main>
-<script>${REVEAL_SCRIPT}</script></body></html>`
+<!--banner-->${notice(opts.notice)}${notice(opts.error, 'error')}${opts.body}</div></div></main>
+<script>${REVEAL_SCRIPT};${COPY_SCRIPT}</script></body></html>`
 }
 
 // ── General ─────────────────────────────────────────────────────────────────────────────────
@@ -163,10 +176,10 @@ function monitorTarget(m: MonitorInput): string {
   return m.schedule ? `Cron ${m.schedule}${m.tz ? ` (${m.tz})` : ''}` : `Expected every ${m.period ?? '?'}`
 }
 
-export function monitorsPage(opts: { viewer: Viewer; rows: MonitorRow[]; notice?: string; error?: string }): string {
+export function monitorsPage(opts: { viewer: Viewer; rows: MonitorRow[]; withoutPingUrl?: ReadonlySet<string>; notice?: string; error?: string }): string {
   const add = `<div class="add-menu"><a class="btn-primary" href="/admin/monitors/new?kind=http">Add website</a><a class="btn-outline" href="/admin/monitors/new?kind=push">Add scheduled job</a><a class="btn-outline" href="/admin/monitors/new?kind=tcp">Add TCP port</a></div>`
   const rows = opts.rows.map(({ monitor, group }) => `<tr><td><a href="/admin/monitors/${encodeURIComponent(monitor.id)}"><strong>${escape(monitor.name)}</strong></a><span class="sub">${escape(monitorTarget(monitor))}</span></td>
-<td><span class="badge">${KIND_LABEL[monitor.kind]}</span></td><td>${escape(group)}</td><td class="end"><a class="btn-outline" href="/admin/monitors/${encodeURIComponent(monitor.id)}">Edit</a></td></tr>`).join('')
+<td><span class="badge">${KIND_LABEL[monitor.kind]}</span>${opts.withoutPingUrl?.has(monitor.id) ? ' <span class="badge" title="Open the monitor to create its ping URL">No ping URL yet</span>' : ''}</td><td>${escape(group)}</td><td class="end"><a class="btn-outline" href="/admin/monitors/${encodeURIComponent(monitor.id)}">Edit</a></td></tr>`).join('')
   return layout({ ...opts, section: 'monitors', title: 'Monitors', description: 'What StatusPing checks, and how often.', body: `
 <section class="card">${add}</section>
 <section class="card">${opts.rows.length ? `<div class="scroll" tabindex="0" role="region" aria-label="Monitors"><table class="table"><thead><tr><th>Monitor</th><th>Type</th><th>Group</th><th><span class="sr-only">Actions</span></th></tr></thead><tbody>${rows}</tbody></table></div>` : '<p class="empty">No monitors yet. Add one above.</p>'}</section>` })
@@ -212,12 +225,12 @@ ${field('Group', `${textInput('group', opts.values?.group ?? opts.group, 'list="
 ${pingSection}${danger}` })
 }
 
-export function pingUrlPage(opts: { viewer: Viewer; monitorName: string; monitorId: string; pingUrl: string }): string {
-  return layout({ ...opts, section: 'monitors', title: 'New ping URL', description: escape(opts.monitorName), body: `<section class="card">
-<p class="alert warning">This URL is shown only once. Copy it now; the previous URL no longer works.</p><p class="secret">${escape(opts.pingUrl)}</p>
+export function pingUrlPage(opts: { viewer: Viewer; monitorName: string; monitorId: string; pingUrl: string; created?: boolean }): string {
+  return layout({ ...opts, section: 'monitors', title: opts.created ? 'Monitor added' : 'New ping URL', description: escape(opts.monitorName), body: `<section class="card">
+<p class="alert warning">${opts.created ? 'This is the job\'s ping URL. It is shown only once: copy it now.' : 'This URL is shown only once. Copy it now; the previous URL no longer works.'}</p><p class="secret" data-copy="ping URL">${escape(opts.pingUrl)}</p>
 <p>Call it when the job finishes, for example:</p><pre>curl -fsS ${escape(opts.pingUrl)}</pre>
 <p class="hint" style="margin:8px 0 16px">Report a failure with <code>/fail</code> on the end; mark the start with <code>/start</code> to track run time.</p>
-<div class="actions"><a class="btn-primary" href="/admin/monitors/${encodeURIComponent(opts.monitorId)}">Done</a></div></section>` })
+<div class="actions"><a class="btn-primary" href="${opts.created ? '/admin/monitors' : `/admin/monitors/${encodeURIComponent(opts.monitorId)}`}">Done</a></div></section>` })
 }
 
 // ── Status pages ────────────────────────────────────────────────────────────────────────────
@@ -292,12 +305,13 @@ ${secret('password', 'Password')}</div>
 <script>(function(){var s=document.getElementById('via');function u(){document.querySelectorAll('[data-via]').forEach(function(e){e.hidden=e.getAttribute('data-via').split(' ').indexOf(s.value)<0})}s.addEventListener('change',u);u()})()</script>`
 }
 
-export function channelForm(opts: { viewer: Viewer; csrf: string; type: SinkType; name?: string; sink?: SinkInput; sources: Record<string, { source: SecretSource; envName?: string }>; values?: Record<string, string>; error?: string }): string {
+/** The fields of a channel form for one type; shared by Settings and the setup wizard. */
+export function channelFields(opts: { type: SinkType; sink?: SinkInput; sources: Record<string, { source: SecretSource; envName?: string }>; values?: Record<string, string> }): string {
   const spec = SINK_FIELDS[opts.type]
   const editing = Boolean(opts.sink)
   const s = (opts.sink ?? {}) as Record<string, unknown>
   const via = s.via && typeof s.via === 'object' ? s.via as Record<string, unknown> : null
-  const fields = opts.type === 'email' ? emailFields(opts, s, editing) : spec.fields.map((f) => {
+  return opts.type === 'email' ? emailFields(opts, s, editing) : spec.fields.map((f) => {
     if (f.key === 'to') return field('Recipients', `<textarea class="input" id="to" name="to" placeholder="${escape(f.placeholder ?? '')}">${escape(opts.values?.to ?? (Array.isArray(s.to) ? (s.to as string[]).join('\n') : ''))}</textarea>`, 'One per line.')
     if (f.key === 'via') return field('Send with', selectInput('via', [['cloudflare', 'Cloudflare Email Routing'], ['resend', 'Resend']], opts.values?.via ?? (via ? 'resend' : 'cloudflare')))
     if (f.key === 'from') return field(f.label, textInput('from', opts.values?.from ?? (via?.from as string | undefined), `placeholder="${escape(f.placeholder ?? '')}"`))
@@ -310,6 +324,12 @@ export function channelForm(opts: { viewer: Viewer; csrf: string; type: SinkType
     }
     return field(`${f.label}${f.optional ? ' (optional)' : ''}`, textInput(f.key, opts.values?.[f.key] ?? (s[f.key] as string | undefined), `placeholder="${escape(f.placeholder ?? '')}"`), f.hint ?? '')
   }).join('\n')
+}
+
+export function channelForm(opts: { viewer: Viewer; csrf: string; type: SinkType; name?: string; sink?: SinkInput; sources: Record<string, { source: SecretSource; envName?: string }>; values?: Record<string, string>; error?: string }): string {
+  const spec = SINK_FIELDS[opts.type]
+  const editing = Boolean(opts.sink)
+  const fields = channelFields(opts)
   return layout({ ...opts, section: 'channels', title: editing ? opts.name! : `Add ${spec.label} channel`, description: spec.help, body: `
 <section class="card"><form class="form" method="post" action="${editing ? `/admin/channels/${encodeURIComponent(opts.name!)}` : '/admin/channels/new'}">${hidden(opts.csrf)}<input type="hidden" name="type" value="${opts.type}">
 ${editing ? '' : field('Name', textInput('name', opts.values?.name ?? opts.type, 'required pattern="[A-Za-z0-9_-]{1,40}" spellcheck="false"'), 'Letters, numbers, - and _. Monitors refer to the channel by this name.')}
@@ -366,18 +386,59 @@ ${field('Token', `<input class="input code" readonly value="${escape(opts.token)
 
 // ── Import / export / activity ──────────────────────────────────────────────────────────────
 
-export function configurationPage(opts: { viewer: Viewer; csrf: string; yaml: string; importYaml?: string; error?: string; notice?: string }): string {
+export interface EnvStatus { name: string; paths: string[]; source: SecretSource }
+
+const when16 = (seconds: number) => `${new Date(seconds * 1000).toISOString().replace('T', ' ').slice(0, 16)} UTC`
+const ACTIONS: Record<string, string> = {
+  'config.save': 'Saved in Settings', 'config.import': 'Imported YAML', 'config.restore': 'Restored an earlier version', 'config.api': 'Saved through the API',
+  'config.seed': 'First configuration', 'config.baseline': 'Configuration before history was kept', 'setup.complete': 'Finished setup', 'config.mcp': 'Saved through MCP',
+}
+export const actionLabel = (action: string) => ACTIONS[action] ?? action
+
+function envPanel(env: EnvStatus[]): string {
+  if (!env.length) return ''
+  const state = (source: SecretSource) => (source === 'env' ? '<span class="ok">✓ Worker secret or environment variable</span>' : source === 'db' ? '<span class="ok">✓ Saved in this site</span>' : '<span class="missing">✗ Not set</span>')
+  return `<section class="card" id="secrets"><h2>Secrets</h2><p class="lead">Every <code>$env</code> name the configuration uses, and whether it is set. Values are never shown.</p>
+<ul class="envlist">${env.map((e) => `<li><code>${escape(e.name)}</code> ${state(e.source)}<span class="muted small">${e.paths.map(escape).join(', ')}</span></li>`).join('')}</ul>
+${env.some((e) => !e.source) ? '<p class="hint" style="margin:12px 0 0">Add a missing one as a Worker secret (Workers &amp; Pages → your Worker → Settings → Variables and Secrets), with <code>npx wrangler secret put NAME</code>, or in <code>.env</code> on Node.</p>' : ''}</section>`
+}
+
+export function configurationPage(opts: { viewer: Viewer; csrf: string; yaml: string; revision: number; history: Array<{ id: number; actor: string; action: string; at: number }>; env: EnvStatus[]; importYaml?: string; error?: string; notice?: string }): string {
+  const history = opts.history.map((r) => `<tr><td><a href="/admin/configuration/revisions/${r.id}"><strong>Version ${r.id}</strong></a><span class="sub">${escape(actionLabel(r.action))}</span></td><td>${escape(r.actor)}</td><td class="small">${when16(r.at)}</td>
+<td class="end">${r.id === opts.revision ? '<span class="badge">Current</span>' : `<a class="btn-outline" href="/admin/configuration/revisions/${r.id}">Compare</a>`}</td></tr>`).join('')
   return layout({ ...opts, section: 'configuration', title: 'Configuration', description: 'Back up the whole configuration as YAML, or replace it with one, for example from another StatusPing site.', body: `
 <section class="card"><h2>Export</h2><p class="lead">Secrets are not included: credentials saved in this site stay here, and the file only names them.</p>
-<div class="actions"><a class="btn-primary" href="/admin/export/statusping.yaml">Download YAML</a></div>
+<div class="actions"><a class="btn-primary" href="/admin/export/statusping.yaml">Download YAML</a><a class="btn-outline" href="/admin/schema.json">JSON Schema</a></div>
+<p class="hint" style="margin:12px 0 0">The file starts with a schema line, so editors such as VS Code with the YAML extension check it and suggest fields as you type.</p>
 <details style="margin-top:16px"><summary class="small">Show the configuration</summary><pre>${escape(opts.yaml)}</pre></details></section>
+${envPanel(opts.env)}
 <section class="card" id="import"><h2>Import</h2><p class="lead">Replaces the whole configuration. Nothing changes until you confirm the preview.</p>
 ${opts.error ? `<p class="form-error" role="alert">${escape(opts.error)}</p>` : ''}
-<form class="form" method="post" action="/admin/import">${hidden(opts.csrf)}
-${field('YAML file', '<input class="input" id="import-file" type="file" accept=".yaml,.yml,text/yaml,application/yaml">', 'Or paste it below.')}
-${field('Configuration', `<textarea class="input code" id="config" name="config" spellcheck="false" required>${escape(opts.importYaml ?? '')}</textarea>`, 'Secrets are never part of a configuration file: it names Worker secrets with <code>$env</code>.')}
+<form class="form" method="post" action="/admin/import" enctype="multipart/form-data">${hidden(opts.csrf)}
+${field('YAML file', '<input class="input" id="import-file" name="file" type="file" accept=".yaml,.yml,text/yaml,application/yaml">', 'Or paste it below.')}
+${field('Configuration', `<textarea class="input code" id="config" name="config" spellcheck="false">${escape(opts.importYaml ?? '')}</textarea>`, 'Secrets are never part of a configuration file: it names Worker secrets with <code>$env</code>.')}
 <div class="actions"><button class="btn-primary" type="submit">Preview changes</button></div></form></section>
+<section class="card" id="history"><h2>History</h2><p class="lead">The last 50 saved versions. Open one to see what changed and to restore it.</p>
+${history ? `<div class="scroll" tabindex="0" role="region" aria-label="Configuration history"><table class="table"><thead><tr><th>Version</th><th>By</th><th>When</th><th><span class="sr-only">Actions</span></th></tr></thead><tbody>${history}</tbody></table></div>` : '<p class="empty">No saved versions yet.</p>'}</section>
 <script>document.getElementById('import-file').addEventListener('change',function(){var f=this.files&&this.files[0];if(!f)return;if(f.size>262144){alert('Configuration files must be 256 KB or smaller.');this.value='';return}var r=new FileReader();r.onload=function(){document.getElementById('config').value=String(r.result||'')};r.readAsText(f)})</script>` })
+}
+
+/** A line diff as preformatted text, with long unchanged stretches folded. */
+export function diffBlock(lines: Array<{ op: ' ' | '+' | '-'; text: string } | null>): string {
+  if (!lines.some((line) => line && line.op !== ' ')) return '<p class="empty">No differences.</p>'
+  return `<pre class="diff" tabindex="0" aria-label="Changes">${lines.map((line) => line === null ? '<span class="gap">⋯</span>'
+    : `<span class="${line.op === '+' ? 'add' : line.op === '-' ? 'del' : 'same'}">${line.op === ' ' ? '  ' : `${line.op} `}${escape(line.text)}</span>`).join('')}</pre>`
+}
+
+export function revisionPage(opts: { viewer: Viewer; csrf: string; revision: { id: number; actor: string; action: string; at: number }; current: number; diff: string; notice?: string; error?: string }): string {
+  const r = opts.revision
+  const isCurrent = r.id === opts.current
+  return layout({ ...opts, section: 'configuration', title: `Version ${r.id}`, description: `${escape(actionLabel(r.action))} · ${escape(r.actor)} · ${when16(r.at)}`, body: `
+<section class="card"><h2>${isCurrent ? 'This is the current version' : `Changes from version ${r.id} to the current version (${opts.current})`}</h2>
+<p class="lead">${isCurrent ? 'Compare an earlier version from the history to see what changed since.' : 'Lines marked − are in this version; lines marked + are in the current one.'}</p>
+${isCurrent ? '' : opts.diff}</section>
+${isCurrent ? '' : `<section class="card"><h2>Restore this version</h2><p class="lead">Saves version ${r.id} as a new version. The current sign-in method stays as it is.</p>
+<form method="post" action="/admin/configuration/revisions/${r.id}/restore">${hidden(opts.csrf)}<div class="actions"><button class="btn-primary" type="submit">Restore version ${r.id}</button><a class="btn-outline" href="/admin/configuration#history">Back to history</a></div></form></section>`}` })
 }
 
 export function importPreview(opts: { viewer: Viewer; csrf: string; yaml: string; changes: string[] }): string {

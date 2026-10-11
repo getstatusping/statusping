@@ -34,9 +34,17 @@ describe('admin secure configuration', () => {
     expect(isAdminEnabled({ admin: false })).toBe(false)
     expect(isAdminEnabled({ admin: true })).toBe(true)
     const literal = testConfig({ sinks: { discord: { type: 'discord', webhookUrl: 'https://discord.test/secret' } } })
-    expect(validateAdminSecrets(literal)).toContain('sinks.discord.webhookUrl: must be an env(NAME) reference when edited through admin')
+    expect(validateAdminSecrets(literal)).toContain('sinks.discord.webhookUrl: must be a secret reference, { $env: NAME }')
     const headers = testConfig({ groups: [{ name: 'x', monitors: [{ id: 'x', kind: 'http', name: 'X', url: 'https://test.invalid', headers: { Authorization: 'Bearer leak' } }] }] })
-    expect(validateAdminSecrets(headers)).toContain('groups.0.monitors.0.headers.Authorization: credential-bearing headers are not editable in admin')
+    expect(validateAdminSecrets(headers)).toContain('groups.0.monitors.0.headers.Authorization: holds a credential. Store it as a secret and write { $env: NAME } instead')
+    // Credentials named as secrets are fine: webhook URL and headers, monitor URL and headers.
+    const refs = testConfig({
+      sinks: { hook: { type: 'webhook', url: { $env: 'HOOK_URL' }, headers: { Authorization: { $env: 'HOOK_AUTH' }, 'X-Team': 'ops' } } },
+      groups: [{ name: 'x', monitors: [{ id: 'x', kind: 'http', name: 'X', url: { $env: 'API_URL' }, headers: { Authorization: { $env: 'API_AUTH' } } }] }],
+    })
+    expect(validateAdminSecrets(refs)).toEqual([])
+    const leaky = testConfig({ sinks: { hook: { type: 'webhook', url: 'https://user:pw@hooks.test/x' } } })
+    expect(validateAdminSecrets(leaky)).toContain('sinks.hook.url: contains a credential. Store the URL as a secret and write { $env: NAME } instead')
     expect(() => validateAdminConfig(adminConfig(), () => undefined)).not.toThrow()
   })
 

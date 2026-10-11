@@ -130,7 +130,8 @@ export interface HttpMonitorInput extends MonitorBase {
   /** A URL, or env('NAME') — e.g. the other instance's /healthz in a primary/watchdog pair. */
   url: string | EnvRef
   method?: string
-  headers?: Record<string, string>
+  /** Header values may name a secret: `Authorization: { $env: API_AUTH }`. */
+  headers?: Record<string, Secret>
   body?: string
   /** Whole minutes; default `'1m'`. */
   interval?: Duration
@@ -200,8 +201,10 @@ export interface TelegramSinkInput {
 }
 export interface WebhookSinkInput {
   type: 'webhook'
-  url: string
-  headers?: Record<string, string>
+  /** A URL, or `{ $env: NAME }` when the URL itself carries a credential. */
+  url: Secret
+  /** Header values may name a secret: `Authorization: { $env: HOOK_AUTH }`. */
+  headers?: Record<string, Secret>
   /** HMAC-SHA256 signing secret. Sent as X-StatusPing-Signature when configured. */
   secret?: Secret
 }
@@ -447,6 +450,10 @@ export interface HttpMonitor extends NormalizedBase {
   url: string
   method: string
   headers: Record<string, string>
+  /** The URL came from the environment: never displayed or stored. */
+  secretUrl?: boolean
+  /** Header names whose values came from the environment. */
+  secretHeaders?: string[]
   body: string | null
   intervalMin: number
   timeoutMs: number
@@ -716,16 +723,18 @@ export function normalizeConfig(config: StatusPingConfig): NormalizedConfig {
     }
     if (sink.type === 'matrix' && (typeof sink.roomId !== 'string' || !/^![^:\s]+:\S+$/.test(sink.roomId))) problems.push(`sinks.${name}.roomId: must look like !abc123:example.org`)
     if (sink.type === 'webhook') {
-      try {
-        const url = new URL(sink.url)
-        if (!['http:', 'https:'].includes(url.protocol)) problems.push(`sinks.${name}.url: must be http(s)`)
-      } catch {
-        problems.push(`sinks.${name}.url: "${sink.url}" is not a valid URL`)
-      }
+      if (typeof sink.url === 'string') {
+        try {
+          const url = new URL(sink.url)
+          if (!['http:', 'https:'].includes(url.protocol)) problems.push(`sinks.${name}.url: must be http(s)`)
+        } catch {
+          problems.push(`sinks.${name}.url: "${sink.url}" is not a valid URL`)
+        }
+      } else if (!isEnvRef(sink.url)) problems.push(`sinks.${name}.url: must be a URL or { $env: NAME }`)
       if (sink.headers !== undefined && (!sink.headers || typeof sink.headers !== 'object' || Array.isArray(sink.headers))) {
         problems.push(`sinks.${name}.headers: must be an object`)
-      } else if (sink.headers !== undefined && Object.values(sink.headers).some((value) => typeof value !== 'string')) {
-        problems.push(`sinks.${name}.headers: all values must be strings`)
+      } else if (sink.headers !== undefined && Object.values(sink.headers).some((value) => typeof value !== 'string' && !isEnvRef(value))) {
+        problems.push(`sinks.${name}.headers: values must be strings or { $env: NAME }`)
       }
     }
     if (sink.type === 'email') {
@@ -946,7 +955,11 @@ export function normalizeConfig(config: StatusPingConfig): NormalizedConfig {
             kind: 'http',
             url: input.url,
             method: (input.method ?? 'GET').toUpperCase(),
-            headers: input.headers ?? {},
+            headers: Object.fromEntries(Object.entries(input.headers ?? {}).map(([key, value]) => {
+              if (typeof value !== 'string') fail(`headers.${key} references env ${value.$env}; resolve it with resolveConfigEnv() first`)
+              return [key, String(value)]
+            })),
+            ...((input as WithEnvFields)[FROM_ENV] ?? {}),
             body: input.body ?? null,
             intervalMin: Math.max(1, Math.round(interval / 60)),
             timeoutMs: timeout * 1000,
@@ -1277,21 +1290,44 @@ function normalizeAccess(input: AccessInput | undefined, problems: string[]): No
   return { provider: p, teams, sessionHours: input.sessionHours ?? 12, admins }
 }
 
+export function isEnvRef(value: unknown): value is EnvRef {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value) && typeof (value as EnvRef).$env === 'string')
+}
+
+/** Marks what resolveConfigEnv() filled in from the environment. A symbol: it never reaches JSON. */
+const FROM_ENV = Symbol('fromEnv')
+type WithEnvFields = { [FROM_ENV]?: { secretUrl?: boolean; secretHeaders?: string[] } }
+
 /**
- * Resolves env() references that affect monitor definitions (HTTP monitor URLs). With
- * `lenient`, unresolved references become a placeholder URL (used by the CLI's `check`).
+ * Resolves env() references that affect monitor definitions (HTTP monitor URLs and header
+ * values). With `lenient`, unresolved references become placeholders (used for validation).
  */
 export function resolveConfigEnv(config: StatusPingConfig, getEnv: EnvGetter, lenient = false): StatusPingConfig {
   return {
     ...config,
-    groups: config.groups.map((g) => ({
+    groups: (config.groups ?? []).map((g) => ({
       ...g,
       monitors: g.monitors.map((m) => {
-        if (m.kind !== 'http' || typeof m.url === 'string') return m
-        const value = getEnv(m.url.$env)
-        if (value) return { ...m, url: value }
-        if (lenient) return { ...m, url: `https://unset.invalid/${m.url.$env}` }
-        throw new Error(`monitor "${m.id}": missing environment variable ${m.url.$env} for its url`)
+        if (m.kind !== 'http') return m
+        const headerRefs = Object.entries(m.headers ?? {}).filter((entry): entry is [string, EnvRef] => isEnvRef(entry[1]))
+        if (typeof m.url === 'string' && !headerRefs.length) return m
+        const fromEnv = { ...(typeof m.url === 'string' ? {} : { secretUrl: true }), ...(headerRefs.length ? { secretHeaders: headerRefs.map(([key]) => key) } : {}) }
+        let url = m.url
+        if (typeof url !== 'string') {
+          const value = getEnv(url.$env)
+          if (value) url = value
+          else if (lenient) url = `https://unset.invalid/${url.$env}`
+          else throw new Error(`monitor "${m.id}": missing environment variable ${url.$env} for its url`)
+        }
+        const headers: Record<string, string> = {}
+        for (const [key, value] of Object.entries(m.headers ?? {})) {
+          if (typeof value === 'string') { headers[key] = value; continue }
+          const resolved = getEnv(value.$env)
+          if (resolved) headers[key] = resolved
+          else if (lenient || value.optional) { if (lenient) headers[key] = 'unset' }
+          else throw new Error(`monitor "${m.id}": missing environment variable ${value.$env} for its ${key} header`)
+        }
+        return { ...m, url, headers, [FROM_ENV]: fromEnv } as MonitorInput
       }),
     })),
   }

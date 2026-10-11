@@ -12,6 +12,7 @@ import type { Viewer } from '../auth/viewer.ts'
 import type { AuthProviderInput } from '../config.ts'
 import { type Deps, refreshAdminConfig, storedEnvKey } from '../deps.ts'
 import { ACCESS_DOCS_URL, OIDC_PRESETS, presetById, TEAM_DOMAIN } from '../setup/instructions.ts'
+import { readRecoverySession, RECOVERY_COOKIE } from '../setup/recovery.ts'
 import { randomToken, timingSafeEqual } from '../util/crypto.ts'
 import { nowSeconds } from '../util/time.ts'
 import type { Form } from './forms.ts'
@@ -105,7 +106,7 @@ const ERRORS: Record<string, string> = {
 
 // ── Pages ───────────────────────────────────────────────────────────────────────────────────
 
-function choosePage(opts: { viewer: Viewer; csrf: string; current: Method | undefined; error?: string }): string {
+function choosePage(opts: { viewer: Viewer; csrf: string; current: Method | undefined; notice?: string; error?: string }): string {
   const choice = (id: Method, help: string) => `<label class="check" style="align-items:flex-start"><input type="radio" name="method" value="${id}" required><span><strong>${METHODS[id]}</strong>${id === opts.current ? ' <span class="badge">Current</span>' : ''}<br><span class="muted small">${help}</span></span></label>`
   return layout({ ...opts, section: 'access', title: 'Change sign-in method', description: 'Set up the new method and test it. Nothing changes until a test sign-in works and you switch.', body: `
 <section class="card"><form class="form" method="post" action="/admin/access/method">${hidden(opts.csrf)}
@@ -152,7 +153,7 @@ ${verified ? '' : `<section class="card"><h2>3. Test sign-in</h2><p class="lead"
     const preset = presetById(opts.preset ?? d.preset) ?? OIDC_PRESETS[0]!
     body = `<section class="card"><h2>1. Register StatusPing</h2>
 <div class="form">${field('Identity provider', `<select class="input" id="preset" onchange="location.href='/admin/access/method?preset='+encodeURIComponent(this.value)">${OIDC_PRESETS.map((p) => `<option value="${p.id}"${p.id === preset.id ? ' selected' : ''}>${p.label}</option>`).join('')}</select>`)}</div>
-<p>${preset.register} (<a href="${preset.docsUrl}" target="_blank" rel="noopener">guide</a>)</p><p>Redirect (callback) URL:</p><pre>${escape(opts.origin)}/auth/callback</pre></section>
+<p>${preset.register} (<a href="${preset.docsUrl}" target="_blank" rel="noopener">guide</a>)</p><p>Redirect (callback) URL:</p><pre data-copy="callback URL">${escape(opts.origin)}/auth/callback</pre></section>
 <section class="card"><h2>2. Connection details</h2><form class="form" method="post" action="/admin/access/method/settings">${hidden(opts.csrf)}<input type="hidden" name="preset" value="${preset.id}">
 ${field('Issuer URL', textInput('issuer', d.issuer ?? preset.issuer ?? '', 'type="url" placeholder="https://…" spellcheck="false" required'), preset.issuer ? 'Pre-filled for this provider.' : preset.issuerHint ?? '')}
 ${secretField('OIDC_CLIENT_ID', 'Client ID', 'text')}
@@ -193,7 +194,7 @@ export function mountAccessSwitch(app: Hono, deps: Deps, h: SwitchHelpers): void
     const v = await h.view(c)
     if (v instanceof Response) return v
     const draft = await loadDraft(deps)
-    if (!draft || c.req.query('choose') === '1') return h.html(c, choosePage({ viewer: v.viewer, csrf: v.csrf, current: currentMethod(deps) }))
+    if (!draft || c.req.query('choose') === '1') return h.html(c, choosePage({ viewer: v.viewer, csrf: v.csrf, current: currentMethod(deps), notice: v.notice }))
     return configure(c, v, draft)
   })
 
@@ -299,6 +300,7 @@ export function mountAccessSwitch(app: Hono, deps: Deps, h: SwitchHelpers): void
     await refreshAdminConfig(deps, now)
     // Keep the administrator who switched signed in; Cloudflare Access signs in on every request.
     if (draft.method !== 'cloudflare-access') await setSession(c, deps, { email: draft.verifiedEmail, groups: [], provider })
+    deleteCookie(c, RECOVERY_COOKIE, { path: '/' })
     return h.done(c, '/admin/access', 'method-changed')
   })
 }
@@ -313,7 +315,7 @@ export function mountAccessSwitchAuthRoutes(app: Hono, deps: Deps): void {
   /** The draft, if the browser belongs to a signed-in administrator. */
   const adminDraft = async (c: Context) => {
     if (!deps.adminEnabled) return null
-    const viewer = await currentViewer(c, deps)
+    const viewer = await currentViewer(c, deps) ?? await readRecoverySession(c, deps)
     if (!viewer || !canAdmin(viewer, deps.config)) return null
     return loadDraft(deps)
   }

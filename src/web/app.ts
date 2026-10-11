@@ -24,6 +24,7 @@ import { mountAdminRoutes } from '../admin/routes.ts'
 import { mountMcp } from '../mcp/server.ts'
 import { mountAccessSwitchAuthRoutes } from '../admin/access-switch.ts'
 import { mountSetupAuthRoutes, mountSetupRoutes, SETUP_AUTH_PATHS } from '../setup/routes.ts'
+import { mountRecoveryRoutes } from '../setup/recovery.ts'
 import { consumePingRateLimit } from '../rate-limit.ts'
 import { runHttpCheck } from '../evaluate/http.ts'
 import { runTcpCheck } from '../evaluate/tcp.ts'
@@ -90,7 +91,7 @@ export function createApp(deps: Deps): Hono {
     await refreshAdminConfig(deps, nowSeconds())
     // Setup mode: only the health check and the wizard respond until setup is finished. Page
     // visits (most likely the owner) go straight to the wizard; pings and API calls get a 503.
-    if (deps.setupPending && c.req.path !== '/healthz' && !PLATFORM_PATHS.includes(c.req.path) && c.req.path !== '/setup' && !c.req.path.startsWith('/setup/') && !SETUP_AUTH_PATHS.includes(c.req.path)) {
+    if (deps.setupPending && c.req.path !== '/healthz' && c.req.path !== '/api/setup' && !PLATFORM_PATHS.includes(c.req.path) && c.req.path !== '/setup' && !c.req.path.startsWith('/setup/') && !SETUP_AUTH_PATHS.includes(c.req.path)) {
       const page = (c.req.method === 'GET' || c.req.method === 'HEAD') && !c.req.path.startsWith('/ping/') && !c.req.path.startsWith('/api/')
       if (page) {
         const res = c.redirect('/setup', 302)
@@ -288,6 +289,7 @@ export function createApp(deps: Deps): Hono {
 
   // ── First-run setup wizard and guarded reset ────────────────────────────────────────────────
   mountSetupRoutes(app, deps)
+  mountRecoveryRoutes(app, deps)
 
   // ── Pages ──────────────────────────────────────────────────────────────────────────────────
 
@@ -514,7 +516,7 @@ export function createApp(deps: Deps): Hono {
             : {}),
           ...(f.has('errors') ? { lastError: m.state.last_error } : {}),
           ...(f.has('target') && m.monitor.kind === 'http'
-            ? { url: m.monitor.url }
+            ? { url: m.monitor.secretUrl ? null : m.monitor.url }
             : f.has('target') && m.monitor.kind === 'tcp'
               ? { host: m.monitor.host, port: m.monitor.port }
               : {}),

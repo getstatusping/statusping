@@ -1,8 +1,9 @@
 import type { StatusPingConfig } from '../config.ts'
-import type { Db } from '../db/types.ts'
+import type { Db, Statement } from '../db/types.ts'
 import { createSink, type SinkRuntime } from '../notify/sinks.ts'
 import { randomToken, sha256Hex } from '../util/crypto.ts'
 import { type AdminConfig, validateAdminConfig } from './security.ts'
+import { parseAdminYaml } from './yaml.ts'
 
 export interface StoredAdminConfig {
   config: AdminConfig
@@ -47,12 +48,92 @@ function parseConfig(json: string): AdminConfig | null {
 
 /** Seeds the DB once; a caller must only use this when admin mode is enabled. */
 export async function seedAdminConfig(db: Db, config: AdminConfig, actor: string, now: number): Promise<boolean> {
-  const result = await db.run(
-    `INSERT INTO admin_config (id, config_json, updated_at, updated_by) VALUES (1, ?, ?, ?) ON CONFLICT(id) DO NOTHING`,
-    [configJson(config), now, actor],
-  )
-  return result.changes === 1
+  const [result] = await db.batch([
+    {
+      sql: `INSERT INTO admin_config (id, config_json, updated_at, updated_by) VALUES (1, ?, ?, ?) ON CONFLICT(id) DO NOTHING`,
+      params: [configJson(config), now, actor],
+    },
+    { sql: `INSERT OR IGNORE INTO config_revisions (id, config_json, yaml, actor, action, at)
+            SELECT 1, config_json, NULL, updated_by, 'config.seed', updated_at FROM admin_config WHERE id = 1 AND NOT EXISTS (SELECT 1 FROM config_revisions)` },
+  ])
+  return result!.changes === 1
 }
+
+// ── Revisions ───────────────────────────────────────────────────────────────────────────────
+
+/** How many saved configurations are kept. */
+export const KEEP_REVISIONS = 50
+
+export interface RevisionSummary { id: number; actor: string; action: string; at: number }
+export interface Revision extends RevisionSummary { config: AdminConfig; yaml: string | null }
+
+/** Thrown when a save was based on a revision that is no longer the newest. */
+export class RevisionConflict extends Error {
+  readonly current: number
+  constructor(current: number) { super('The configuration was changed by someone else since it was loaded.'); this.current = current }
+}
+
+/** The newest revision number; 0 when nothing has been saved since revisions were introduced. */
+export async function currentRevision(db: Db): Promise<number> {
+  return (await db.first<{ id: number | null }>(`SELECT MAX(id) AS id FROM config_revisions`))?.id ?? 0
+}
+
+/** Records an existing configuration as revision 1, so the first change made afterwards can be undone. */
+export async function ensureBaselineRevision(db: Db): Promise<void> {
+  await db.run(`INSERT OR IGNORE INTO config_revisions (id, config_json, yaml, actor, action, at)
+    SELECT 1, config_json, NULL, updated_by, 'config.baseline', updated_at FROM admin_config WHERE id = 1 AND NOT EXISTS (SELECT 1 FROM config_revisions)`)
+}
+
+/**
+ * Statements that store a configuration as a new revision. With `base`, the new revision is
+ * exactly base + 1: a concurrent save that got there first makes the primary key collide, which
+ * rolls back the whole batch.
+ */
+export function revisionStatements(config: AdminConfig, actor: string, now: number, opts: { action: string; yaml?: string | null; base?: number }): Statement[] {
+  const id = opts.base === undefined ? '(SELECT COALESCE(MAX(id), 0) + 1 FROM config_revisions)' : '?'
+  return [
+    {
+      sql: `INSERT INTO config_revisions (id, config_json, yaml, actor, action, at) VALUES (${id}, ?, ?, ?, ?, ?)`,
+      params: [...(opts.base === undefined ? [] : [opts.base + 1]), configJson(config), opts.yaml ?? null, actor, opts.action, now],
+    },
+    { sql: `DELETE FROM config_revisions WHERE id <= (SELECT MAX(id) FROM config_revisions) - ?`, params: [KEEP_REVISIONS] },
+  ]
+}
+
+export async function listRevisions(db: Db): Promise<RevisionSummary[]> {
+  return db.all<RevisionSummary>(`SELECT id, actor, action, at FROM config_revisions ORDER BY id DESC LIMIT ?`, [KEEP_REVISIONS])
+}
+
+export async function loadRevision(db: Db, id: number): Promise<Revision | null> {
+  const row = await db.first<{ id: number; actor: string; action: string; at: number; config_json: string; yaml: string | null }>(
+    `SELECT id, actor, action, at, config_json, yaml FROM config_revisions WHERE id = ?`, [id],
+  )
+  const config = row ? parseConfig(row.config_json) : null
+  return row && config ? { id: row.id, actor: row.actor, action: row.action, at: row.at, config, yaml: row.yaml } : null
+}
+
+/** The YAML text the current configuration was saved from, when it was saved from YAML. */
+export async function currentYamlText(db: Db): Promise<string | null> {
+  const row = await db.first<{ yaml: string | null; same: number }>(
+    `SELECT r.yaml, r.config_json = c.config_json AS same FROM config_revisions r, admin_config c WHERE c.id = 1 ORDER BY r.id DESC LIMIT 1`,
+  )
+  return row?.yaml && row.same ? row.yaml : null
+}
+
+/** Key-order-independent JSON, ignoring the admin flag. */
+function canonical(value: unknown): string {
+  const sort = (v: unknown): unknown => Array.isArray(v) ? v.map(sort)
+    : v && typeof v === 'object' ? Object.fromEntries(Object.keys(v).filter((k) => k !== 'admin').sort().map((k) => [k, sort((v as Record<string, unknown>)[k])])) : v
+  return JSON.stringify(sort(value))
+}
+
+/** Keeps YAML text only when it describes exactly what is saved (an import may keep the old sign-in method). */
+function matchingYaml(yaml: string | null | undefined, config: AdminConfig): string | null {
+  if (!yaml) return null
+  try { return canonical(parseAdminYaml(yaml)) === canonical(config) ? yaml : null } catch { return null }
+}
+
+const isConflict = (error: unknown) => /UNIQUE|PRIMARY KEY|constraint/i.test(error instanceof Error ? error.message : String(error))
 
 export async function loadAdminConfig(db: Db): Promise<StoredAdminConfig | null> {
   const row = await db.first<{ config_json: string; updated_at: number; updated_by: string }>(
@@ -79,29 +160,50 @@ export async function listAudit(db: Db, limit = 100): Promise<AuditEntry[]> {
   return rows.map((row) => ({ id: row.id, actor: row.actor, action: row.action, target: row.target, before: parse(row.before_json), after: parse(row.after_json), at: row.at }))
 }
 
-/** Atomically validates, records, and stores an admin-managed config. */
+export interface SaveOptions {
+  /** The revision the change was made on; a newer one means someone else saved in between. */
+  base?: number
+  /** The YAML text the change came from, kept so comments and ordering survive. */
+  yaml?: string | null
+  action?: string
+}
+
+/** Atomically validates, records, and stores an admin-managed config as a new revision. */
 export async function saveAdminConfig(
   db: Db,
   value: unknown,
   actor: string,
   now: number,
   getEnv: (name: string) => string | undefined,
-): Promise<StoredAdminConfig> {
+  opts: SaveOptions = {},
+): Promise<StoredAdminConfig & { revision: number }> {
   const { config } = validateAdminConfig(value, getEnv)
   if (config.admin !== true) throw new Error('admin: cannot disable admin mode through the admin API')
   const before = await loadAdminConfig(db)
-  await db.batch([
-    {
-      sql: `INSERT INTO admin_config (id, config_json, updated_at, updated_by) VALUES (1, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET config_json = excluded.config_json, updated_at = excluded.updated_at, updated_by = excluded.updated_by`,
-      params: [configJson(config), now, actor],
-    },
-    {
-      sql: `INSERT INTO audit_log (actor, action, target, before_json, after_json, at) VALUES (?, 'config.save', 'config', ?, ?, ?)`,
-      params: [actor, before ? JSON.stringify(redactAdminValue(before.config)) : null, JSON.stringify(redactAdminValue(config)), now],
-    },
-  ])
-  return { config, updatedAt: now, updatedBy: actor }
+  if (opts.base !== undefined) {
+    const current = await currentRevision(db)
+    if (current !== opts.base) throw new RevisionConflict(current)
+  }
+  const action = opts.action ?? 'config.save'
+  try {
+    await db.batch([
+      ...revisionStatements(config, actor, now, { action, yaml: matchingYaml(opts.yaml, config), base: opts.base }),
+      {
+        sql: `INSERT INTO admin_config (id, config_json, updated_at, updated_by) VALUES (1, ?, ?, ?)
+              ON CONFLICT(id) DO UPDATE SET config_json = excluded.config_json, updated_at = excluded.updated_at, updated_by = excluded.updated_by`,
+        params: [configJson(config), now, actor],
+      },
+      {
+        sql: `INSERT INTO audit_log (actor, action, target, before_json, after_json, at) VALUES (?, ?, 'config', ?, ?, ?)`,
+        // Activity keeps its long-standing config.save, except for whole-file replacements.
+        params: [actor, action === 'config.import' || action === 'config.restore' ? action : 'config.save', before ? JSON.stringify(redactAdminValue(before.config)) : null, JSON.stringify(redactAdminValue(config)), now],
+      },
+    ])
+  } catch (error) {
+    if (opts.base !== undefined && isConflict(error)) throw new RevisionConflict(await currentRevision(db))
+    throw error
+  }
+  return { config, updatedAt: now, updatedBy: actor, revision: await currentRevision(db) }
 }
 
 /** Creates an unpredictable ping token and replaces the hash atomically. Plaintext is returned once. */

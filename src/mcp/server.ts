@@ -7,7 +7,8 @@ import { createAnnouncement, listAnnouncements, parseAnnouncementCreate, parseAn
 import type { MonitorInput } from '../config.ts'
 import { type Deps, refreshAdminConfig, storedEnvKey } from '../deps.ts'
 import { type Form, FormError, findMonitor, monitorFromForm, monitorRows, putMonitor, removeMonitor } from '../admin/forms.ts'
-import { loadAdminConfig, rotatePingToken, saveAdminConfig } from '../admin/service.ts'
+import { currentRevision, loadAdminConfig, RevisionConflict, rotatePingToken, saveAdminConfig, type SaveOptions } from '../admin/service.ts'
+import { locateProblems } from '../admin/yaml.ts'
 import { type AdminConfig, validateAdminConfig } from '../admin/security.ts'
 import { dispatchAnnouncementNotifications, enqueueAnnouncementNotifications } from '../notify/announcements.ts'
 import { dispatchSubscriberOutbox, enqueueAnnouncement } from '../subscribers.ts'
@@ -51,12 +52,13 @@ export function mountMcp(app: Hono, deps: Deps): void {
   const storedConfig = async (): Promise<AdminConfig> => (await loadAdminConfig(deps.db))?.config ?? deps.configInput
   const actor = (token: ApiToken) => `mcp:${token.name}`
 
-  const save = async (token: ApiToken, next: AdminConfig, secrets: Array<{ name: string; value: string }> = []) => {
+  const save = async (token: ApiToken, next: AdminConfig, secrets: Array<{ name: string; value: string }> = [], opts: SaveOptions = {}) => {
     // Credentials are checked against the values about to be stored, then stored before the config that names them.
     const pending = new Map(secrets.map((s) => [s.name, s.value]))
     const getEnv = (name: string) => pending.get(name) ?? deps.getEnv(name)
-    try { validateAdminConfig({ ...next, admin: true }, getEnv) } catch (error) { throw new ToolError((error as Error).message) }
+    try { validateAdminConfig({ ...next, admin: true }, getEnv) } catch (error) { throw new ToolError(opts.yaml ? locateProblems(opts.yaml, (error as Error).message) : (error as Error).message) }
     const now = nowSeconds()
+    if (opts.base !== undefined && opts.base !== await currentRevision(deps.db)) throw new ToolError(`The configuration changed after revision ${opts.base}. Call get_configuration again and retry.`)
     if (secrets.length) {
       await deps.db.batch([
         ...secrets.map(({ name, value }) => ({ sql: `INSERT INTO instance_secrets (name, value, created_at) VALUES (?, ?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value, created_at = excluded.created_at`, params: [storedEnvKey(name), value, now] })),
@@ -64,7 +66,12 @@ export function mountMcp(app: Hono, deps: Deps): void {
       ])
       await refreshAdminConfig(deps, now)
     }
-    await saveAdminConfig(deps.db, { ...next, admin: true }, actor(token), now, getEnv)
+    try {
+      await saveAdminConfig(deps.db, { ...next, admin: true }, actor(token), now, getEnv, { action: 'config.mcp', ...opts })
+    } catch (error) {
+      if (error instanceof RevisionConflict) throw new ToolError(`The configuration changed after revision ${opts.base}. Call get_configuration again and retry.`)
+      throw error
+    }
     await refreshAdminConfig(deps, now)
   }
 

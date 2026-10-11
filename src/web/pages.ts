@@ -550,7 +550,7 @@ function describeMonitor(m: Monitor, fields: ReadonlySet<DetailField>): [string,
   }
   if (fields.has('target')) {
     if (m.kind === 'http') {
-      out.push(['URL', `${m.method} ${m.url}`])
+      out.push(['URL', `${m.method} ${m.secretUrl ? '(kept secret)' : m.url}`])
       if (m.keyword) out.push(['Keyword', `${m.invertKeyword ? 'must not contain' : 'must contain'} "${m.keyword}"`])
     } else {
       out.push(['Target', `${m.host}:${m.port}`])

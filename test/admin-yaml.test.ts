@@ -74,6 +74,6 @@ sinks:
     webhookUrl: https://hooks.example.test/secret
 groups: []
 `)
-    expect(() => validateAdminConfig(literalSecret, () => undefined)).toThrow(/env\(NAME\) reference/i)
+    expect(() => validateAdminConfig(literalSecret, () => undefined)).toThrow(/secret reference/i)
   })
 })

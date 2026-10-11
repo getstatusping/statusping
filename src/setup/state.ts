@@ -2,6 +2,7 @@
  * First-run setup state (plan 011). The instance is either in setup mode (`pending`), finished
  * (`complete`), or has never been through setup (no row: config-as-code installations).
  */
+import type { SinkInput, StatusPingConfig } from '../config.ts'
 import type { Db } from '../db/types.ts'
 import { randomToken, timingSafeEqual } from '../util/crypto.ts'
 
@@ -33,6 +34,11 @@ export interface SetupDraft {
   /** The optional first monitor. A missing kind means HTTP (drafts from before monitor types). */
   monitor?: SetupMonitor | null
   monitorStepDone?: boolean
+  /** The optional first alert channel. Its secrets are stored under SINK_<NAME>_<FIELD>. */
+  channel?: { name: string; sink: SinkInput } | null
+  channelStepDone?: boolean
+  /** An imported configuration; it replaces the monitor and channel steps. */
+  imported?: StatusPingConfig
 }
 
 export interface SetupState {

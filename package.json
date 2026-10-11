@@ -30,6 +30,7 @@
     "release:verify": "node scripts/verify-release-bundle.ts",
     "template:generate": "node scripts/build-deploy-template.ts",
     "template:verify": "node scripts/verify-template-contract.ts",
+    "schema:generate": "node --disable-warning=ExperimentalWarning scripts/build-config-schema.ts",
     "upgrade": "node --disable-warning=ExperimentalWarning scripts/upgrade.ts"
   },
   "dependencies": {

@@ -125,6 +125,7 @@ describe('first-run setup wizard and reset', () => {
     expect((await b.post('/setup/basics', { csrf, title: 'Acme', baseUrl: `${ORIGIN}/`, timezone: 'Europe/London', updates: '1' })).res.status).toBe(303)
     expect((await b.post('/setup/monitor', { csrf, name: 'Site', url: 'ftp://x' })).res.status).toBe(400)
     expect((await b.post('/setup/monitor', { csrf, name: 'Site', url: 'https://site.test/health' })).res.status).toBe(303)
+    expect((await b.post('/setup/channel', { csrf, skip: '1' })).res.status).toBe(303)
 
     // Review shows the YAML, without the password or its hash.
     const review = await b.get('/setup')
@@ -204,6 +205,7 @@ describe('first-run setup wizard and reset', () => {
     expect((await b.post('/setup/monitor', { csrf, kind: 'tcp', name: 'DB', host: 'db.example.test', port: '70000' })).body).toContain('between 1 and 65535')
     expect((await b.post('/setup/monitor', { csrf, kind: 'push', name: 'Backup', schedule: 'not a cron' })).body).toContain('is not a valid cron schedule')
     expect((await b.post('/setup/monitor', { csrf, kind: 'push', name: 'Backup', period: '1d', schedule: '0 3 * * *' })).res.status).toBe(303)
+    expect((await b.post('/setup/channel', { csrf, skip: '1' })).res.status).toBe(303)
 
     // The review is in plain words; the YAML is tucked away.
     const review = (await b.get('/setup')).body
@@ -213,7 +215,7 @@ describe('first-run setup wizard and reset', () => {
 
     const done = await b.post('/setup/finish', { csrf })
     expect(done.res.status).toBe(200)
-    const pingUrl = /<p class="secret">([^<]+)<\/p>/.exec(done.body)![1]!
+    const pingUrl = /<p class="secret"[^>]*>([^<]+)<\/p>/.exec(done.body)![1]!
     expect(pingUrl).toMatch(new RegExp(`^${ORIGIN}/ping/[A-Za-z0-9]{40}$`))
     expect(done.body).toContain(`curl -fsS ${pingUrl}`)
     const path = new URL(pingUrl).pathname
@@ -238,6 +240,7 @@ describe('first-run setup wizard and reset', () => {
     expect((await b.post('/setup/account', { csrf, email: 'owner@example.test', password, confirm: password })).res.status).toBe(303)
     await b.post('/setup/basics', { csrf, title: 'First', baseUrl: ORIGIN, timezone: 'UTC' })
     await b.post('/setup/monitor', { csrf, skip: '1' })
+    await b.post('/setup/channel', { csrf, skip: '1' })
     await b.post('/setup/finish', { csrf })
     expect((await b.get('/admin')).res.status).toBe(200)
     // No monitors and no tick yet: there are no statuses to call out of date.

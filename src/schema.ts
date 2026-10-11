@@ -277,6 +277,18 @@ export const MIGRATIONS: string[][] = [
       last_used_at INTEGER
     )`,
   ],
+  [
+    // Every saved configuration, newest last; the newest 50 are kept. The id is the revision
+    // number forms and If-Match compare against. yaml keeps the text an import was made from.
+    `CREATE TABLE IF NOT EXISTS config_revisions (
+      id INTEGER PRIMARY KEY,
+      config_json TEXT NOT NULL,
+      yaml TEXT,
+      actor TEXT NOT NULL,
+      action TEXT NOT NULL,
+      at INTEGER NOT NULL
+    )`,
+  ],
 ]
 
 export const SCHEMA_VERSION = MIGRATIONS.length

@@ -69,6 +69,7 @@ describe('setup wizard: Cloudflare Access and OpenID Connect', () => {
     expect((await b.post('/setup/connected', { csrf })).res.status).toBe(303)
     expect((await b.post('/setup/basics', { csrf, title: 'Acme', baseUrl: ORIGIN, timezone: 'UTC' })).res.status).toBe(303)
     expect((await b.post('/setup/monitor', { csrf, skip: '1' })).res.status).toBe(303)
+    expect((await b.post('/setup/channel', { csrf, skip: '1' })).res.status).toBe(303)
     return b.post('/setup/finish', { csrf })
   }
 

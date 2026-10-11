@@ -9,7 +9,7 @@ import type { MaintenanceInput, PageInput, SinkInput } from '../config.ts'
 import { type Deps, storedEnvKey } from '../deps.ts'
 import { describeChanges, type Form, FormError, pageFromForm, pageList, putPage, putSink, removePage, removeSink, SINK_FIELDS, type SinkType, sinkEnvName, sinkFromForm } from '../admin/forms.ts'
 import type { AdminConfig } from '../admin/security.ts'
-import { listAudit, rotatePingToken, sendSinkTest } from '../admin/service.ts'
+import { currentRevision, currentYamlText, listAudit, rotatePingToken, type SaveOptions, sendSinkTest } from '../admin/service.ts'
 import { parseAdminYaml, stringifyAdminYaml } from '../admin/yaml.ts'
 import { checkForUpdate } from '../updates.ts'
 import { isValidTimeZone, nowSeconds } from '../util/time.ts'
@@ -20,7 +20,7 @@ import { at, iso, type Json, str, type Tool, ToolError } from './tool.ts'
 interface Ctx {
   deps: Deps
   storedConfig: () => Promise<AdminConfig>
-  save: (token: ApiToken, next: AdminConfig, secrets?: Array<{ name: string; value: string }>) => Promise<void>
+  save: (token: ApiToken, next: AdminConfig, secrets?: Array<{ name: string; value: string }>, opts?: SaveOptions) => Promise<void>
   actor: (token: ApiToken) => string
 }
 
@@ -344,28 +344,29 @@ export function adminTools({ deps, storedConfig, save, actor }: Ctx): Tool[] {
     },
     {
       name: 'get_configuration', scope: 'settings', annotations: { title: 'Export configuration', readOnlyHint: true },
-      description: 'The whole configuration as YAML, as Settings → Configuration exports it. Credentials are not included, only the names they are stored under.',
+      description: 'The whole configuration as YAML, as Settings → Configuration exports it, with its revision number. Credentials are not included, only the names they are stored under.',
       inputSchema: { type: 'object', properties: {} },
-      run: async () => ({ yaml: stringifyAdminYaml(await storedConfig()) }),
+      run: async () => ({ yaml: (await currentYamlText(deps.db)) ?? stringifyAdminYaml(await storedConfig()), revision: await currentRevision(deps.db) }),
     },
     {
       name: 'import_configuration', scope: 'settings', annotations: { title: 'Import configuration', readOnlyHint: false, destructiveHint: true },
-      description: 'Replace the whole configuration with YAML. By default this only previews the changes; pass apply: true to save. The sign-in method always stays as it is.',
-      inputSchema: { type: 'object', required: ['yaml'], properties: { yaml: str, apply: { type: 'boolean', description: 'Save the changes. Default false (preview only).' } } },
+      description: 'Replace the whole configuration with YAML. By default this only previews the changes; pass apply: true to save. Pass the revision from get_configuration so a change someone else made in between is not overwritten. The sign-in method always stays as it is.',
+      inputSchema: { type: 'object', required: ['yaml'], properties: { yaml: str, apply: { type: 'boolean', description: 'Save the changes. Default false (preview only).' }, revision: { type: 'integer', minimum: 0, description: 'The revision the YAML was based on (from get_configuration). Saving fails if the configuration has changed since.' } } },
       run: async (args, { token }) => {
         const current = await storedConfig()
         const yaml = at(args.yaml)
         if (yaml.length > 262_144) throw new ToolError('Configuration files must be 256 KB or smaller.')
         let parsed: unknown
-        try { parsed = parseAdminYaml(yaml) } catch (error) { throw new ToolError(`The YAML is invalid: ${(error as Error).message}`) }
+        try { parsed = parseAdminYaml(yaml) } catch (error) { throw new ToolError((error as Error).message) }
         if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new ToolError('The file must contain a StatusPing configuration.')
         const next = { ...(parsed as AdminConfig), admin: true }
         if (current.access) next.access = { ...(next.access ?? {}), provider: current.access.provider } as AdminConfig['access']
         if (!next.access?.admins?.emails?.length && !next.access?.admins?.teams?.length) throw new ToolError('The configuration must keep at least one administrator.')
         const changes = describeChanges(current, next)
-        if (args.apply !== true) return { preview: true, changes, note: 'Nothing was saved. Call again with apply: true to save.' }
-        await save(token, next)
-        return { applied: true, changes }
+        const base = typeof args.revision === 'number' ? args.revision : undefined
+        if (args.apply !== true) return { preview: true, changes, revision: await currentRevision(deps.db), note: 'Nothing was saved. Call again with apply: true to save.' }
+        await save(token, next, [], { yaml, action: 'config.import', base })
+        return { applied: true, changes, revision: await currentRevision(deps.db) }
       },
     },
     {

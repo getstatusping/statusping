@@ -11,17 +11,22 @@ import { hashUserPassword, sameOrigin, setSession } from '../auth/providers.ts'
 import { sign, unsign } from '../auth/session.ts'
 import type { AdminConfig } from '../admin/security.ts'
 import { validateAdminConfig } from '../admin/security.ts'
-import { stringifyAdminYaml } from '../admin/yaml.ts'
+import { locateProblems, parseAdminYaml, stringifyAdminYaml } from '../admin/yaml.ts'
+import { FormError, monitorRows, pageList, SINK_FIELDS, sinkEnvName, sinkFromForm, type SinkType } from '../admin/forms.ts'
+import { revisionStatements, sendSinkTest } from '../admin/service.ts'
+import type { Statement } from '../db/types.ts'
+import { SINK_TYPES } from '../config.ts'
 import { b64urlEncode, verifyJwt } from '../auth/jwt.ts'
 import { discover } from '../auth/providers.ts'
-import type { AuthProviderInput, MonitorInput } from '../config.ts'
-import { type Deps, refreshAdminConfig, STORABLE_ENV, storedEnvKey } from '../deps.ts'
+import type { AuthProviderInput, MonitorInput, StatusPingConfig } from '../config.ts'
+import { type Deps, isStorableEnv, refreshAdminConfig, STORABLE_ENV, storedEnvKey } from '../deps.ts'
 import { rotatePingToken } from '../admin/service.ts'
 import { syncConfig } from '../sync.ts'
 import { TEAM_DOMAIN, presetById } from './instructions.ts'
-import { accessPage, type EnvSource, type MonitorValues, oidcPage, setupDonePage } from './ui.ts'
+import { accessPage, channelPage, type ChannelSources, type EnvSource, importPage, type MonitorValues, oidcPage, setupDonePage } from './ui.ts'
 import { consumePingRateLimit } from '../rate-limit.ts'
 import { randomToken, timingSafeEqual } from '../util/crypto.ts'
+import { discover as discoverIssuer } from '../auth/providers.ts'
 import { isValidTimeZone, nowSeconds } from '../util/time.ts'
 import {
   beginSetup, expectedSetupCode, loadSetupState, recordFailedClaim, saveDraft, setupCodeMatches,
@@ -110,21 +115,48 @@ export function draftSummary(draft: SetupDraft): Array<[string, string]> {
     : m.kind === 'push' ? `${m.name}: a scheduled job expected ${m.schedule ? `on the cron schedule ${m.schedule}` : PERIOD_WORDS[m.period ?? '1d'] ?? `every ${m.period}`}`
       : m.kind === 'tcp' ? `${m.name}: port ${m.port} on ${m.host}, checked every minute`
         : `${m.name}: ${m.url}, checked every minute${m.keyword ? ` for "${m.keyword}"` : ''}`
+  const imported = draft.imported
+  const channel = draft.channel ? `${SINK_FIELDS[draft.channel.sink.type as SinkType]?.label ?? draft.channel.sink.type} (${draft.channel.name})` : 'None yet'
   return [
+    ...(imported ? [['Imported configuration', importSummary(imported)] as [string, string]] : []),
     ['Site title', draft.title ?? ''],
     ['Address', draft.baseUrl ?? ''],
     ['Timezone', draft.timezone ?? ''],
     ['Administrator', draft.email ?? ''],
     ['Sign-in', signIn],
-    ['Status page', draft.privatePage ? 'Private: only administrators can see it' : 'Public: anyone with the link can see it'],
-    ['First monitor', monitor],
+    ...(imported ? [] : [
+      ['Status page', draft.privatePage ? 'Private: only administrators can see it' : 'Public: anyone with the link can see it'],
+      ['First monitor', monitor],
+      ['Alerts', channel],
+    ] as Array<[string, string]>),
     ['Update checks', draft.updates ? 'On: the admin shows when a new StatusPing version is out' : 'Off'],
   ]
+}
+
+/** What an imported configuration contains, in a few words. */
+export function importSummary(config: StatusPingConfig): string {
+  const count = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`
+  const admin = { ...config, admin: true } as AdminConfig
+  return [count(monitorRows(admin).length, 'monitor', 'monitors'), count(pageList(admin).length, 'status page', 'status pages'), count(Object.keys(config.sinks ?? {}).length, 'alert channel', 'alert channels')].join(', ')
 }
 
 /** The wizard's configuration, built only from validated draft fields. */
 export function draftConfig(draft: SetupDraft): AdminConfig {
   const email = draft.email!
+  if (draft.imported) {
+    // The sign-in method (step 2) and site basics (step 3) always win over the file.
+    const { updates, admin: _admin, ...imported } = draft.imported as AdminConfig
+    const admins = imported.access?.admins
+    return {
+      ...imported,
+      admin: true,
+      title: draft.title!,
+      baseUrl: draft.baseUrl!,
+      timezone: draft.timezone!,
+      access: { ...(imported.access ?? {}), provider: draftProvider(draft), admins: { ...(admins ?? {}), emails: [...new Set([email, ...(admins?.emails ?? [])])] } },
+      ...(draft.updates ? { updates: { ...(updates ?? {}), enabled: true } } : {}),
+    } as AdminConfig
+  }
   const monitors = draft.monitor ? [monitorInput(draft.monitor, draft.timezone)] : []
   return {
     admin: true,
@@ -135,19 +167,49 @@ export function draftConfig(draft: SetupDraft): AdminConfig {
     groups: monitors.length ? [{ name: 'Services', monitors }] : [],
     pages: [{ slug: 'status', title: draft.title!, access: draft.privatePage ? { emails: [email] } : 'public', monitors: monitors.map((m) => m.id) }],
     home: 'status',
+    ...(draft.channel ? { sinks: { [draft.channel.name]: draft.channel.sink } } : {}),
     ...(draft.updates ? { updates: { enabled: true } } : {}),
   } as AdminConfig
+}
+
+/**
+ * Ends setup in one batch: configuration (as the first revision of this setup), account, session
+ * key, audit, and the end of setup mode. The status guard makes a repeated finish a no-op.
+ */
+export async function completeSetup(deps: Deps, config: AdminConfig, who: { email: string; method: SetupMethod; passwordHash?: string; actor?: string }, now: number): Promise<void> {
+  const statements: Statement[] = [
+    ...revisionStatements(config, who.email, now, { action: 'setup.complete' }),
+    { sql: `INSERT INTO admin_config (id, config_json, updated_at, updated_by) VALUES (1, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET config_json = excluded.config_json, updated_at = excluded.updated_at, updated_by = excluded.updated_by`,
+      params: [JSON.stringify(config), now, who.email] },
+    ...(who.method === 'basic' && who.passwordHash
+      ? [{ sql: `INSERT INTO local_users (email, password_hash, created_at) VALUES (?, ?, ?)
+            ON CONFLICT(email) DO UPDATE SET password_hash = excluded.password_hash`, params: [who.email, who.passwordHash, now] }]
+      : []),
+    { sql: `INSERT INTO instance_secrets (name, value, created_at) VALUES ('session_key', ?, ?)
+            ON CONFLICT(name) DO UPDATE SET value = excluded.value, created_at = excluded.created_at`, params: [randomToken(48), now] },
+    { sql: `INSERT INTO audit_log (actor, action, target, before_json, after_json, at) VALUES (?, 'setup.complete', 'setup', NULL, ?, ?)`,
+      params: [who.actor ?? who.email, JSON.stringify({ method: who.method }), now] },
+    { sql: `UPDATE setup_state SET status = 'complete', code = NULL, session_key = NULL, draft_json = '{}', failed_attempts = 0, updated_at = ? WHERE id = 1 AND status = 'pending'`, params: [now] },
+  ]
+  // Only the first finish writes: a second one (double submit) finds setup already complete.
+  const pending = await deps.db.first<{ status: string }>(`SELECT status FROM setup_state WHERE id = 1`)
+  if (pending?.status !== 'pending') return
+  await deps.db.batch(statements)
+  await refreshAdminConfig(deps, now)
 }
 
 function currentStep(draft: SetupDraft): SetupStep {
   if (!draft.method) return 'method'
   if (!draft.verified) return 'account'
   if (!draft.title) return 'basics'
+  if (draft.imported) return 'review'
   if (!draft.monitorStepDone) return 'monitor'
+  if (!draft.channelStepDone) return 'channel'
   return 'review'
 }
 
-const ORDER: SetupStep[] = ['claim', 'method', 'account', 'basics', 'monitor', 'review']
+const ORDER: SetupStep[] = ['claim', 'method', 'account', 'basics', 'monitor', 'channel', 'review']
 const completedBefore = (step: SetupStep, reached: SetupStep) =>
   new Set(ORDER.filter((s) => ORDER.indexOf(s) < Math.max(ORDER.indexOf(step), ORDER.indexOf(reached)) && s !== step))
 
@@ -160,6 +222,23 @@ export function mountSetupRoutes(app: Hono, deps: Deps): void {
   /** Where a setting is set: a Worker secret wins over a value saved here. Never the value. */
   const source = (name: string): EnvSource => (deps.hasRealEnv(name) ? 'env' : deps.storedEnv[name] ? 'db' : false)
   const oidcEnv = () => ({ OIDC_CLIENT_ID: source('OIDC_CLIENT_ID'), OIDC_CLIENT_SECRET: source('OIDC_CLIENT_SECRET') })
+
+  /** Where the saved channel's credentials are set. Names only, never values. */
+  const channelSources = (sink: unknown): ChannelSources => {
+    const out: ChannelSources = {}
+    const s = (sink ?? {}) as Record<string, unknown>
+    const refs: Record<string, unknown> = { ...s, ...(s.via && typeof s.via === 'object' ? s.via as Record<string, unknown> : {}) }
+    for (const [key, value] of Object.entries(refs)) {
+      const name = value && typeof value === 'object' && typeof (value as { $env?: unknown }).$env === 'string' ? (value as { $env: string }).$env : undefined
+      if (name) out[key] = { envName: name, source: deps.hasRealEnv(name) ? 'env' : isStorableEnv(name) && deps.storedEnv[name] ? 'db' : false }
+    }
+    return out
+  }
+  /** Erases the credentials a wizard channel stored (exact prefix; LIKE would treat _ as a wildcard). */
+  const forgetChannel = (name: string) => {
+    const prefix = storedEnvKey(sinkEnvName(name, ''))
+    return deps.db.run(`DELETE FROM instance_secrets WHERE substr(name, 1, ?) = ?`, [prefix.length, prefix])
+  }
 
   const limited = async (c: Context, bucket: string) => {
     const ip = deps.clientIp(c.req.raw)
@@ -190,6 +269,9 @@ export function mountSetupRoutes(app: Hono, deps: Deps): void {
   const render = (c: Context, state: SetupState, csrf: string, requested?: string, error?: string) => {
     const draft = state.draft
     const reached = currentStep(draft)
+    if (requested === 'import' && ORDER.indexOf(reached) >= ORDER.indexOf('monitor')) {
+      return html(c, importPage({ csrf, completed: completedBefore('monitor', reached), imported: draft.imported ? [['Contents', importSummary(draft.imported)]] : undefined, error }))
+    }
     const step = (ORDER.includes(requested as SetupStep) && ORDER.indexOf(requested as SetupStep) <= ORDER.indexOf(reached) && requested !== 'claim' ? requested : reached) as SetupStep
     const completed = completedBefore(step, reached)
     const origin = new URL(c.req.url).origin
@@ -213,7 +295,12 @@ export function mountSetupRoutes(app: Hono, deps: Deps): void {
         const kind = (['http', 'push', 'tcp'] as const).find((k) => k === c.req.query('kind')) ?? saved?.kind ?? 'http'
         return html(c, monitorPage({ csrf, completed, kind, values: saved && (saved.kind ?? 'http') === kind ? monitorValues(saved) : {} }))
       }
-      default: return html(c, reviewPage({ csrf, completed, summary: draftSummary(draft), yaml: stringifyAdminYaml(draftConfig(draft)) }))
+      case 'channel': {
+        const saved = draft.channel ?? undefined
+        const type = (SINK_TYPES as readonly string[]).includes(c.req.query('type') ?? '') ? c.req.query('type') as SinkType : (saved?.sink.type ?? 'slack')
+        return html(c, channelPage({ csrf, completed, type, saved, sources: channelSources(saved?.sink), tested: c.req.query('tested') === '1', error }))
+      }
+      default: return html(c, reviewPage({ csrf, completed, summary: draftSummary(draft), yaml: stringifyAdminYaml(draftConfig(draft)), back: draft.imported ? '/setup?step=import' : undefined }))
     }
   }
 
@@ -410,7 +497,7 @@ export function mountSetupRoutes(app: Hono, deps: Deps): void {
     if ('response' in r) return r.response
     if (!r.state.draft.title) return c.redirect('/setup', 303)
     if (field(r.form, 'skip') === '1') {
-      await saveDraft(deps.db, { ...r.state.draft, monitor: null, monitorStepDone: true }, nowSeconds())
+      await saveDraft(deps.db, { ...r.state.draft, monitor: null, monitorStepDone: true, imported: undefined }, nowSeconds())
       return c.redirect('/setup', 303)
     }
     const kind = (['http', 'push', 'tcp'] as const).find((k) => k === field(r.form, 'kind')) ?? 'http'
@@ -439,8 +526,105 @@ export function mountSetupRoutes(app: Hono, deps: Deps): void {
       }
     }
     if (error || !monitor) return html(c, monitorPage({ csrf: r.csrf, completed: new Set(['claim', 'method', 'account', 'basics']), kind, values, error }), 400)
-    await saveDraft(deps.db, { ...r.state.draft, monitor, monitorStepDone: true }, nowSeconds())
+    await saveDraft(deps.db, { ...r.state.draft, monitor, monitorStepDone: true, imported: undefined }, nowSeconds())
     return c.redirect('/setup', 303)
+  })
+
+  // ── Alerts (optional) ────────────────────────────────────────────────────────────────────
+
+  app.post('/setup/channel', async (c) => {
+    const r = await claimedForm(c)
+    if ('response' in r) return r.response
+    const draft = r.state.draft
+    if (!draft.monitorStepDone || draft.imported) return c.redirect('/setup', 303)
+    const previous = draft.channel ?? undefined
+    if (field(r.form, 'skip') === '1') {
+      if (previous) await forgetChannel(previous.name)
+      await saveDraft(deps.db, { ...draft, channel: null, channelStepDone: true }, nowSeconds())
+      return c.redirect('/setup', 303)
+    }
+    const type = (SINK_TYPES as readonly string[]).includes(field(r.form, 'type')) ? field(r.form, 'type') as SinkType : 'slack'
+    const name = type
+    const existing = previous?.sink.type === type ? previous.sink : undefined
+    const values = Object.fromEntries(Object.entries(r.form).filter(([key, value]) => key !== 'csrf' && typeof value === 'string' && !SINK_FIELDS[type].fields.some((f) => f.secret && f.key === key) && key !== 'password' && key !== 'apiKey')) as Record<string, string>
+    let error: string
+    try {
+      const { sink, secrets } = sinkFromForm(r.form, name, existing)
+      const pending = Object.fromEntries(secrets.map((secret) => [secret.name, secret.value]))
+      try { validateAdminConfig(draftConfig({ ...draft, channel: { name, sink } }), (env) => pending[env] ?? deps.getEnv(env)) } catch (e) { throw new FormError((e as Error).message) }
+      const now = nowSeconds()
+      if (previous && previous.name !== name) await forgetChannel(previous.name)
+      await deps.db.batch([
+        ...secrets.map(({ name: env, value }) => ({
+          sql: `INSERT INTO instance_secrets (name, value, created_at) VALUES (?, ?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value, created_at = excluded.created_at`,
+          params: [storedEnvKey(env), value, now],
+        })),
+        ...secrets.map(({ name: env }) => ({ sql: `INSERT INTO audit_log (actor, action, target, before_json, after_json, at) VALUES ('setup', 'setting.store', ?, NULL, NULL, ?)`, params: [env, now] })),
+        { sql: `UPDATE setup_state SET draft_json = ?, updated_at = ? WHERE id = 1 AND status = 'pending'`, params: [JSON.stringify({ ...draft, channel: { name, sink } }), now] },
+      ])
+      return c.redirect('/setup?step=channel', 303)
+    } catch (e) { if (!(e instanceof FormError)) throw e; error = e.message }
+    const completed = new Set<SetupStep>(['claim', 'method', 'account', 'basics', 'monitor'])
+    return html(c, channelPage({ csrf: r.csrf, completed, type, saved: previous, sources: channelSources(previous?.sink), values, error }), 400)
+  })
+
+  app.post('/setup/channel/test', async (c) => {
+    const r = await claimedForm(c)
+    if ('response' in r) return r.response
+    const channel = r.state.draft.channel
+    if (!channel) return c.redirect('/setup?step=channel', 303)
+    try {
+      await sendSinkTest(channel.name, draftConfig(r.state.draft), deps.getEnv, deps.fetch, deps)
+      await deps.db.run(`INSERT INTO audit_log (actor, action, target, before_json, after_json, at) VALUES ('setup', 'sink.test', ?, NULL, NULL, ?)`, [`sink:${channel.name}`, nowSeconds()])
+      return c.redirect('/setup?step=channel&tested=1', 303)
+    } catch (error) {
+      const completed = new Set<SetupStep>(['claim', 'method', 'account', 'basics', 'monitor'])
+      return html(c, channelPage({ csrf: r.csrf, completed, type: channel.sink.type as SinkType, saved: channel, sources: channelSources(channel.sink), error: `The test alert failed: ${(error as Error).message}` }), 400)
+    }
+  })
+
+  app.post('/setup/channel/done', async (c) => {
+    const r = await claimedForm(c)
+    if ('response' in r) return r.response
+    if (r.state.draft.channel) await saveDraft(deps.db, { ...r.state.draft, channelStepDone: true }, nowSeconds())
+    return c.redirect('/setup', 303)
+  })
+
+  // ── Import (replaces the monitor and alert steps) ──────────────────────────────────────────
+
+  app.post('/setup/import', async (c) => {
+    const loaded = await pending(c)
+    if ('response' in loaded) return loaded.response
+    if (!loaded.session) return c.redirect('/setup', 303)
+    const form = (await c.req.parseBody().catch(() => ({}))) as Form
+    if (!sameOrigin(c, deps) || !timingSafeEqual(field(form, 'csrf'), loaded.session.csrf)) return c.text('Forbidden', 403, headers)
+    const draft = loaded.state.draft
+    if (!draft.title) return c.redirect('/setup', 303)
+    const completed = new Set<SetupStep>(['claim', 'method', 'account', 'basics'])
+    let yaml = typeof form.config === 'string' ? form.config : ''
+    const file = form.file
+    if (file instanceof File && file.size > 0) {
+      if (file.size > 262_144) return html(c, importPage({ csrf: loaded.session.csrf, completed, error: 'Configuration files must be 256 KB or smaller.' }), 400)
+      yaml = await file.text()
+    }
+    let imported: StatusPingConfig
+    try {
+      if (!yaml.trim()) throw new Error('Paste a configuration or choose a YAML file.')
+      imported = parseAdminYaml(yaml) as StatusPingConfig
+      try { validateAdminConfig(draftConfig({ ...draft, imported }), deps.getEnv) } catch (e) { throw new Error(locateProblems(yaml, (e as Error).message)) }
+    } catch (e) {
+      return html(c, importPage({ csrf: loaded.session.csrf, completed, yaml, error: (e as Error).message }), 400)
+    }
+    if (draft.channel) await forgetChannel(draft.channel.name)
+    await saveDraft(deps.db, { ...draft, imported, monitor: null, channel: null, monitorStepDone: true, channelStepDone: true }, nowSeconds())
+    return c.redirect('/setup?step=import', 303)
+  })
+
+  app.post('/setup/import/remove', async (c) => {
+    const r = await claimedForm(c)
+    if ('response' in r) return r.response
+    await saveDraft(deps.db, { ...r.state.draft, imported: undefined, monitorStepDone: false, channelStepDone: false }, nowSeconds())
+    return c.redirect('/setup?step=monitor', 303)
   })
 
   app.post('/setup/finish', async (c) => {
@@ -457,23 +641,7 @@ export function mountSetupRoutes(app: Hono, deps: Deps): void {
     }
     const email = draft.email!
     const method = draft.method ?? 'basic'
-    // One batch: config, account, session key, audit, and the end of setup mode. The status
-    // guard makes a double-submitted Finish a no-op instead of a second write.
-    await deps.db.batch([
-      { sql: `INSERT INTO admin_config (id, config_json, updated_at, updated_by) VALUES (1, ?, ?, ?)
-              ON CONFLICT(id) DO UPDATE SET config_json = excluded.config_json, updated_at = excluded.updated_at, updated_by = excluded.updated_by`,
-        params: [JSON.stringify(config), now, email] },
-      ...(method === 'basic'
-        ? [{ sql: `INSERT INTO local_users (email, password_hash, created_at) VALUES (?, ?, ?)
-              ON CONFLICT(email) DO UPDATE SET password_hash = excluded.password_hash`, params: [email, draft.passwordHash!, now] }]
-        : []),
-      { sql: `INSERT INTO instance_secrets (name, value, created_at) VALUES ('session_key', ?, ?)
-              ON CONFLICT(name) DO UPDATE SET value = excluded.value, created_at = excluded.created_at`, params: [randomToken(48), now] },
-      { sql: `INSERT INTO audit_log (actor, action, target, before_json, after_json, at) VALUES (?, 'setup.complete', 'setup', NULL, ?, ?)`,
-        params: [email, JSON.stringify({ method }), now] },
-      { sql: `UPDATE setup_state SET status = 'complete', code = NULL, session_key = NULL, draft_json = '{}', failed_attempts = 0, updated_at = ? WHERE id = 1 AND status = 'pending'`, params: [now] },
-    ])
-    await refreshAdminConfig(deps, now)
+    await completeSetup(deps, config, { email, method, passwordHash: draft.passwordHash }, now)
     deleteCookie(c, SETUP_COOKIE, { path: '/' })
     // Cloudflare Access signs people in on every request; the other methods use a session.
     if (method !== 'cloudflare-access') await setSession(c, deps, { email, groups: [], provider: method === 'oidc' ? 'oidc' : 'basic' })
@@ -483,7 +651,54 @@ export function mountSetupRoutes(app: Hono, deps: Deps): void {
       const token = await rotatePingToken(deps.db, MONITOR_IDS.push, email, now)
       if (token) return html(c, setupDonePage({ pingUrl: `${config.baseUrl.replace(/\/+$/, '')}/ping/${token}`, monitorName: draft.monitor.name }))
     }
+    // Imported scheduled jobs get their ping URLs in Settings, where each is shown once.
+    if (draft.imported && monitorRows(config).some((row) => row.monitor.kind === 'push' && !deps.pingTokens[row.monitor.id])) {
+      await syncConfig(deps, now)
+      return c.redirect('/admin/monitors?notice=setup-ping-urls', 303)
+    }
     return c.redirect('/', 303)
+  })
+
+  // ── Unattended setup: one call with the setup code, an administrator, and the YAML ─────────
+
+  app.post('/api/setup', async (c) => {
+    const json = (body: Record<string, unknown>, status: 200 | 201 | 400 | 401 | 404 | 429) => c.json(body, status, headers)
+    if (!deps.setupPending) return json({ error: 'Setup is already complete.' }, 404)
+    const state = await loadSetupState(deps.db)
+    if (!state || state.status !== 'pending') return json({ error: 'Setup is already complete.' }, 404)
+    if (await limited(c, 'setup')) return json({ error: 'Too many attempts. Wait a minute and try again.' }, 429)
+    let body: Record<string, unknown>
+    try { body = await c.req.json() } catch { return json({ error: 'Send a JSON body: { "code", "admin", "yaml" }.' }, 400) }
+    const usesEnvToken = Boolean(deps.getEnv('STATUSPING_SETUP_TOKEN'))
+    const expected = expectedSetupCode(state, deps.getEnv)
+    if (!expected || typeof body.code !== 'string' || !setupCodeMatches(body.code, expected)) {
+      await recordFailedClaim(deps.db, state, usesEnvToken, nowSeconds())
+      return json({ error: 'That setup code is not correct.' }, 401)
+    }
+    const email = typeof body.admin === 'string' ? body.admin.trim().toLowerCase() : ''
+    if (!EMAIL.test(email)) return json({ error: 'admin: give the first administrator\'s email address.' }, 400)
+    let parsed: unknown
+    const yaml = typeof body.yaml === 'string' ? body.yaml : undefined
+    try { parsed = yaml !== undefined ? parseAdminYaml(yaml) : body.config } catch (e) { return json({ error: (e as Error).message }, 400) }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return json({ error: 'Send the configuration as yaml (a string) or config (an object).' }, 400)
+    const input = parsed as AdminConfig
+    const provider: AuthProviderInput = input.access?.provider ?? { type: 'basic' }
+    // The same guards as the wizard, minus the interactive sign-in a script cannot do.
+    if (provider.type === 'cloudflare-access' && !deps.getEnv('CF_ACCESS_AUD')) return json({ error: 'CF_ACCESS_AUD is not set. Add it as a secret first.' }, 400)
+    if (provider.type === 'oidc') {
+      if (!deps.getEnv('OIDC_CLIENT_ID') || !deps.getEnv('OIDC_CLIENT_SECRET')) return json({ error: 'OIDC_CLIENT_ID and OIDC_CLIENT_SECRET must be set as secrets first.' }, 400)
+      try { await discoverIssuer(provider.issuer, deps.fetch) } catch (e) { return json({ error: `StatusPing could not read ${provider.issuer}/.well-known/openid-configuration (${(e as Error).message}).` }, 400) }
+    }
+    const admins = input.access?.admins
+    const next = { ...input, admin: true, access: { ...(input.access ?? {}), provider, admins: { ...(admins ?? {}), emails: [...new Set([email, ...(admins?.emails ?? [])])] } } } as AdminConfig
+    let config: AdminConfig
+    try { config = validateAdminConfig(next, deps.getEnv).config } catch (e) { return json({ error: yaml ? locateProblems(yaml, (e as Error).message) : (e as Error).message }, 400) }
+    const method = provider.type as SetupMethod
+    const password = method === 'basic' ? randomToken(24) : undefined
+    const now = nowSeconds()
+    await completeSetup(deps, config, { email, method, passwordHash: password ? await hashUserPassword(password) : undefined, actor: `${email} (api)` }, now)
+    const origin = new URL(c.req.url).origin
+    return json({ ok: true, admin: email, method, ...(password ? { password, note: 'Shown once. Sign in with it, then store it in a password manager.' } : {}), signIn: `${origin}/admin` }, 201)
   })
 
   // ── Reset: only exists while the STATUSPING_RESET_TOKEN secret is set ──────────────────────

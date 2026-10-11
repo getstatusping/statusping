@@ -1,0 +1,1523 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "StatusPing configuration",
+  "description": "The YAML edited in Settings → Configuration. Secrets are never written here: name them with { $env: NAME }.",
+  "type": "object",
+  "properties": {
+    "title": {
+      "type": "string"
+    },
+    "baseUrl": {
+      "type": "string",
+      "description": "The public address of this site."
+    },
+    "description": {
+      "type": "string"
+    },
+    "timezone": {
+      "type": "string",
+      "description": "IANA timezone. Default UTC."
+    },
+    "sinks": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/sink"
+      },
+      "description": "Alert channels by name."
+    },
+    "announcements": {
+      "type": "object",
+      "properties": {
+        "notify": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "notify"
+      ],
+      "additionalProperties": false
+    },
+    "subscribers": {
+      "type": "object",
+      "properties": {
+        "provider": {
+          "const": "resend"
+        },
+        "apiKey": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "$ref": "#/$defs/envRef"
+            }
+          ]
+        },
+        "from": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "provider",
+        "apiKey",
+        "from"
+      ],
+      "additionalProperties": false
+    },
+    "defaults": {
+      "type": "object",
+      "properties": {
+        "notify": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "grace": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": 0
+            },
+            {
+              "type": "string",
+              "pattern": "^\\d+(?:\\.\\d+)?(?:ms|s|m|h|d)?$"
+            }
+          ]
+        },
+        "renotifyEvery": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": 0
+            },
+            {
+              "type": "string",
+              "pattern": "^\\d+(?:\\.\\d+)?(?:ms|s|m|h|d)?$"
+            }
+          ]
+        },
+        "renotifyMax": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "groups": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "monitors": {
+            "type": "array",
+            "items": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/httpMonitor"
+                },
+                {
+                  "$ref": "#/$defs/pushMonitor"
+                },
+                {
+                  "$ref": "#/$defs/tcpMonitor"
+                }
+              ]
+            }
+          }
+        },
+        "required": [
+          "name",
+          "monitors"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "pages": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/page"
+      }
+    },
+    "maintenance": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/maintenance"
+      }
+    },
+    "home": {
+      "type": "string",
+      "description": "Slug of the page served at /."
+    },
+    "access": {
+      "$ref": "#/$defs/access"
+    },
+    "peer": {
+      "type": "object",
+      "properties": {
+        "pingUrl": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "$ref": "#/$defs/envRef"
+            }
+          ]
+        },
+        "heartbeatMonitor": {
+          "type": "string"
+        },
+        "healthMonitor": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "limits": {
+      "type": "object",
+      "properties": {
+        "maxChecksPerTick": {
+          "type": "integer"
+        },
+        "tickBudgetMs": {
+          "type": "integer"
+        },
+        "maxConfirmationsPerTick": {
+          "type": "integer"
+        },
+        "pingPerIpPerMinute": {
+          "type": "integer"
+        }
+      },
+      "additionalProperties": false
+    },
+    "admin": {
+      "type": "boolean",
+      "description": "Older configurations only; the admin is always on after setup."
+    },
+    "updates": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "manifestUrl": {
+          "type": "string"
+        },
+        "publicKey": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "title",
+    "baseUrl",
+    "groups"
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "envRef": {
+      "type": "object",
+      "description": "A secret kept in the environment, named here.",
+      "properties": {
+        "$env": {
+          "type": "string",
+          "description": "Name of a Worker secret or environment variable.",
+          "pattern": "^[A-Z][A-Z0-9_]{0,127}$"
+        },
+        "optional": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "$env"
+      ],
+      "additionalProperties": false
+    },
+    "confirmation": {
+      "type": "object",
+      "properties": {
+        "regions": {
+          "type": "integer",
+          "description": "Additional regional probes (1–3).",
+          "minimum": 1,
+          "maximum": 3
+        },
+        "quorum": {
+          "type": "integer",
+          "description": "Failed locations required to declare the monitor down.",
+          "minimum": 2
+        }
+      },
+      "required": [
+        "regions",
+        "quorum"
+      ],
+      "additionalProperties": false
+    },
+    "escalationStep": {
+      "type": "object",
+      "properties": {
+        "after": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": 0
+            },
+            {
+              "type": "string",
+              "pattern": "^\\d+(?:\\.\\d+)?(?:ms|s|m|h|d)?$"
+            }
+          ]
+        },
+        "notify": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "after",
+        "notify"
+      ],
+      "additionalProperties": false
+    },
+    "jsonAssertion": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Such as data.status or items[0].id."
+        },
+        "equals": {},
+        "notEquals": {},
+        "contains": {},
+        "lessThan": {
+          "type": "number"
+        },
+        "greaterThan": {
+          "type": "number"
+        },
+        "exists": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "additionalProperties": false
+    },
+    "pushMonitor": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Stable id used in URLs and history. Renaming it starts a new history.",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$"
+        },
+        "name": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "notify": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Alert channel names. Default: defaults.notify, or every channel."
+        },
+        "critical": {
+          "type": "boolean",
+          "description": "Also checked by the watchdog instance."
+        },
+        "renotifyEvery": {
+          "description": "Repeat an unresolved outage alert at this interval.",
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": 0
+            },
+            {
+              "type": "string",
+              "pattern": "^\\d+(?:\\.\\d+)?(?:ms|s|m|h|d)?$"
+            }
+          ]
+        },
+        "renotifyMax": {
+          "type": "integer",
+          "description": "Maximum repeated alerts for one incident.",
+          "minimum": 0
+        },
+        "escalation": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/escalationStep"
+          },
+          "description": "Acknowledgement-gated delivery steps."
+        },
+        "confirm": {
+          "$ref": "#/$defs/confirmation"
+        },
+        "kind": {
+          "const": "push"
+        },
+        "period": {
+          "description": "Expected time between pings.",
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": 0
+            },
+            {
+              "type": "string",
+              "pattern": "^\\d+(?:\\.\\d+)?(?:ms|s|m|h|d)?$"
+            }
+          ]
+        },
+        "schedule": {
+          "type": "string",
+          "description": "Cron expression, evaluated in tz."
+        },
+        "tz": {
+          "type": "string",
+          "description": "IANA timezone."
+        },
+        "grace": {
+          "description": "Extra time after the expected ping before alerting.",
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": 0
+            },
+            {
+              "type": "string",
+              "pattern": "^\\d+(?:\\.\\d+)?(?:ms|s|m|h|d)?$"
+            }
+          ]
+        },
+        "maxRuntime": {
+          "description": "Alert when a /start is not finished in time.",
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": 0
+            },
+            {
+              "type": "string",
+              "pattern": "^\\d+(?:\\.\\d+)?(?:ms|s|m|h|d)?$"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "kind"
+      ],
+      "additionalProperties": false
+    },
+    "httpMonitor": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Stable id used in URLs and history. Renaming it starts a new history.",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$"
+        },
+        "name": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "notify": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Alert channel names. Default: defaults.notify, or every channel."
+        },
+        "critical": {
+          "type": "boolean",
+          "description": "Also checked by the watchdog instance."
+        },
+        "renotifyEvery": {
+          "description": "Repeat an unresolved outage alert at this interval.",
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": 0
+            },
+            {
+              "type": "string",
+              "pattern": "^\\d+(?:\\.\\d+)?(?:ms|s|m|h|d)?$"
+            }
+          ]
+        },
+        "renotifyMax": {
+          "type": "integer",
+          "description": "Maximum repeated alerts for one incident.",
+          "minimum": 0
+        },
+        "escalation": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/escalationStep"
+          },
+          "description": "Acknowledgement-gated delivery steps."
+        },
+        "confirm": {
+          "$ref": "#/$defs/confirmation"
+        },
+        "kind": {
+          "const": "http"
+        },
+        "url": {
+          "description": "A URL, or { $env: NAME }.",
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "$ref": "#/$defs/envRef"
+            }
+          ]
+        },
+        "method": {
+          "type": "string"
+        },
+        "headers": {
+          "type": "object",
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "$ref": "#/$defs/envRef"
+              }
+            ]
+          },
+          "description": "Credential-bearing values must be { $env: NAME }."
+        },
+        "body": {
+          "type": "string"
+        },
+        "interval": {
+          "description": "Whole minutes. Default 1m.",
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": 0
+            },
+            {
+              "type": "string",
+              "pattern": "^\\d+(?:\\.\\d+)?(?:ms|s|m|h|d)?$"
+            }
+          ]
+        },
+        "timeout": {
+          "description": "Default 10s, at most 30s.",
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": 0
+            },
+            {
+              "type": "string",
+              "pattern": "^\\d+(?:\\.\\d+)?(?:ms|s|m|h|d)?$"
+            }
+          ]
+        },
+        "expectStatus": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "integer"
+              }
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "description": "Such as [200, 204] or \"200-399\"."
+        },
+        "keyword": {
+          "type": "string",
+          "description": "The response must contain this text."
+        },
+        "invertKeyword": {
+          "type": "boolean",
+          "description": "The response must not contain the keyword."
+        },
+        "json": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/jsonAssertion"
+          }
+        },
+        "retries": {
+          "type": "integer",
+          "description": "Failed checks tolerated before alerting.",
+          "minimum": 0
+        },
+        "sslExpiry": {
+          "anyOf": [
+            {
+              "const": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "warnDays": {
+                  "type": "array",
+                  "items": {
+                    "type": "integer"
+                  }
+                }
+              },
+              "additionalProperties": false
+            }
+          ]
+        },
+        "domainExpiry": {
+          "type": "object",
+          "properties": {
+            "warnDays": {
+              "type": "array",
+              "items": {
+                "type": "integer"
+              }
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "kind",
+        "url"
+      ],
+      "additionalProperties": false
+    },
+    "tcpMonitor": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Stable id used in URLs and history. Renaming it starts a new history.",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$"
+        },
+        "name": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "notify": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Alert channel names. Default: defaults.notify, or every channel."
+        },
+        "critical": {
+          "type": "boolean",
+          "description": "Also checked by the watchdog instance."
+        },
+        "renotifyEvery": {
+          "description": "Repeat an unresolved outage alert at this interval.",
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": 0
+            },
+            {
+              "type": "string",
+              "pattern": "^\\d+(?:\\.\\d+)?(?:ms|s|m|h|d)?$"
+            }
+          ]
+        },
+        "renotifyMax": {
+          "type": "integer",
+          "description": "Maximum repeated alerts for one incident.",
+          "minimum": 0
+        },
+        "escalation": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/escalationStep"
+          },
+          "description": "Acknowledgement-gated delivery steps."
+        },
+        "confirm": {
+          "$ref": "#/$defs/confirmation"
+        },
+        "kind": {
+          "const": "tcp"
+        },
+        "host": {
+          "type": "string"
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "interval": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": 0
+            },
+            {
+              "type": "string",
+              "pattern": "^\\d+(?:\\.\\d+)?(?:ms|s|m|h|d)?$"
+            }
+          ]
+        },
+        "timeout": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": 0
+            },
+            {
+              "type": "string",
+              "pattern": "^\\d+(?:\\.\\d+)?(?:ms|s|m|h|d)?$"
+            }
+          ]
+        },
+        "retries": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "kind",
+        "host",
+        "port"
+      ],
+      "additionalProperties": false
+    },
+    "smtp": {
+      "type": "object",
+      "properties": {
+        "provider": {
+          "const": "smtp"
+        },
+        "host": {
+          "type": "string"
+        },
+        "port": {
+          "type": "integer",
+          "description": "587 for STARTTLS, 465 for TLS."
+        },
+        "security": {
+          "enum": [
+            "tls",
+            "starttls"
+          ]
+        },
+        "username": {
+          "type": "string"
+        },
+        "password": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "$ref": "#/$defs/envRef"
+            }
+          ]
+        },
+        "from": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "provider",
+        "host",
+        "port",
+        "security",
+        "from"
+      ],
+      "additionalProperties": false
+    },
+    "sink": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "pushover"
+            },
+            "appToken": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "$ref": "#/$defs/envRef"
+                }
+              ]
+            },
+            "userKey": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "$ref": "#/$defs/envRef"
+                }
+              ]
+            },
+            "device": {
+              "type": "string"
+            },
+            "sound": {
+              "type": "string"
+            },
+            "emergency": {
+              "type": "boolean",
+              "description": "Send down alerts with emergency priority."
+            }
+          },
+          "required": [
+            "type",
+            "appToken",
+            "userKey"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "ntfy"
+            },
+            "topic": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "$ref": "#/$defs/envRef"
+                }
+              ]
+            },
+            "server": {
+              "type": "string",
+              "description": "Default https://ntfy.sh."
+            },
+            "token": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "$ref": "#/$defs/envRef"
+                }
+              ]
+            }
+          },
+          "required": [
+            "type",
+            "topic"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "telegram"
+            },
+            "botToken": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "$ref": "#/$defs/envRef"
+                }
+              ]
+            },
+            "chatId": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "$ref": "#/$defs/envRef"
+                }
+              ]
+            }
+          },
+          "required": [
+            "type",
+            "botToken",
+            "chatId"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "webhook"
+            },
+            "url": {
+              "description": "A URL, or { $env: NAME } when the URL carries a credential.",
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "$ref": "#/$defs/envRef"
+                }
+              ]
+            },
+            "headers": {
+              "type": "object",
+              "additionalProperties": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "$ref": "#/$defs/envRef"
+                  }
+                ]
+              },
+              "description": "Credential-bearing values must be { $env: NAME }."
+            },
+            "secret": {
+              "description": "HMAC-SHA256 signing secret, sent as X-StatusPing-Signature.",
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "$ref": "#/$defs/envRef"
+                }
+              ]
+            }
+          },
+          "required": [
+            "type",
+            "url"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "discord"
+            },
+            "webhookUrl": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "$ref": "#/$defs/envRef"
+                }
+              ]
+            }
+          },
+          "required": [
+            "type",
+            "webhookUrl"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "slack"
+            },
+            "webhookUrl": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "$ref": "#/$defs/envRef"
+                }
+              ]
+            }
+          },
+          "required": [
+            "type",
+            "webhookUrl"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "email"
+            },
+            "to": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Recipients."
+            },
+            "via": {
+              "anyOf": [
+                {
+                  "const": "cloudflare"
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "provider": {
+                      "const": "resend"
+                    },
+                    "apiKey": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "$ref": "#/$defs/envRef"
+                        }
+                      ]
+                    },
+                    "from": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "provider",
+                    "apiKey",
+                    "from"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "$ref": "#/$defs/smtp"
+                }
+              ]
+            }
+          },
+          "required": [
+            "type",
+            "to",
+            "via"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "teams"
+            },
+            "webhookUrl": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "$ref": "#/$defs/envRef"
+                }
+              ]
+            }
+          },
+          "required": [
+            "type",
+            "webhookUrl"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "googlechat"
+            },
+            "webhookUrl": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "$ref": "#/$defs/envRef"
+                }
+              ]
+            }
+          },
+          "required": [
+            "type",
+            "webhookUrl"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "mattermost"
+            },
+            "webhookUrl": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "$ref": "#/$defs/envRef"
+                }
+              ]
+            }
+          },
+          "required": [
+            "type",
+            "webhookUrl"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "matrix"
+            },
+            "homeserver": {
+              "type": "string",
+              "description": "Such as https://matrix.org."
+            },
+            "accessToken": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "$ref": "#/$defs/envRef"
+                }
+              ]
+            },
+            "roomId": {
+              "type": "string",
+              "description": "Such as !abc123:matrix.org."
+            }
+          },
+          "required": [
+            "type",
+            "homeserver",
+            "accessToken",
+            "roomId"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "gotify"
+            },
+            "server": {
+              "type": "string"
+            },
+            "token": {
+              "description": "An application token.",
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "$ref": "#/$defs/envRef"
+                }
+              ]
+            }
+          },
+          "required": [
+            "type",
+            "server",
+            "token"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "pagerduty"
+            },
+            "routingKey": {
+              "description": "Events API v2 integration key.",
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "$ref": "#/$defs/envRef"
+                }
+              ]
+            }
+          },
+          "required": [
+            "type",
+            "routingKey"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "page": {
+      "type": "object",
+      "properties": {
+        "slug": {
+          "type": "string",
+          "pattern": "^[a-z0-9-]+$"
+        },
+        "title": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "access": {
+          "anyOf": [
+            {
+              "const": "public"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "emails": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "groups": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "teams": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "additionalProperties": false
+            }
+          ],
+          "description": "Default public."
+        },
+        "show": {
+          "anyOf": [
+            {
+              "const": "all"
+            },
+            {
+              "type": "array",
+              "items": {
+                "enum": [
+                  "uptime",
+                  "schedule",
+                  "incidents",
+                  "errors",
+                  "pings",
+                  "logs",
+                  "checks",
+                  "response-time",
+                  "target"
+                ]
+              }
+            }
+          ]
+        },
+        "monitors": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Monitor ids, group:<name>, or * for every monitor."
+        }
+      },
+      "required": [
+        "slug",
+        "title",
+        "monitors"
+      ],
+      "additionalProperties": false
+    },
+    "maintenance": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "title": {
+              "type": "string"
+            },
+            "monitors": {
+              "anyOf": [
+                {
+                  "const": "*"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ]
+            },
+            "excludeFromUptime": {
+              "type": "boolean"
+            },
+            "start": {
+              "type": "string",
+              "description": "ISO-8601 with a timezone."
+            },
+            "end": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "title",
+            "monitors",
+            "start",
+            "end"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "title": {
+              "type": "string"
+            },
+            "monitors": {
+              "anyOf": [
+                {
+                  "const": "*"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ]
+            },
+            "excludeFromUptime": {
+              "type": "boolean"
+            },
+            "schedule": {
+              "type": "string",
+              "description": "Cron expression."
+            },
+            "tz": {
+              "type": "string"
+            },
+            "duration": {
+              "anyOf": [
+                {
+                  "type": "number",
+                  "minimum": 0
+                },
+                {
+                  "type": "string",
+                  "pattern": "^\\d+(?:\\.\\d+)?(?:ms|s|m|h|d)?$"
+                }
+              ]
+            }
+          },
+          "required": [
+            "title",
+            "monitors",
+            "schedule",
+            "duration"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "access": {
+      "type": "object",
+      "properties": {
+        "provider": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "const": "basic"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "const": "cloudflare-access"
+                },
+                "teamDomain": {
+                  "type": "string",
+                  "description": "Such as yourteam.cloudflareaccess.com."
+                },
+                "audience": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "$ref": "#/$defs/envRef"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "type",
+                "teamDomain",
+                "audience"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "const": "oidc"
+                },
+                "issuer": {
+                  "type": "string"
+                },
+                "clientId": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "$ref": "#/$defs/envRef"
+                    }
+                  ]
+                },
+                "clientSecret": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "$ref": "#/$defs/envRef"
+                    }
+                  ]
+                },
+                "groupsClaim": {
+                  "type": "string",
+                  "description": "Default groups."
+                },
+                "scopes": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "trustUnverifiedEmail": {
+                  "type": "boolean",
+                  "description": "Only for providers where you control every email."
+                }
+              },
+              "required": [
+                "type",
+                "issuer",
+                "clientId",
+                "clientSecret"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        },
+        "teams": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "emails": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Emails, or *@domain patterns."
+              },
+              "groups": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "SSO groups (OpenID Connect only)."
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "admins": {
+          "type": "object",
+          "description": "Who can open Settings.",
+          "properties": {
+            "emails": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "groups": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "teams": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        "sessionHours": {
+          "type": "number",
+          "description": "Default 12."
+        }
+      },
+      "required": [
+        "provider"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

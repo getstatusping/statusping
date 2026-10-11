@@ -22,6 +22,7 @@
       "package-lock.json",
       "package.json",
       "statusping.release.json",
+      "statusping.schema.json",
       "tsconfig.json",
       "vitest.config.ts"
     ],

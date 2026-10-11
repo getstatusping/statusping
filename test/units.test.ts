@@ -110,7 +110,7 @@ describe('config validation', () => {
       'defaults.renotifyEvery must be greater than 0s',
       'defaults.renotifyMax must be a non-negative integer',
       'sinks.hook.url: must be http(s)',
-      'sinks.hook.headers: all values must be strings',
+      'sinks.hook.headers: values must be strings or { $env: NAME }',
     ]))
   })
 

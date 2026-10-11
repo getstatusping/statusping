@@ -1,4 +1,4 @@
-import { activeMonitors } from './config.ts'
+import { activeMonitors, type HttpMonitor } from './config.ts'
 import type { Statement } from './db/types.ts'
 import type { Deps } from './deps.ts'
 import { sha256Hex } from './util/crypto.ts'
@@ -7,6 +7,13 @@ import { sha256Hex } from './util/crypto.ts'
 function scheduleKey(configJson: string): string {
   const c = JSON.parse(configJson) as Record<string, unknown>
   return JSON.stringify([c.period, c.schedule, c.tz, c.grace, c.maxRuntime])
+}
+
+/** Values that came from the environment are never written to the database. */
+function withoutSecrets<T extends Pick<HttpMonitor, 'url' | 'headers' | 'secretUrl' | 'secretHeaders'>>(m: T): T {
+  if (!m.secretUrl && !m.secretHeaders?.length) return m
+  const headers = Object.fromEntries(Object.entries(m.headers).map(([key, value]) => [key, m.secretHeaders?.includes(key) ? '[secret]' : value]))
+  return { ...m, url: m.secretUrl ? '[secret]' : m.url, headers }
 }
 
 /**
@@ -40,7 +47,7 @@ export async function syncConfig(deps: Deps, now: number): Promise<boolean> {
   for (const m of config.monitors) {
     const isActive = active.has(m.id)
     const { id, kind, name, group, order, ...rest } = m
-    const configJson = JSON.stringify(rest)
+    const configJson = JSON.stringify(m.kind === 'http' ? withoutSecrets(rest as Omit<HttpMonitor, 'id' | 'kind' | 'name' | 'group' | 'order'>) : rest)
     const prev = existing.get(id)
     statements.push(
       {
@@ -106,7 +113,7 @@ export async function syncConfig(deps: Deps, now: number): Promise<boolean> {
 
   const missingTokens = config.monitors.filter((m) => m.kind === 'push' && active.has(m.id) && !tokenHashes[m.id])
   if (missingTokens.length) {
-    deps.log('warn', 'push monitors without a ping token (add them to PING_TOKENS)', {
+    deps.log('warn', 'push monitors without a ping URL yet (create one in Settings → Monitors, or add them to PING_TOKENS)', {
       monitors: missingTokens.map((m) => m.id),
     })
   }

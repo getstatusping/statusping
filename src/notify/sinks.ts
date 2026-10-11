@@ -169,7 +169,13 @@ function webhook(name: string, cfg: Extract<SinkInput, { type: 'webhook' }>, get
     type: 'webhook',
     async send(msg, fetchFn) {
       const secret = cfg.secret ? resolveSecret(cfg.secret, getEnv) : undefined
-      await withScrub([secret], async () => {
+      const url = resolveSecret(cfg.url, getEnv)!
+      const extra = Object.entries(cfg.headers ?? {}).flatMap(([key, value]) => {
+        const resolved = resolveSecret(value, getEnv)
+        return resolved === undefined ? [] : [[key, resolved] as const]
+      })
+      const scrub = [secret, ...(typeof cfg.url === 'string' ? [] : [url]), ...extra.filter(([key]) => typeof cfg.headers![key] !== 'string').map(([, value]) => value)]
+      await withScrub(scrub, async () => {
         const body = JSON.stringify({
           event: msg.kind,
           title: msg.title,
@@ -180,9 +186,9 @@ function webhook(name: string, cfg: Extract<SinkInput, { type: 'webhook' }>, get
           url: msg.url,
           ...(msg.acknowledgeUrl ? { acknowledgeUrl: msg.acknowledgeUrl } : {}),
         })
-        const headers: Record<string, string> = { ...cfg.headers, 'content-type': 'application/json' }
+        const headers: Record<string, string> = { ...Object.fromEntries(extra), 'content-type': 'application/json' }
         if (secret) headers['x-statusping-signature'] = `sha256=${await hmacSha256Hex(secret, body)}`
-        const res = await fetchFn(cfg.url, { method: 'POST', headers, body })
+        const res = await fetchFn(url, { method: 'POST', headers, body })
         await ensureOk(res, 'webhook')
       })
     },

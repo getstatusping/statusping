@@ -13,7 +13,7 @@ import type { CertificateExpiryProvider } from './expiry/types.ts'
 import type { TcpConnector } from './evaluate/tcp.ts'
 import type { ConfirmationProbe } from './confirmation.ts'
 import type { CloudflareEmailSender } from './notify/sinks.ts'
-import { loadAdminConfig, seedAdminConfig } from './admin/service.ts'
+import { currentRevision, ensureBaselineRevision, loadAdminConfig, seedAdminConfig } from './admin/service.ts'
 import { beginSetup, loadSetupState } from './setup/state.ts'
 import { validateAdminConfig } from './admin/security.ts'
 import { normalizeClientIp } from './rate-limit.ts'
@@ -60,6 +60,11 @@ export interface Deps {
   clientIp: (request: Request) => string | null
   /** Hosted tenant plan policy from STATUSPING_TENANT (plan 005); undefined when self-hosted. */
   tenant?: TenantPolicy
+  /** The newest saved configuration revision (0 before the first). */
+  configRevision: number
+  /** What the last refreshAdminConfig() saw; an unchanged stamp skips reloading and re-validating. */
+  configStamp?: string
+  configLoaded: boolean
 }
 
 export interface CreateDepsOptions {
@@ -122,6 +127,8 @@ export function createDeps(opts: CreateDepsOptions): Deps {
     clientIp: opts.clientIp ?? (() => null),
     log: opts.log ?? consoleLogger,
     tenant,
+    configRevision: 0,
+    configLoaded: false,
   }
   return deps
 }
@@ -147,35 +154,66 @@ async function loadStoredEnv(deps: Deps): Promise<void> {
   deps.storedEnv = stored
 }
 
+/** One cheap read that changes whenever the configuration, setup state, or stored settings do. */
+async function configStamp(deps: Deps): Promise<{ stamp: string; revision: number }> {
+  const row = await deps.db.first<{ rev: number; setup: string | null; cfg: string | null; env: string }>(
+    `SELECT (SELECT COALESCE(MAX(id), 0) FROM config_revisions) AS rev,
+            (SELECT status || ':' || updated_at FROM setup_state WHERE id = 1) AS setup,
+            (SELECT updated_at || ':' || updated_by || ':' || length(config_json) FROM admin_config WHERE id = 1) AS cfg,
+            (SELECT COUNT(*) || ':' || COALESCE(MAX(created_at), 0) || ':' || COALESCE(SUM(length(value)), 0) FROM instance_secrets WHERE substr(name, 1, 4) = 'env:') AS env`,
+  )
+  return { stamp: JSON.stringify([row?.rev, row?.setup, row?.cfg, row?.env, deps.adminEnabled]), revision: row?.rev ?? 0 }
+}
+
 /**
  * Applies the instance's setup state, then loads the one DB-backed configuration when admin mode
  * is on: either `admin: true` in config-as-code, or a finished setup wizard. While setup is
  * pending, nothing is loaded. With neither, statusping.config.ts / STATUSPING_CONFIG stays
- * authoritative. Call after migrations, before work that reads `deps.config`.
+ * authoritative. Call after migrations, before work that reads `deps.config`. Nothing is reloaded
+ * or re-validated while the revision, setup state and stored settings are unchanged.
  */
 export async function refreshAdminConfig(deps: Deps, now: number): Promise<boolean> {
+  const { stamp, revision } = await configStamp(deps)
+  if (stamp === deps.configStamp) return deps.configLoaded
+  deps.configRevision = revision
+  const loaded = await loadAdminState(deps, now)
+  deps.configLoaded = loaded.loaded
+  if (loaded.wrote) deps.configRevision = await currentRevision(deps.db)
+  // A refresh that wrote (a seed, a baseline revision) is read again next time.
+  deps.configStamp = loaded.wrote ? undefined : stamp
+  return loaded.loaded
+}
+
+async function loadAdminState(deps: Deps, now: number): Promise<{ loaded: boolean; wrote: boolean }> {
   await loadStoredEnv(deps)
   let setup = await loadSetupState(deps.db)
+  let wrote = false
   if (!setup && deps.tenant && deps.hasRealEnv('STATUSPING_SETUP_TOKEN')) {
     // A freshly provisioned hosted tenant starts in the setup wizard; the owner claims it with
     // the STATUSPING_SETUP_TOKEN the platform issued at sign-up (plan 005).
     await beginSetup(deps.db, 'platform', now)
     setup = await loadSetupState(deps.db)
+    wrote = true
   }
   deps.setupPending = setup?.status === 'pending'
-  if (deps.setupPending) return false
+  if (deps.setupPending) return { loaded: false, wrote }
   if (setup?.status === 'complete') deps.adminEnabled = true
-  if (!deps.adminEnabled) return false
+  if (!deps.adminEnabled) return { loaded: false, wrote }
   let stored = await loadAdminConfig(deps.db)
   if (!stored) {
     // Validate before persisting: literal credentials never enter admin_config or audit_log.
     const validated = validateAdminConfig({ ...deps.configInput, admin: true }, deps.getEnv, 'load')
     await seedAdminConfig(deps.db, validated.config, 'config-seed', now)
     stored = await loadAdminConfig(deps.db)
+    wrote = true
   }
   if (!stored) throw new Error('admin config seed was not stored')
+  if (deps.configRevision === 0) {
+    await ensureBaselineRevision(deps.db)
+    wrote = true
+  }
   const validated = validateAdminConfig(stored.config, deps.getEnv, 'load')
   deps.config = validated.normalized
   deps.configInput = validated.config
-  return true
+  return { loaded: true, wrote }
 }

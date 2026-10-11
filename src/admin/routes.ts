@@ -10,12 +10,19 @@ import {
   removeMonitor, removePage, removeSink, SINK_FIELDS, sinkEnvName, sinkFromForm, type SinkType, text,
 } from './forms.ts'
 import {
-  accessPage, activityPage, mcpPage, mcpTokenCreated, channelForm, channelsPage, generalPage, configurationPage, importPreview, monitorForm, monitorsPage,
-  pageForm, pagesPage, pingUrlPage, type SecretSource,
+  accessPage, activityPage, mcpPage, mcpTokenCreated, channelForm, channelsPage, diffBlock, generalPage, configurationPage, importPreview, monitorForm, monitorsPage,
+  pageForm, pagesPage, pingUrlPage, revisionPage, type SecretSource,
 } from './ui.ts'
-import { appendAudit, listAudit, loadAdminConfig, rotatePingToken, saveAdminConfig, sendSinkTest } from './service.ts'
-import { type AdminConfig, authorizeAdminToken, canAdmin, issueCsrfToken, validateAdminConfig, verifyCsrfToken } from './security.ts'
-import { parseAdminYaml, stringifyAdminYaml } from './yaml.ts'
+import {
+  appendAudit, currentRevision, currentYamlText, listAudit, listRevisions, loadAdminConfig, loadRevision, RevisionConflict, rotatePingToken, saveAdminConfig,
+  type SaveOptions, sendSinkTest,
+} from './service.ts'
+import { type AdminConfig, authorizeAdminToken, canAdmin, envReferences, issueCsrfToken, validateAdminConfig, verifyCsrfToken } from './security.ts'
+import { exportAdminYaml, locateProblems, parseAdminYaml, stringifyAdminYaml } from './yaml.ts'
+import { configSchema } from './config-schema.ts'
+import { lineDiff, withContext } from './diff.ts'
+import { syncConfig } from '../sync.ts'
+import { readRecoverySession } from '../setup/recovery.ts'
 import { beginSetup } from '../setup/state.ts'
 import { deleteCookie } from 'hono/cookie'
 import { checkForUpdate } from '../updates.ts'
@@ -42,6 +49,9 @@ const NOTICES: Record<string, string> = {
   'test-sent': 'Test alert sent.',
   'admins-saved': 'Administrators saved.',
   imported: 'Configuration imported.',
+  restored: 'Earlier version restored.',
+  'setup-ping-urls': 'Setup is complete. Scheduled jobs marked "No ping URL yet" need one: open each and create its ping URL.',
+  recovered: 'Recovery session started. Set up a sign-in method that works; the rest of Settings opens once you switch.',
   'updates-saved': 'Update checks saved.',
   'method-saved': 'Saved.',
   'method-started': 'Set up the new method below. The current one keeps working until you switch.',
@@ -65,13 +75,24 @@ const providerSummary = (config: AdminConfig) => {
   return `Single sign-on with ${p.issuer}.`
 }
 
+const CONFLICT = 'Someone else changed the configuration after you opened this page, so nothing was saved. The page now shows the latest settings with your changes; save again to apply them, or see Configuration → History for what changed.'
+
+/** The revision a page was rendered from, per request; written into every form beside the CSRF value. */
+const formRevision = new WeakMap<Request, number>()
+
 /** Adds the browser Settings pages and the bearer-token JSON API. */
 export function mountAdminRoutes(app: Hono, deps: Deps): void {
   const enabled = () => deps.adminEnabled
   const browserAdmin = async (c: Context) => {
     if (!enabled()) return null
     const viewer = await currentViewer(c, deps)
-    if (!viewer) return signInResponse(c, deps)
+    if (!viewer) {
+      // Break-glass recovery (/setup/recover) may only change the sign-in method.
+      const recovery = await readRecoverySession(c, deps)
+      if (recovery && c.req.path.startsWith('/admin/access/method')) return recovery
+      if (recovery) return c.redirect('/admin/access/method', 303)
+      return signInResponse(c, deps)
+    }
     if (!canAdmin(viewer, deps.config)) return c.text('Forbidden', 403, noStore)
     return viewer
   }
@@ -94,16 +115,22 @@ export function mountAdminRoutes(app: Hono, deps: Deps): void {
     return { viewer, csrf, config: await storedConfig(), notice: NOTICES[c.req.query('notice') ?? ''] }
   }
 
-  /** A same-origin form post with a valid CSRF value, plus a fresh value to re-render with. */
-  const post = async (c: Context): Promise<Response | { viewer: Viewer; form: Form; csrf: string; config: AdminConfig }> => {
+  /**
+   * A same-origin form post with a valid CSRF value, plus a fresh value to re-render with. `base`
+   * is the revision the form was rendered from; a save refuses to overwrite a newer one.
+   */
+  const post = async (c: Context): Promise<Response | Post> => {
     const viewer = await browserAdmin(c)
     if (viewer === null) return notFound(c)
     if (viewer instanceof Response) return viewer
     if (!sameOrigin(c, deps)) return c.text('Forbidden', 403, noStore)
     const form = await c.req.parseBody({ all: true }).catch(() => ({})) as Form
     if (!(await verifyCsrfToken(deps.db, c, form.csrf, nowSeconds()))) return c.text('Forbidden', 403, noStore)
-    return { viewer, form, csrf: (await issueCsrfToken(deps.db, c, nowSeconds())) ?? '', config: await storedConfig() }
+    const base = /^\d+$/.test(text(form, 'revision')) ? Number(text(form, 'revision')) : undefined
+    if (base !== undefined) formRevision.set(c.req.raw, base)
+    return { viewer, form, csrf: (await issueCsrfToken(deps.db, c, nowSeconds())) ?? '', config: await storedConfig(), base, c }
   }
+  type Post = { viewer: Viewer; form: Form; csrf: string; config: AdminConfig; base?: number; c: Context }
 
   const done = (c: Context, path: string, notice: string) => {
     const res = c.redirect(`${path}?notice=${notice}`, 303)
@@ -115,11 +142,17 @@ export function mountAdminRoutes(app: Hono, deps: Deps): void {
    * Validates and saves a whole new config. Refuses changes that would lock the saving
    * administrator out. Returns an error message for the form, or null when saved.
    */
-  const save = async (viewer: Viewer, next: AdminConfig, secrets: Array<{ name: string; value: string }> = []): Promise<string | null> => {
+  const save = async (p: Post, next: AdminConfig, secrets: Array<{ name: string; value: string }> = [], opts: SaveOptions = {}): Promise<string | null> => {
+    const viewer = p.viewer
     let normalized
-    try { normalized = validateAdminConfig({ ...next, admin: true }, deps.getEnv).normalized } catch (error) { return (error as Error).message }
+    try { normalized = validateAdminConfig({ ...next, admin: true }, deps.getEnv).normalized } catch (error) { return opts.yaml ? locateProblems(opts.yaml, (error as Error).message) : (error as Error).message }
     if (!canAdmin(viewer, normalized)) return 'This change would remove your own access to Settings. Ask another administrator to make it.'
     const now = nowSeconds()
+    // Checked before secrets are stored, so a refused save leaves nothing behind.
+    if (p.base !== undefined) {
+      const current = await currentRevision(deps.db)
+      if (current !== p.base) { formRevision.set(p.c.req.raw, current); return CONFLICT }
+    }
     if (secrets.length) {
       await deps.db.batch([
         ...secrets.map(({ name, value }) => ({
@@ -133,13 +166,34 @@ export function mountAdminRoutes(app: Hono, deps: Deps): void {
       ])
     }
     try {
-      await saveAdminConfig(deps.db, { ...next, admin: true }, viewer.email, now, deps.getEnv)
-    } catch (error) { return (error as Error).message }
+      await saveAdminConfig(deps.db, { ...next, admin: true }, viewer.email, now, deps.getEnv, { ...opts, base: p.base })
+    } catch (error) {
+      if (error instanceof RevisionConflict) { formRevision.set(p.c.req.raw, error.current); return CONFLICT }
+      return (error as Error).message
+    }
     await refreshAdminConfig(deps, now)
+    formRevision.set(p.c.req.raw, deps.configRevision)
     return null
   }
 
-  const html = (c: Context, body: string, status: 200 | 400 = 200) => c.html(body, status, noStore)
+  /** Warns when Settings is open at a different address than the configured site address. */
+  const addressBanner = (c: Context): string => {
+    let configured: string
+    try { configured = new URL(deps.config.baseUrl).origin } catch { return '' }
+    const here = new URL(c.req.url).origin
+    if (configured === here) return ''
+    const oidc = deps.config.access?.provider.type === 'oidc'
+    const esc = (v: string) => v.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+    return `<div class="alert warning banner" role="status"><strong>This site is open at ${esc(here)}, but its address is set to ${esc(configured)}.</strong>
+Alert links, ping URLs and sign-in callbacks use ${esc(configured)}. If the site has moved, <a href="/admin">change the address</a>.${oidc ? ` Single sign-on also needs the new callback URL, <code>${esc(here)}/auth/callback</code>, registered with your identity provider.` : ''}</div>`
+  }
+
+  /** Every form carries the revision it was rendered from, next to its CSRF value. */
+  const html = (c: Context, body: string, status: 200 | 400 = 200) => {
+    const revision = formRevision.get(c.req.raw) ?? deps.configRevision
+    const page = body.replace(/(<input type="hidden" name="csrf" value="[^"]*">)/g, `$1<input type="hidden" name="revision" value="${revision}">`).replace('<!--banner-->', addressBanner(c))
+    return c.html(page, status, noStore)
+  }
   const formValues = (form: Form): Record<string, string> =>
     Object.fromEntries(Object.entries(form).filter(([key, value]) => key !== 'csrf' && typeof value === 'string').map(([key, value]) => [key, value as string]))
 
@@ -166,7 +220,7 @@ export function mountAdminRoutes(app: Hono, deps: Deps): void {
     if (!title) error = 'Enter a site title.'
     else if (!isValidTimeZone(timezone)) error = `"${timezone}" is not a recognised timezone.`
     const next: AdminConfig = { ...p.config, title, baseUrl, timezone }
-    error ??= (await save(p.viewer, next)) ?? undefined
+    error ??= (await save(p, next)) ?? undefined
     if (error) return general(c, { ...p, config: next }, error, 400)
     return done(c, '/admin', 'general-saved')
   })
@@ -177,7 +231,7 @@ export function mountAdminRoutes(app: Hono, deps: Deps): void {
     const next: AdminConfig = { ...p.config }
     if (text(p.form, 'updates') === '1') next.updates = { ...(p.config.updates ?? {}), enabled: true }
     else delete next.updates
-    const error = await save(p.viewer, next)
+    const error = await save(p, next)
     if (error) return general(c, p, error, 400)
     return done(c, '/admin', 'updates-saved')
   })
@@ -196,10 +250,13 @@ export function mountAdminRoutes(app: Hono, deps: Deps): void {
   const groupNames = (config: AdminConfig) => (config.groups ?? []).map((g) => g.name)
   const sinkNames = (config: AdminConfig) => Object.keys(config.sinks ?? {})
 
+  /** Push monitors that cannot be pinged yet: no token from PING_TOKENS and none created here. */
+  const withoutPingUrl = async () => new Set((await deps.db.all<{ id: string }>(`SELECT id FROM monitors WHERE kind = 'push' AND paused = 0 AND ping_token_hash IS NULL`)).map((r) => r.id))
+
   app.get('/admin/monitors', async (c) => {
     const v = await view(c)
     if (v instanceof Response) return v
-    return html(c, monitorsPage({ viewer: v.viewer, rows: monitorRows(v.config), notice: v.notice }))
+    return html(c, monitorsPage({ viewer: v.viewer, rows: monitorRows(v.config), withoutPingUrl: await withoutPingUrl(), notice: v.notice }))
   })
 
   app.get('/admin/monitors/new', async (c) => {
@@ -215,7 +272,13 @@ export function mountAdminRoutes(app: Hono, deps: Deps): void {
     let error: string
     try {
       const monitor = monitorFromForm(p.form, undefined, new Set(monitorRows(p.config).map((r) => r.monitor.id)))
-      const result = await save(p.viewer, putMonitor(p.config, monitor, text(p.form, 'group')))
+      const result = await save(p, putMonitor(p.config, monitor, text(p.form, 'group')))
+      if (!result && monitor.kind === 'push' && !deps.pingTokens[monitor.id]) {
+        // A new scheduled job gets its ping URL right away; it is shown only this once.
+        await syncConfig(deps, nowSeconds())
+        const token = await rotatePingToken(deps.db, monitor.id, p.viewer.email, nowSeconds())
+        if (token) return html(c, pingUrlPage({ viewer: p.viewer, monitorName: monitor.name, monitorId: monitor.id, pingUrl: `${deps.config.baseUrl.replace(/\/+$/, '')}/ping/${token}`, created: true }))
+      }
       if (!result) return done(c, '/admin/monitors', 'monitor-added')
       error = result
     } catch (e) { if (!(e instanceof FormError)) throw e; error = e.message }
@@ -238,7 +301,7 @@ export function mountAdminRoutes(app: Hono, deps: Deps): void {
     let error: string
     try {
       const monitor = monitorFromForm(p.form, row.monitor, new Set())
-      const result = await save(p.viewer, putMonitor(p.config, monitor, text(p.form, 'group')))
+      const result = await save(p, putMonitor(p.config, monitor, text(p.form, 'group')))
       if (!result) return done(c, '/admin/monitors', 'monitor-saved')
       error = result
     } catch (e) { if (!(e instanceof FormError)) throw e; error = e.message }
@@ -250,8 +313,8 @@ export function mountAdminRoutes(app: Hono, deps: Deps): void {
     if (p instanceof Response) return p
     const id = c.req.param('id')
     if (!findMonitor(p.config, id)) return notFound(c)
-    const error = await save(p.viewer, removeMonitor(p.config, id))
-    if (error) return html(c, monitorsPage({ viewer: p.viewer, rows: monitorRows(p.config), error }), 400)
+    const error = await save(p, removeMonitor(p.config, id))
+    if (error) return html(c, monitorsPage({ viewer: p.viewer, rows: monitorRows(p.config), withoutPingUrl: await withoutPingUrl(), error }), 400)
     return done(c, '/admin/monitors', 'monitor-deleted')
   })
 
@@ -288,7 +351,7 @@ export function mountAdminRoutes(app: Hono, deps: Deps): void {
     try {
       const page = pageFromForm(p.form, existing, new Set(pageList(p.config).map((x) => x.slug)))
       const next = putPage(p.config, page)
-      const result = await save(p.viewer, next)
+      const result = await save(p, next)
       if (!result) return done(c, '/admin/pages', existing ? 'page-saved' : 'page-added')
       error = result
     } catch (e) { if (!(e instanceof FormError)) throw e; error = e.message }
@@ -315,7 +378,7 @@ export function mountAdminRoutes(app: Hono, deps: Deps): void {
     if (p instanceof Response) return p
     const slug = c.req.param('slug')
     if (!pageList(p.config).some((x) => x.slug === slug)) return notFound(c)
-    const error = await save(p.viewer, { ...p.config, home: slug })
+    const error = await save(p, { ...p.config, home: slug })
     if (error) return html(c, pagesPage({ viewer: p.viewer, csrf: p.csrf, pages: pageList(p.config), home: p.config.home, error }), 400)
     return done(c, '/admin/pages', 'home-saved')
   })
@@ -324,7 +387,7 @@ export function mountAdminRoutes(app: Hono, deps: Deps): void {
     const p = await post(c)
     if (p instanceof Response) return p
     let error: string | null
-    try { error = await save(p.viewer, removePage(p.config, c.req.param('slug'))) } catch (e) { if (!(e instanceof FormError)) throw e; error = e.message }
+    try { error = await save(p, removePage(p.config, c.req.param('slug'))) } catch (e) { if (!(e instanceof FormError)) throw e; error = e.message }
     if (error) return html(c, pagesPage({ viewer: p.viewer, csrf: p.csrf, pages: pageList(p.config), home: p.config.home, error }), 400)
     return done(c, '/admin/pages', 'page-deleted')
   })
@@ -378,7 +441,7 @@ export function mountAdminRoutes(app: Hono, deps: Deps): void {
       const pending = Object.fromEntries(secrets.map((s) => [s.name, s.value]))
       const getEnv = (env: string) => pending[env] ?? deps.getEnv(env)
       try { validateAdminConfig({ ...putSink(p.config, channel, sink), admin: true }, getEnv) } catch (e) { throw new FormError((e as Error).message) }
-      const result = await save(p.viewer, putSink(p.config, channel, sink), secrets)
+      const result = await save(p, putSink(p.config, channel, sink), secrets)
       if (!result) return done(c, '/admin/channels', name ? 'channel-saved' : 'channel-added')
       error = result
     } catch (e) { if (!(e instanceof FormError)) throw e; error = e.message }
@@ -403,7 +466,7 @@ export function mountAdminRoutes(app: Hono, deps: Deps): void {
     if (p instanceof Response) return p
     const name = c.req.param('name')
     if (!p.config.sinks?.[name]) return notFound(c)
-    const error = await save(p.viewer, removeSink(p.config, name))
+    const error = await save(p, removeSink(p.config, name))
     if (error) return html(c, channelsPage({ viewer: p.viewer, csrf: p.csrf, sinks: channelRows(p.config), error }), 400)
     // Erase the credentials this channel stored (exact prefix match; LIKE would treat _ as a wildcard).
     const prefix = storedEnvKey(sinkEnvName(name, ''))
@@ -439,7 +502,7 @@ export function mountAdminRoutes(app: Hono, deps: Deps): void {
     const emails = text(p.form, 'admins').split(/[\n,]/).map((line) => line.trim().toLowerCase()).filter(Boolean)
     const admins = { ...(p.config.access?.admins ?? {}), emails }
     const error = !emails.length && !p.config.access?.admins?.teams?.length ? 'Keep at least one administrator.'
-      : p.config.access ? await save(p.viewer, { ...p.config, access: { ...p.config.access, admins } }) : 'No sign-in method is configured.'
+      : p.config.access ? await save(p, { ...p.config, access: { ...p.config.access, admins } }) : 'No sign-in method is configured.'
     if (error) return html(c, accessPage({ viewer: p.viewer, csrf: p.csrf, providerSummary: providerSummary(p.config), admins: p.config.access?.admins?.emails ?? [], values: formValues(p.form), error }), 400)
     return done(c, '/admin/access', 'admins-saved')
   })
@@ -457,8 +520,18 @@ export function mountAdminRoutes(app: Hono, deps: Deps): void {
     return next
   }
 
-  const configuration = (c: Context, v: { viewer: Viewer; csrf: string; config: AdminConfig; notice?: string }, importYaml?: string, error?: string) =>
-    html(c, configurationPage({ viewer: v.viewer, csrf: v.csrf, yaml: stringifyAdminYaml(v.config), importYaml, error, notice: v.notice }), error ? 400 : 200)
+  /** Where each $env name the configuration uses is set. Names only, never values. */
+  const envStatus = (config: AdminConfig) => envReferences(config).map(({ name, paths }) => ({
+    name, paths, source: (deps.hasRealEnv(name) ? 'env' : isStorableEnv(name) && deps.storedEnv[name] ? 'db' : false) as SecretSource,
+  }))
+  const schemaUrl = () => `${deps.config.baseUrl.replace(/\/+$/, '')}/admin/schema.json`
+  const currentYaml = async (config: AdminConfig) => exportAdminYaml(config, await currentYamlText(deps.db), schemaUrl())
+
+  const configuration = async (c: Context, v: { viewer: Viewer; csrf: string; config: AdminConfig; notice?: string }, importYaml?: string, error?: string) =>
+    html(c, configurationPage({
+      viewer: v.viewer, csrf: v.csrf, yaml: await currentYaml(v.config), revision: deps.configRevision, history: await listRevisions(deps.db),
+      env: envStatus(v.config), importYaml, error, notice: v.notice,
+    }), error ? 400 : 200)
 
   app.get('/admin/configuration', async (c) => {
     const v = await view(c)
@@ -468,13 +541,26 @@ export function mountAdminRoutes(app: Hono, deps: Deps): void {
   app.get('/admin/import', (c) => c.redirect('/admin/configuration#import', 302))
   app.get('/admin/export', (c) => c.redirect('/admin/configuration', 302))
 
+  /** The pasted YAML, or the uploaded file when one was chosen (the no-JavaScript path). */
+  const importText = async (form: Form): Promise<string> => {
+    const file = form.file
+    if (file instanceof File && file.size > 0) {
+      if (file.size > 262_144) throw new FormError('Configuration files must be 256 KB or smaller.')
+      return file.text()
+    }
+    return typeof form.config === 'string' ? form.config : ''
+  }
+
   app.post('/admin/import', async (c) => {
     const p = await post(c)
     if (p instanceof Response) return p
-    const yaml = text(p.form, 'config')
+    let yaml = ''
     try {
+      yaml = await importText(p.form)
+      if (!yaml.trim()) throw new FormError('Paste a configuration or choose a YAML file.')
       const next = parseImport(yaml, p.config)
-      const normalized = validateAdminConfig(next, deps.getEnv).normalized
+      let normalized
+      try { normalized = validateAdminConfig(next, deps.getEnv).normalized } catch (e) { throw new FormError(locateProblems(yaml, (e as Error).message)) }
       if (!canAdmin(p.viewer, normalized)) throw new FormError('This configuration would remove your own access to Settings.')
       const changes = describeChanges(p.config, next)
       if (JSON.stringify((parseAdminYaml(yaml) as AdminConfig).access?.provider ?? null) !== JSON.stringify(p.config.access?.provider ?? null)) {
@@ -491,7 +577,7 @@ export function mountAdminRoutes(app: Hono, deps: Deps): void {
     if (p instanceof Response) return p
     const yaml = text(p.form, 'config')
     let error: string | null
-    try { error = await save(p.viewer, parseImport(yaml, p.config)) } catch (e) { error = (e as Error).message }
+    try { error = await save(p, parseImport(yaml, p.config), [], { yaml, action: 'config.import' }) } catch (e) { error = (e as Error).message }
     if (error) return configuration(c, p, yaml, error)
     return done(c, '/admin/configuration', 'imported')
   })
@@ -499,7 +585,40 @@ export function mountAdminRoutes(app: Hono, deps: Deps): void {
   app.get('/admin/export/statusping.yaml', async (c) => {
     const v = await view(c)
     if (v instanceof Response) return v
-    return c.body(stringifyAdminYaml(v.config), 200, { ...noStore, 'content-type': 'application/yaml; charset=utf-8', 'content-disposition': 'attachment; filename="statusping.yaml"' })
+    return c.body(await currentYaml(v.config), 200, { ...noStore, 'content-type': 'application/yaml; charset=utf-8', 'content-disposition': 'attachment; filename="statusping.yaml"' })
+  })
+
+  // Not secret: the same schema is published with every release. Editors fetch it without signing in.
+  app.get('/admin/schema.json', (c) => (enabled() ? c.json(configSchema(), 200, { 'cache-control': 'public, max-age=3600' }) : notFound(c)))
+
+  // ── Configuration history ────────────────────────────────────────────────────────────────
+
+  const revisionYaml = (r: { config: AdminConfig; yaml: string | null }) => r.yaml ?? stringifyAdminYaml(r.config)
+  const revisionParam = (c: Context) => (/^\d{1,9}$/.test(c.req.param('id') ?? '') ? Number(c.req.param('id')) : -1)
+
+  app.get('/admin/configuration/revisions/:id', async (c) => {
+    const v = await view(c)
+    if (v instanceof Response) return v
+    const revision = await loadRevision(deps.db, revisionParam(c))
+    if (!revision) return notFound(c)
+    const current = await currentYamlText(deps.db) ?? stringifyAdminYaml(v.config)
+    return html(c, revisionPage({ viewer: v.viewer, csrf: v.csrf, revision, current: deps.configRevision, diff: diffBlock(withContext(lineDiff(revisionYaml(revision), current))), notice: v.notice }))
+  })
+
+  app.post('/admin/configuration/revisions/:id/restore', async (c) => {
+    const p = await post(c)
+    if (p instanceof Response) return p
+    const revision = await loadRevision(deps.db, revisionParam(c))
+    if (!revision) return notFound(c)
+    // Like an import, a restore keeps today's sign-in method: an old one may no longer work.
+    const next: AdminConfig = { ...revision.config, admin: true }
+    if (p.config.access) next.access = { ...(next.access ?? {}), provider: p.config.access.provider } as AdminConfig['access']
+    const error = await save(p, next, [], { yaml: revision.yaml, action: 'config.restore' })
+    if (error) {
+      const current = await currentYamlText(deps.db) ?? stringifyAdminYaml(p.config)
+      return html(c, revisionPage({ viewer: p.viewer, csrf: p.csrf, revision, current: await currentRevision(deps.db), diff: diffBlock(withContext(lineDiff(revisionYaml(revision), current))), error }), 400)
+    }
+    return done(c, '/admin/configuration', 'restored')
   })
 
   // ── MCP ───────────────────────────────────────────────────────────────────────────────────
@@ -554,24 +673,50 @@ export function mountAdminRoutes(app: Hono, deps: Deps): void {
 
   // ── JSON API (bearer ADMIN_TOKEN) ─────────────────────────────────────────────────────────
 
+  /** YAML when the client asks for it (Accept or ?format=yaml); JSON otherwise. */
+  const wantsYaml = (c: Context) => c.req.query('format') === 'yaml' || /\b(application|text)\/(x-)?yaml\b/.test(c.req.header('accept') ?? '')
+  const etag = (revision: number) => `"${revision}"`
+
   app.get('/api/admin/config', async (c) => {
     const ok = apiAdmin(c)
     if (ok === null) return notFound(c)
     if (!ok) return c.text('Unauthorized', 401, noStore)
-    return c.json({ config: await storedConfig() }, 200, noStore)
+    const config = await storedConfig()
+    const headers = { ...noStore, etag: etag(deps.configRevision) }
+    if (wantsYaml(c)) return c.body(await currentYaml(config), 200, { ...headers, 'content-type': 'application/yaml; charset=utf-8' })
+    return c.json({ config, revision: deps.configRevision }, 200, headers)
   })
   app.put('/api/admin/config', async (c) => {
     const ok = apiAdmin(c)
     if (ok === null) return notFound(c)
     if (!ok) return c.text('Unauthorized', 401, noStore)
-    const raw = await bodyJson(c)
-    const value = raw && typeof raw === 'object' && !Array.isArray(raw) && 'config' in raw ? (raw as { config: unknown }).config : raw
+    const ifMatch = c.req.header('if-match')?.trim()
+    let base: number | undefined
+    if (ifMatch && ifMatch !== '*') {
+      const match = /^(?:W\/)?"?(\d+)"?$/.exec(ifMatch)
+      if (!match) return c.json({ error: 'If-Match must be a revision number from ETag, such as "12".' }, 400, noStore)
+      base = Number(match[1])
+    }
+    const yamlBody = /\b(application|text)\/(x-)?yaml\b/.test(c.req.header('content-type') ?? '')
+    let value: unknown
+    let yaml: string | undefined
     try {
-      const saved = await saveAdminConfig(deps.db, value, 'api-token', nowSeconds(), deps.getEnv)
+      if (yamlBody) {
+        yaml = await c.req.text()
+        value = parseAdminYaml(yaml)
+      } else {
+        const raw = await bodyJson(c)
+        value = raw && typeof raw === 'object' && !Array.isArray(raw) && 'config' in raw ? (raw as { config: unknown }).config : raw
+      }
+      // Admin mode is always on for a stored configuration; a file may leave the flag out.
+      if (value && typeof value === 'object' && !Array.isArray(value) && !('admin' in value)) value = { ...value, admin: true }
+      const saved = await saveAdminConfig(deps.db, value, 'api-token', nowSeconds(), deps.getEnv, { base, yaml, action: 'config.api' })
       await refreshAdminConfig(deps, nowSeconds())
-      return c.json({ config: saved.config, updatedAt: saved.updatedAt }, 200, noStore)
+      return c.json({ config: saved.config, updatedAt: saved.updatedAt, revision: saved.revision }, 200, { ...noStore, etag: etag(saved.revision) })
     } catch (error) {
-      return c.json({ error: (error as Error).message }, 400, noStore)
+      if (error instanceof RevisionConflict) return c.json({ error: 'The configuration changed since that revision. Fetch it again and retry.', revision: error.current }, 412, { ...noStore, etag: etag(error.current) })
+      const message = (error as Error).message
+      return c.json({ error: yaml ? locateProblems(yaml, message) : message }, 400, noStore)
     }
   })
   app.get('/api/admin/audit', async (c) => {

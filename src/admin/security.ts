@@ -19,17 +19,39 @@ function record(value: unknown): Record<string, unknown> | null {
 function envRef(value: unknown, path: string, problems: string[]): value is EnvRef {
   const ref = record(value)
   if (!ref || typeof ref.$env !== 'string' || !ENV_NAME.test(ref.$env) || Object.keys(ref).some((key) => key !== '$env' && key !== 'optional')) {
-    problems.push(`${path}: must be an env(NAME) reference when edited through admin`)
+    problems.push(`${path}: must be a secret reference, { $env: NAME }`)
     return false
   }
   if (ref.optional !== undefined && typeof ref.optional !== 'boolean') problems.push(`${path}.optional: must be a boolean`)
   return true
 }
 
+/** A literal URL must not carry a credential (user:password, or a token-like query parameter). */
+function literalUrl(value: string, path: string, problems: string[]): void {
+  try {
+    const url = new URL(value)
+    if (url.username || url.password || [...url.searchParams.keys()].some((key) => SENSITIVE_NAME.test(key))) {
+      problems.push(`${path}: contains a credential. Store the URL as a secret and write { $env: NAME } instead`)
+    }
+  } catch { /* normalizeConfig reports malformed URLs */ }
+}
+
+/** Header values: literal text, or { $env: NAME }. Credential-bearing headers must use $env. */
+function headerValues(value: unknown, path: string, problems: string[]): void {
+  if (value === undefined) return
+  const headers = record(value)
+  if (!headers) { problems.push(`${path}: must be an object`); return }
+  for (const [header, item] of Object.entries(headers)) {
+    if (typeof item === 'string') {
+      if (SENSITIVE_NAME.test(header)) problems.push(`${path}.${header}: holds a credential. Store it as a secret and write { $env: NAME } instead`)
+    } else envRef(item, `${path}.${header}`, problems)
+  }
+}
+
 /**
  * The browser never receives a secret value.  This deliberately narrows the editable surface:
- * credentials must be EnvRef objects, and arbitrary webhook headers/credential-bearing URLs are
- * config-as-code only.  That is safer than trying to guess whether a text box contains a secret.
+ * credentials must be EnvRef objects ({ $env: NAME }); a literal URL or header that looks like it
+ * carries a credential is refused rather than stored.
  */
 export function validateAdminSecrets(value: unknown): string[] {
   const problems: string[] = []
@@ -65,18 +87,11 @@ export function validateAdminSecrets(value: unknown): string[] {
         break
       }
       case 'webhook': {
-        // `url` and custom headers can carry credentials.  Keep them config-as-code until the
-        // runtime has a dedicated secret reference type for webhook URLs and header values.
-        if (sink.headers !== undefined) problems.push(`sinks.${name}.headers: arbitrary webhook headers are not editable in admin`)
-        if (typeof sink.url !== 'string') problems.push(`sinks.${name}.url: must be a URL string`)
-        else {
-          try {
-            const url = new URL(sink.url)
-            if (url.username || url.password || [...url.searchParams.keys()].some((key) => SENSITIVE_NAME.test(key))) {
-              problems.push(`sinks.${name}.url: credential-bearing URLs are not editable in admin`)
-            }
-          } catch { /* normalizeConfig provides the ordinary URL error */ }
-        }
+        // A credential in the URL or a header must be a secret: { $env: NAME }, never a literal.
+        if (typeof sink.url === 'string') literalUrl(sink.url, `sinks.${name}.url`, problems)
+        else if (sink.url === undefined) problems.push(`sinks.${name}.url: must be a URL or { $env: NAME }`)
+        else envRef(sink.url, `sinks.${name}.url`, problems)
+        headerValues(sink.headers, `sinks.${name}.headers`, problems)
         if (sink.secret !== undefined) envRef(sink.secret, `sinks.${name}.secret`, problems)
         break
       }
@@ -96,22 +111,28 @@ export function validateAdminSecrets(value: unknown): string[] {
       const monitor = record(monitorValue)
       if (!monitor) continue
       if (monitor.kind === 'http') {
-        const headers = record(monitor.headers)
-        for (const [header] of Object.entries(headers ?? {})) {
-          if (SENSITIVE_NAME.test(header)) problems.push(`groups.${groupIndex}.monitors.${monitorIndex}.headers.${header}: credential-bearing headers are not editable in admin`)
-        }
-        if (typeof monitor.url === 'string') {
-          try {
-            const url = new URL(monitor.url)
-            if (url.username || url.password || [...url.searchParams.keys()].some((key) => SENSITIVE_NAME.test(key))) {
-              problems.push(`groups.${groupIndex}.monitors.${monitorIndex}.url: credential-bearing URLs are not editable in admin`)
-            }
-          } catch { /* normal validation below */ }
-        }
+        const path = `groups.${groupIndex}.monitors.${monitorIndex}`
+        headerValues(monitor.headers, `${path}.headers`, problems)
+        if (typeof monitor.url === 'string') literalUrl(monitor.url, `${path}.url`, problems)
+        else if (monitor.url !== undefined) envRef(monitor.url, `${path}.url`, problems)
       }
     }
   }
   return problems
+}
+
+/** Every { $env: NAME } the configuration names, with the places it is used. */
+export function envReferences(value: unknown): Array<{ name: string; paths: string[] }> {
+  const found = new Map<string, string[]>()
+  const walk = (node: unknown, path: string) => {
+    if (Array.isArray(node)) { node.forEach((item, index) => walk(item, `${path}[${index}]`)); return }
+    const obj = record(node)
+    if (!obj) return
+    if (typeof obj.$env === 'string') { found.set(obj.$env, [...(found.get(obj.$env) ?? []), path]); return }
+    for (const [key, item] of Object.entries(obj)) walk(item, path ? `${path}.${key}` : key)
+  }
+  walk(value, '')
+  return [...found].map(([name, paths]) => ({ name, paths })).sort((a, b) => a.name.localeCompare(b.name))
 }
 
 export interface AdminConfigValidation {
@@ -166,7 +187,7 @@ export function authorizeAdminToken(header: string | undefined, getEnv: EnvGette
  * Access token for Access sign-in (Access authenticates every request and sets no session).
  */
 function signInBinding(c: Context): string | undefined {
-  return getCookie(c, 'sp_session') ?? getCookie(c, 'CF_Authorization') ?? c.req.header('cf-access-jwt-assertion')
+  return getCookie(c, 'sp_session') ?? getCookie(c, 'CF_Authorization') ?? c.req.header('cf-access-jwt-assertion') ?? getCookie(c, 'sp_recover')
 }
 
 /**

@@ -2,6 +2,11 @@ name = "statusping"
 main = "worker.ts"
 compatibility_date = "2026-10-01"
 
+# Workers Logs: while setup is pending, the setup code is written here every minute
+# (Workers & Pages → your Worker → Logs).
+[observability]
+enabled = true
+
 # Every minute: drives missed-ping detection and HTTP checks.
 [triggers]
 crons = ["* * * * *"]
@@ -32,7 +37,7 @@ new_sqlite_classes = ["RegionalProbe"]
 STATUSPING_ROLE = "primary"
 
 # Secrets (set with `npx wrangler secret put NAME --config adapters/cloudflare/wrangler.toml`):
-#   PING_TOKENS            JSON {"monitor-id":"token"} — generate with `npm run cli -- tokens`
+#   PING_TOKENS            optional JSON {"monitor-id":"token"} (`npm run cli -- tokens`); ping URLs can also be created in Settings
 #   PUSHOVER_APP_TOKEN, PUSHOVER_USER_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, NTFY_TOPIC, NTFY_TOKEN
 #   Sign-in (only for the provider you use):
 #     basic:             BASIC_AUTH_USERS (JSON, from `npm run cli -- add-user <email>`)
@@ -40,6 +45,7 @@ STATUSPING_ROLE = "primary"
 #     oidc:              OIDC_CLIENT_ID, OIDC_CLIENT_SECRET, SESSION_SECRET (≥ 32 random chars)
 #   PEER_PING_URL          optional: watchdog pairing
 #   TICK_SECRET            optional: enables POST /tick for external schedulers
+#   STATUSPING_RECOVERY_TOKEN  optional break-glass: enables /setup/recover when nobody can sign in
 #   STATUSPING_EMAIL_FROM  required only for the Cloudflare email sink
 
 # Optional Cloudflare Email Routing send binding for `{ type: "email", via: "cloudflare" }`.

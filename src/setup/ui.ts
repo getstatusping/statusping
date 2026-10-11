@@ -5,10 +5,13 @@
 import { STYLES } from '../web/styles.ts'
 import { timezoneSelect } from '../util/timezones.ts'
 import { ACCESS_DOCS_URL, OIDC_PRESETS, presetById } from './instructions.ts'
+import { channelFields, COPY_SCRIPT, type SecretSource } from '../admin/ui.ts'
+import { SINK_FIELDS, type SinkType } from '../admin/forms.ts'
+import { SINK_TYPES, type SinkInput } from '../config.ts'
 
 const escape = (value: string) => value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
 
-export type SetupStep = 'claim' | 'method' | 'account' | 'basics' | 'monitor' | 'review'
+export type SetupStep = 'claim' | 'method' | 'account' | 'basics' | 'monitor' | 'channel' | 'review'
 
 const STEPS: Array<[SetupStep, string]> = [
   ['claim', 'Claim'],
@@ -16,6 +19,7 @@ const STEPS: Array<[SetupStep, string]> = [
   ['account', 'Connect & verify'],
   ['basics', 'Site basics'],
   ['monitor', 'First monitor'],
+  ['channel', 'Alerts'],
   ['review', 'Review & finish'],
 ]
 
@@ -88,6 +92,11 @@ select.input { width: 100%; }
 @media (max-width: 520px) { .summary { grid-template-columns: 1fr; gap: 2px; } .summary dd { margin-bottom: 8px; } }
 .fold { margin-top: 24px; } .fold[open] summary { margin-bottom: 8px; }
 .setup-card .alert.success + form .actions { margin-top: 0; }
+.copy-btn { height: 28px; margin: -8px 0 16px; padding: 0 10px; font-size: 13px; }
+.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; } @media (max-width: 600px) { .grid-2 { grid-template-columns: 1fr; } }
+.setup-form .form { display: grid; gap: 16px; } [hidden] { display: none !important; }
+.secret-state { font-size: 13px; color: var(--muted-foreground); } .secret-state.ok { color: var(--success); }
+textarea.code { min-height: 18rem; font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
 .secret { margin: 0 0 16px; padding: 12px 14px; border-radius: calc(var(--radius) - 2px); background: var(--muted); font: 600 16px ui-monospace, SFMono-Regular, Menlo, monospace; word-break: break-all; user-select: all; }
 `
 
@@ -109,7 +118,7 @@ function shell(title: string, step: SetupStep | null, completed: ReadonlySet<Set
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex"><title>${escape(title)} · StatusPing setup</title><style>${STYLES}${SETUP_STYLES}</style></head><body>
 <header class="site-header"><div class="wrap site-header-inner"><div class="account"></div></div></header>
 <main class="wrap"><div class="setup${step ? '' : ' solo'}">${steps}<section class="card setup-card">${body}</section></div></main>
-<footer class="wrap foot"><div class="foot-brand">Powered by <a href="https://statusp.ing">StatusPing</a></div></footer><script>${REVEAL_SCRIPT}</script></body></html>`
+<footer class="wrap foot"><div class="foot-brand">Powered by <a href="https://statusp.ing">StatusPing</a></div></footer><script>${REVEAL_SCRIPT};${COPY_SCRIPT}</script></body></html>`
 }
 
 const alert = (text: string | undefined, kind: 'error' | 'warning' = 'error') =>
@@ -222,7 +231,7 @@ export function oidcPage(opts: { csrf: string; completed: ReadonlySet<SetupStep>
 ${opts.verifiedEmail ? verifiedBlock(opts.csrf, opts.verifiedEmail, preset.label) : ''}
 ${foldWhenVerified(Boolean(opts.verifiedEmail), `<div class="setup-form">${field('Identity provider', `<select class="input" id="preset" name="preset" onchange="location.href='/setup?step=account&amp;preset='+encodeURIComponent(this.value)">${OIDC_PRESETS.map((p) => `<option value="${p.id}"${p.id === preset.id ? ' selected' : ''}>${p.label}</option>`).join('')}</select>`)}</div>
 ${section(1, `Register StatusPing with ${preset.label}`, `<p>${preset.register} (<a href="${preset.docsUrl}" target="_blank" rel="noopener">${preset.label} guide</a>)</p>
-<p>Set the redirect (callback) URL to exactly:</p><pre>${escape(callback)}</pre>${workersDev ? '<p class="alert warning">This is a <code>workers.dev</code> address. If you add a custom domain later, register its callback URL too.</p>' : ''}`)}
+<p>Set the redirect (callback) URL to exactly:</p><pre data-copy="callback URL">${escape(callback)}</pre>${workersDev ? '<p class="alert warning">This is a <code>workers.dev</code> address. If you add a custom domain later, register its callback URL too.</p>' : ''}`)}
 ${section(2, 'Add the client credentials', `<p>Copy the client ID and client secret your provider issued for this application.</p>${envChecklist(opts.env)}
 ${opts.env.OIDC_CLIENT_ID === 'env' && opts.env.OIDC_CLIENT_SECRET === 'env' ? '' : `<form class="setup-form" method="post" action="/setup/stored-env">${hidden(opts.csrf)}<input type="hidden" name="return" value="oidc">
 ${opts.env.OIDC_CLIENT_ID === 'env' ? '' : field('Client ID', `<input class="input" id="OIDC_CLIENT_ID" name="OIDC_CLIENT_ID" type="text" autocomplete="off" spellcheck="false" value="${escape(opts.clientId ?? '')}">`)}
@@ -293,15 +302,51 @@ ${field('Text the page must contain (optional)', `<input class="input" id="keywo
 ${tabs}<p class="hint kind-note">${describe}</p>
 <form class="setup-form" method="post" action="/setup/monitor">${hidden(opts.csrf)}<input type="hidden" name="kind" value="${opts.kind}">
 ${fields}
-<div class="actions"><button class="btn-primary" type="submit">Add monitor</button><button class="btn-outline" type="submit" name="skip" value="1" formnovalidate>Skip for now</button></div></form>`)
+<div class="actions"><button class="btn-primary" type="submit">Add monitor</button><button class="btn-outline" type="submit" name="skip" value="1" formnovalidate>Skip for now</button></div></form>
+<p class="hint" style="margin-top:20px">Moving from another StatusPing site? <a href="/setup?step=import">Import its YAML configuration</a> instead.</p>`)
 }
 
-export function reviewPage(opts: { csrf: string; completed: ReadonlySet<SetupStep>; summary: Array<[string, string]>; yaml: string; error?: string }): string {
+/** Where a channel credential is set, for the saved channel. */
+export type ChannelSources = Record<string, { source: SecretSource; envName?: string }>
+
+export function channelPage(opts: { csrf: string; completed: ReadonlySet<SetupStep>; type: SinkType; saved?: { name: string; sink: SinkInput }; sources: ChannelSources; values?: Record<string, string>; tested?: boolean; error?: string }): string {
+  const spec = SINK_FIELDS[opts.type]
+  const editing = opts.saved?.sink.type === opts.type ? opts.saved.sink : undefined
+  const picker = `<form class="setup-form" method="get" action="/setup"><input type="hidden" name="step" value="channel">
+${field('Send alerts to', `<select class="input" id="type" name="type" onchange="this.form.submit()">${(SINK_TYPES as readonly SinkType[]).map((type) => `<option value="${type}"${type === opts.type ? ' selected' : ''}>${SINK_FIELDS[type].label}</option>`).join('')}</select>`)}
+<noscript><div class="actions"><button class="btn-outline" type="submit">Show fields</button></div></noscript></form>`
+  const saved = opts.saved ? `<p class="alert success" role="status">${opts.tested ? 'Test alert sent. Check that it arrived.' : `${escape(SINK_FIELDS[opts.saved.sink.type]?.label ?? opts.saved.sink.type)} alerts are set up.`}</p>
+<div class="actions" style="margin:0 0 20px"><form method="post" action="/setup/channel/test" style="display:contents">${hidden(opts.csrf)}<button class="btn-outline" type="submit">Send test</button></form>
+<form method="post" action="/setup/channel/done" style="display:contents">${hidden(opts.csrf)}<button class="btn-primary" type="submit">Continue</button></form></div>` : ''
+  return shell('Alerts', 'channel', opts.completed, `<h1>Where should alerts go?</h1>
+<p class="lead">Optional. StatusPing tells you here when a monitor goes down and when it recovers. You can add more channels later in Settings.</p>${alert(opts.error)}
+${saved}${picker}
+<p class="hint kind-note" style="margin-top:12px">${spec.help}</p>
+<form class="setup-form" method="post" action="/setup/channel">${hidden(opts.csrf)}<input type="hidden" name="type" value="${opts.type}">
+${channelFields({ type: opts.type, sink: editing, sources: editing ? opts.sources : {}, values: opts.values })}
+<p class="hint">Secrets are kept in this site's database and never shown again. A Worker secret with the same name takes precedence.</p>
+<div class="actions"><button class="${opts.saved ? 'btn-outline' : 'btn-primary'}" type="submit">${editing ? 'Save changes' : 'Save channel'}</button><button class="btn-outline" type="submit" name="skip" value="1" formnovalidate>${opts.saved ? 'Remove and skip' : 'Skip for now'}</button></div></form>`)
+}
+
+export function importPage(opts: { csrf: string; completed: ReadonlySet<SetupStep>; yaml?: string; imported?: Array<[string, string]>; error?: string }): string {
+  return shell('Import', 'monitor', opts.completed, `<h1>Import a configuration</h1>
+<p class="lead">Use a YAML file exported from another StatusPing site (Settings → Configuration → Download YAML). Monitors keep their ids, so their history carries over when you move a site.</p>${alert(opts.error)}
+${opts.imported ? `<p class="alert success" role="status">Imported. It replaces the first monitor and alert steps.</p><dl class="summary">${opts.imported.map(([label, value]) => `<dt>${escape(label)}</dt><dd>${escape(value)}</dd>`).join('')}</dl>
+<div class="actions" style="margin:0 0 24px"><a class="btn-primary" href="/setup?step=review">Continue</a><form method="post" action="/setup/import/remove" style="display:contents">${hidden(opts.csrf)}<button class="btn-outline" type="submit">Remove the import</button></form></div>` : ''}
+<p>The sign-in method and the site title, address and timezone you already chose are kept. Everything else comes from the file. Secrets stay where they are: the file only names them.</p>
+<form class="setup-form" method="post" action="/setup/import" enctype="multipart/form-data">${hidden(opts.csrf)}
+${field('YAML file', '<input class="input" id="import-file" name="file" type="file" accept=".yaml,.yml,text/yaml,application/yaml">', 'Or paste it below.')}
+${field('Configuration', `<textarea class="input code" id="config" name="config" spellcheck="false">${escape(opts.yaml ?? '')}</textarea>`)}
+<div class="actions"><button class="${opts.imported ? 'btn-outline' : 'btn-primary'}" type="submit">${opts.imported ? 'Replace the import' : 'Import'}</button><a class="btn-outline" href="/setup?step=monitor">Back</a></div></form>
+<script>document.getElementById('import-file').addEventListener('change',function(){var f=this.files&&this.files[0];if(!f)return;if(f.size>262144){alert('Configuration files must be 256 KB or smaller.');this.value='';return}var r=new FileReader();r.onload=function(){document.getElementById('config').value=String(r.result||'')};r.readAsText(f)})</script>`)
+}
+
+export function reviewPage(opts: { csrf: string; completed: ReadonlySet<SetupStep>; summary: Array<[string, string]>; yaml: string; back?: string; error?: string }): string {
   return shell('Review', 'review', opts.completed, `<h1>Review and finish</h1>
 <p class="lead">StatusPing will start with these settings. You can change any of them later in the admin.</p>${alert(opts.error)}
 <dl class="summary">${opts.summary.map(([label, value]) => `<dt>${escape(label)}</dt><dd>${escape(value)}</dd>`).join('')}</dl>
 <details class="howto"><summary>Show as YAML</summary><p class="hint">This is the configuration file the admin lets you edit directly.</p><pre>${escape(opts.yaml)}</pre></details>
-<form method="post" action="/setup/finish">${hidden(opts.csrf)}<div class="actions"><button class="btn-primary" type="submit">Finish setup</button><a class="btn-outline" href="/setup?step=monitor">Back</a></div></form>`)
+<form method="post" action="/setup/finish">${hidden(opts.csrf)}<div class="actions"><button class="btn-primary" type="submit">Finish setup</button><a class="btn-outline" href="${opts.back ?? '/setup?step=channel'}">Back</a></div></form>`)
 }
 
 /** Shown once after setup when the first monitor is a scheduled job: its ping URL is never shown again. */
@@ -309,7 +354,7 @@ export function setupDonePage(opts: { pingUrl: string; monitorName: string }): s
   return shell('Setup complete', null, new Set(), `<h1>Setup is complete</h1>
 <p class="lead">Checks start within a minute. One last thing for <strong>${escape(opts.monitorName)}</strong>: have the job call its ping URL when it finishes.</p>
 <p class="alert warning">This URL is shown only once. Copy it now; anyone with it can report on this job. You can generate a new one in the admin.</p>
-<p class="secret">${escape(opts.pingUrl)}</p>
+<p class="secret" data-copy="ping URL">${escape(opts.pingUrl)}</p>
 <p>For example, at the end of the job:</p><pre>curl -fsS ${escape(opts.pingUrl)}</pre>
 <p class="hint">To report a failure instead, call <code>${escape(opts.pingUrl)}/fail</code>; to track run time, call <code>${escape(opts.pingUrl)}/start</code> when the job begins.</p>
 <div class="actions"><a class="btn-primary" href="/admin">Open Settings</a></div>`)
@@ -322,4 +367,13 @@ export function resetPage(opts: { error?: string }): string {
 ${field('Reset token', '<input class="input" id="token" name="token" type="password" autocomplete="off" required autofocus>', 'The value of the <code>STATUSPING_RESET_TOKEN</code> secret. Remove that secret once setup is finished.')}
 ${field('Type <code>reset</code> to confirm', '<input class="input" id="confirm" name="confirm" type="text" autocomplete="off" required>')}
 <div class="actions"><button class="btn-primary" type="submit">Reset to setup</button></div></form>`)
+}
+
+export function recoverPage(opts: { email?: string; error?: string }): string {
+  return shell('Recover access', null, new Set(), `<h1>Recover access to Settings</h1>
+<p class="lead">Use this when nobody can sign in, for example after a lost password or a broken single sign-on setup. You can then set up a sign-in method that works; nothing else in Settings opens until you switch. The recovery is recorded in Activity.</p>${alert(opts.error)}
+<form class="setup-form" method="post" action="/setup/recover">
+${field('Recovery token', '<input class="input" id="token" name="token" type="password" autocomplete="off" required autofocus>', 'The value of the <code>STATUSPING_RECOVERY_TOKEN</code> secret. Remove that secret once you are back in.')}
+${field('Your administrator email', `<input class="input" id="email" name="email" type="email" value="${escape(opts.email ?? '')}" required>`, 'It must already be listed under Administrators.')}
+<div class="actions"><button class="btn-primary" type="submit">Continue</button></div></form>`)
 }

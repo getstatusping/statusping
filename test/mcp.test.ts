@@ -147,7 +147,10 @@ describe('MCP server', () => {
     const preview = await ok('import_configuration', { yaml: yaml.replace('title: Renamed', 'title: Imported') })
     expect(preview).toMatchObject({ preview: true })
     expect((await ok('get_settings')).title).toBe('Renamed')
-    await ok('import_configuration', { yaml: yaml.replace('title: Renamed', 'title: Imported'), apply: true })
+    const { revision } = await ok('get_configuration')
+    expect(revision).toBeGreaterThan(1)
+    expect(await err('import_configuration', { yaml: yaml.replace('title: Renamed', 'title: Imported'), apply: true, revision: revision - 1 })).toContain(`changed after revision ${revision - 1}`)
+    expect(await ok('import_configuration', { yaml: yaml.replace('title: Renamed', 'title: Imported'), apply: true, revision })).toMatchObject({ applied: true, revision: revision + 1 })
     expect((await ok('get_settings')).title).toBe('Imported')
     expect((await ok('get_activity', { limit: 5 })).activity[0]).toMatchObject({ actor: 'mcp:Admin bot' })
 

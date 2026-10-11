@@ -138,6 +138,20 @@ Every YAML import is parsed as safe plain data, validated by the same StatusPing
 
 When browser admin is enabled, the validated D1-backed configuration becomes the running configuration. The checked-in configuration or `STATUSPING_CONFIG` remains the initial seed and is still the recommended approach for automated or version-controlled deployments.
 
+Credentials are named, never written: webhook URLs and header values, HTTP monitor URLs and header values, and every channel credential accept `{ $env: NAME }`. A literal URL or header that carries a credential is refused. **Settings → Configuration** lists every `$env` name the configuration uses and whether it is set.
+
+Every save is kept as a version (the newest 50). **Configuration → History** shows who changed what, a line diff against the current version, and **Restore**. If someone else saved after you opened a page, your save is refused with a note instead of overwriting their change. Exported YAML starts with a `# yaml-language-server: $schema=…` line pointing at `/admin/schema.json` ([`statusping.schema.json`](statusping.schema.json), generated from the config types with `npm run schema:generate`), so editors validate and complete it. Validation errors name the line.
+
+Automation uses the same API with `ADMIN_TOKEN`: `GET /api/admin/config` returns JSON, or YAML with `Accept: application/yaml`, and an `ETag` with the revision; `PUT` accepts either, and with `If-Match: "<revision>"` it answers 412 when the configuration changed since. From a checkout:
+
+```bash
+npm run cli -- config check statusping.yaml                         # validate offline
+ADMIN_TOKEN=… npm run cli -- config pull --url https://status.example.com > statusping.yaml
+ADMIN_TOKEN=… npm run cli -- config push --url https://status.example.com --revision 12 statusping.yaml
+```
+
+Scheduled jobs no longer need `PING_TOKENS`: adding one in Settings (or through MCP) shows its ping URL once, and Settings → Monitors marks any job that has none yet.
+
 ## Change the sign-in method
 
 Settings → Access → **Change sign-in method** switches between email and password, Cloudflare Access and OpenID Connect without taking the site offline. You enter the new settings, then run a real test sign-in as an administrator; the current method keeps working until that succeeds and you choose **Switch**. Switching signs everyone else out.
@@ -151,7 +165,7 @@ With the browser admin enabled, StatusPing is also a remote [MCP](https://modelc
 - **Manage monitors**: `add_monitor`, `update_monitor`, `delete_monitor`, `rotate_ping_url`, `add_maintenance`, `delete_maintenance`.
 - **Manage status pages**: `add_status_page`, `update_status_page`, `delete_status_page`, `set_home_page`.
 - **Manage alert channels**: `list_channels`, `add_channel`, `update_channel`, `delete_channel`, `test_channel` (credentials are write-only).
-- **Manage settings**: `get_settings`, `update_settings`, `set_administrators`, `check_for_updates`, `get_configuration`, `import_configuration` (previews unless `apply: true`), `get_activity`.
+- **Manage settings**: `get_settings`, `update_settings`, `set_administrators`, `check_for_updates`, `get_configuration`, `import_configuration` (previews unless `apply: true`; pass the `revision` from `get_configuration` so a change made in between is not overwritten), `get_activity`.
 
 Resetting the site, changing the sign-in method and creating MCP tokens stay in the browser.
 
@@ -184,9 +198,24 @@ you create in the browser:
    - **OpenID Connect:** register StatusPing with Google, Microsoft Entra ID, Okta, Auth0,
      Keycloak, Pocket ID or another provider, save its client ID and secret (in the wizard, or as
      the Worker secrets `OIDC_CLIENT_ID` and `OIDC_CLIENT_SECRET`), and run a test sign-in.
-5. Describe the site and optionally add a first monitor. **Finish** saves the configuration and
-   signs you in to `/admin`; checks start on the next minute.
+5. Describe the site, then optionally add a first monitor and an alert channel (with **Send
+   test**), or **import** a YAML file exported from another StatusPing site. An import keeps the
+   sign-in method and site basics you chose; monitor ids, and with them their history, carry
+   over. **Finish** saves the configuration and signs you in to `/admin`; checks start on the
+   next minute.
 6. Remove the `STATUSPING_RESET_TOKEN` secret. Without it, `/setup/reset` does not exist.
+
+Scripts can do steps 3–5 in one call: `POST /api/setup` with JSON `{ "code": "<setup code>",
+"admin": "you@example.com", "yaml": "<configuration>" }`. The sign-in method comes from the
+YAML's `access.provider` (email + password when absent; the response then contains a generated
+password, shown once). Cloudflare Access needs `CF_ACCESS_AUD`, and OpenID Connect needs
+`OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET` and a reachable issuer, before the call.
+
+**Locked out?** Set the `STATUSPING_RECOVERY_TOKEN` secret, open `/setup/recover`, and enter
+it with an administrator's email. That session can only change the sign-in method (Settings →
+Access); everything else stays closed until you switch, and the recovery is recorded in
+Activity. Remove the secret afterwards. On Node, `npm run cli -- recover you@example.com`
+switches the site to email + password and prints a new password.
 
 After setup, the configuration lives in the database and is edited as YAML in `/admin`;
 `statusping.config.ts` is no longer used. Passwords chosen in the wizard are stored as

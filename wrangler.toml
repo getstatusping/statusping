@@ -4,6 +4,11 @@ name = "statusping"
 main = "adapters/cloudflare/worker.ts"
 compatibility_date = "2026-10-01"
 
+# Workers Logs: while setup is pending, the setup code is written here every minute
+# (Workers & Pages → your Worker → Logs).
+[observability]
+enabled = true
+
 [triggers]
 crons = ["* * * * *"]
 
