@@ -238,6 +238,33 @@ export const MIGRATIONS: string[][] = [
       checked_at INTEGER NOT NULL
     )`,
   ],
+  [
+    // First-run setup. `pending` puts the whole site in setup mode; `complete` means the
+    // wizard-written admin_config is authoritative. The code is the only value ever logged,
+    // and only while setup is pending. previous_config_json keeps the config a reset replaced.
+    `CREATE TABLE IF NOT EXISTS setup_state (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      status TEXT NOT NULL CHECK (status IN ('pending', 'complete')),
+      code TEXT,
+      session_key TEXT,
+      draft_json TEXT NOT NULL DEFAULT '{}',
+      failed_attempts INTEGER NOT NULL DEFAULT 0,
+      previous_config_json TEXT,
+      updated_at INTEGER NOT NULL
+    )`,
+    // Built-in email + password accounts created by the wizard (generated passwords only).
+    `CREATE TABLE IF NOT EXISTS local_users (
+      email TEXT PRIMARY KEY,
+      password_hash TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    )`,
+    // Instance-generated keys, such as the session signing key when SESSION_SECRET is unset.
+    `CREATE TABLE IF NOT EXISTS instance_secrets (
+      name TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    )`,
+  ],
 ]
 
 export const SCHEMA_VERSION = MIGRATIONS.length

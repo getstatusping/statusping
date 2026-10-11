@@ -136,6 +136,29 @@ Every YAML import is parsed as safe plain data, validated by the same StatusPing
 
 When browser admin is enabled, the validated D1-backed configuration becomes the running configuration. The checked-in configuration or `STATUSPING_CONFIG` remains the initial seed and is still the recommended approach for automated or version-controlled deployments.
 
+## Setup wizard and reset
+
+An instance can be returned to a guided setup wizard, which replaces its configuration with one
+you create in the browser:
+
+1. Add a secret named `STATUSPING_RESET_TOKEN` with a long random value (Cloudflare: Workers &
+   Pages → *your Worker* → Settings → **Variables and Secrets**, or `npx wrangler secret put
+   STATUSPING_RESET_TOKEN`; Node: add it to `.env` and restart).
+2. Open `/setup/reset`, enter the token, and type `reset`. The site switches to setup mode:
+   every page shows "being set up", `/healthz` reports `"setup": "required"`, and no checks run.
+   Everyone is signed out. The previous configuration and all monitor history are kept.
+3. Open `/setup` and enter the **setup code**. StatusPing writes it to the logs every minute
+   while setup is pending (Cloudflare: the Worker's **Logs**, or `npx wrangler tail`). To choose
+   your own code instead, set the `STATUSPING_SETUP_TOKEN` secret.
+4. Choose a sign-in method, save the generated administrator password, describe the site, and
+   optionally add a first monitor. **Finish** saves the configuration and signs you in to
+   `/admin`; checks start on the next minute.
+5. Remove the `STATUSPING_RESET_TOKEN` secret. Without it, `/setup/reset` does not exist.
+
+After setup, the configuration lives in the database and is edited as YAML in `/admin`;
+`statusping.config.ts` is no longer used. The wizard currently sets up the built-in email +
+password sign-in; Cloudflare Access or OIDC can then be configured in the YAML.
+
 ## Run on Node and use an independent confirmation peer
 
 Node 22.18+ can run StatusPing outside Cloudflare, which is useful for a watchdog or an independent confirmation location:

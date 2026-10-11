@@ -13,6 +13,7 @@ import type { TcpConnector } from './evaluate/tcp.ts'
 import type { ConfirmationProbe } from './confirmation.ts'
 import type { CloudflareEmailSender } from './notify/sinks.ts'
 import { loadAdminConfig, seedAdminConfig } from './admin/service.ts'
+import { loadSetupState } from './setup/state.ts'
 import { validateAdminConfig } from './admin/security.ts'
 import { normalizeClientIp } from './rate-limit.ts'
 
@@ -24,8 +25,10 @@ export interface Deps {
   config: NormalizedConfig
   /** Raw active config. Kept to seed and render the opt-in admin editor; never sent to visitors. */
   configInput: StatusPingConfig
-  /** `admin: true` was supplied by config-as-code. False preserves config-as-code behaviour. */
+  /** `admin: true` was supplied by config-as-code, or setup finished. False preserves config-as-code behaviour. */
   adminEnabled: boolean
+  /** The instance is in first-run setup mode: only /healthz and /setup respond, and ticks run no checks. */
+  setupPending: boolean
   role: Role
   getEnv: EnvGetter
   /** monitor id → ping token (secret), from the PING_TOKENS env var. */
@@ -86,6 +89,7 @@ export function createDeps(opts: CreateDepsOptions): Deps {
     config,
     configInput: opts.config,
     adminEnabled: opts.config.admin === true,
+    setupPending: false,
     role: roleEnv,
     getEnv: opts.getEnv,
     pingTokens: parsePingTokens(opts.getEnv('PING_TOKENS')),
@@ -102,11 +106,16 @@ export function createDeps(opts: CreateDepsOptions): Deps {
 }
 
 /**
- * Loads the one DB-backed configuration only when the operator explicitly enables admin mode.
- * In ordinary mode this is a no-op, leaving statusping.config.ts / STATUSPING_CONFIG authoritative.
- * Call after migrations, before work that reads `deps.config`.
+ * Applies the instance's setup state, then loads the one DB-backed configuration when admin mode
+ * is on: either `admin: true` in config-as-code, or a finished setup wizard. While setup is
+ * pending, nothing is loaded. With neither, statusping.config.ts / STATUSPING_CONFIG stays
+ * authoritative. Call after migrations, before work that reads `deps.config`.
  */
 export async function refreshAdminConfig(deps: Deps, now: number): Promise<boolean> {
+  const setup = await loadSetupState(deps.db)
+  deps.setupPending = setup?.status === 'pending'
+  if (deps.setupPending) return false
+  if (setup?.status === 'complete') deps.adminEnabled = true
   if (!deps.adminEnabled) return false
   let stored = await loadAdminConfig(deps.db)
   if (!stored) {

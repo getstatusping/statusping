@@ -21,6 +21,8 @@ import { acknowledgePage, type PageCtx, messagePage, monitorPage, statusPage } f
 import { confirmSubscription, consumeSubscribeLimit, dispatchSubscriberOutbox, enqueueAnnouncement, startSubscription, unsubscribe } from '../subscribers.ts'
 import { refreshAdminConfig } from '../deps.ts'
 import { mountAdminRoutes } from '../admin/routes.ts'
+import { mountSetupRoutes } from '../setup/routes.ts'
+import { setupModePage } from '../setup/ui.ts'
 import { consumePingRateLimit } from '../rate-limit.ts'
 import { runHttpCheck } from '../evaluate/http.ts'
 import { runTcpCheck } from '../evaluate/tcp.ts'
@@ -78,9 +80,13 @@ export function createApp(deps: Deps): Hono {
   // An admins list also needs a sign-in affordance on otherwise-public monitor pages.
   let hasRestricted = config.pages.some((p) => p.access !== 'public') || Boolean(config.access?.admins)
 
-  app.use('*', async (_c, next) => {
+  app.use('*', async (c, next) => {
     await ensureSchema(deps.db)
     await refreshAdminConfig(deps, nowSeconds())
+    // Setup mode: only the health check and the wizard respond until setup is finished.
+    if (deps.setupPending && c.req.path !== '/healthz' && c.req.path !== '/setup' && !c.req.path.startsWith('/setup/')) {
+      return c.html(setupModePage(), 503, { 'cache-control': 'no-store', 'x-robots-tag': 'noindex', 'retry-after': '60' })
+    }
     config = deps.config
     hasRestricted = config.pages.some((p) => p.access !== 'public') || Boolean(config.access?.admins)
     await next()
@@ -138,6 +144,13 @@ export function createApp(deps: Deps): Hono {
       const channel = deps.getEnv('STATUSPING_RELEASE_CHANNEL') ?? 'stable'
       const instanceId = deps.getEnv('STATUSPING_INSTANCE_ID') ?? null
       const templateVersion = deps.getEnv('STATUSPING_TEMPLATE_VERSION') ?? APP_VERSION
+      // While setup is pending no checks run, yet the deployment is healthy (plan 011 D4).
+      if (deps.setupPending) {
+        return c.json({ ok: true, setup: 'required', version: APP_VERSION, schemaVersion: SCHEMA_VERSION, channel, templateVersion, instanceId, role: deps.role, lastTickAt: last, lagSeconds: lag }, 200, {
+          'cache-control': 'no-store',
+          'access-control-allow-origin': '*',
+        })
+      }
       return c.json({ ok, version: APP_VERSION, schemaVersion: SCHEMA_VERSION, channel, templateVersion, instanceId, role: deps.role, lastTickAt: last, lagSeconds: lag }, ok ? 200 : 503, {
         'cache-control': 'no-store',
         // Public, credential-free facts: let statusp.ing/updates read them
@@ -230,8 +243,11 @@ export function createApp(deps: Deps): Hono {
   // ── Sign-in ────────────────────────────────────────────────────────────────────────────────
   mountAuthRoutes(app, deps)
 
-  // ── Browser admin + management API (strictly opt-in via `admin: true`) ─────────────────────
+  // ── Browser admin + management API (opt-in via `admin: true`, or on after setup) ───────────
   mountAdminRoutes(app, deps)
+
+  // ── First-run setup wizard and guarded reset ────────────────────────────────────────────────
+  mountSetupRoutes(app, deps)
 
   // ── Pages ──────────────────────────────────────────────────────────────────────────────────
 

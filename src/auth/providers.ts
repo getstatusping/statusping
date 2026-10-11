@@ -33,7 +33,7 @@ export async function hashPassword(password: string, salt = randomToken(16)): Pr
   return `sha256:${salt}:${await sha256Hex(`${salt}:${password}`)}`
 }
 
-/** Checks an email + password against BASIC_AUTH_USERS. */
+/** Checks an email + password against BASIC_AUTH_USERS, then the accounts created by setup. */
 export async function verifyPassword(deps: Deps, rawEmail: string, password: string): Promise<Viewer | null> {
   const email = rawEmail.trim().toLowerCase()
   if (!email || !password) return null
@@ -45,6 +45,7 @@ export async function verifyPassword(deps: Deps, rawEmail: string, password: str
     return null
   }
   const entry = Object.entries(users).find(([k]) => k.toLowerCase() === email)?.[1]
+    ?? (await deps.db.first<{ password_hash: string }>(`SELECT password_hash FROM local_users WHERE email = ?`, [email]))?.password_hash
   const [alg, salt] = entry?.split(':') ?? []
   if (!entry || alg !== 'sha256' || !salt) return null
   return timingSafeEqual(await hashPassword(password, salt), entry) ? { email, groups: [], provider: 'basic' } : null
@@ -115,13 +116,16 @@ function sessionSecret(deps: Deps): string {
 }
 
 /**
- * Secret for signing session cookies. SSO requires SESSION_SECRET; Basic falls back to a key
- * derived from BASIC_AUTH_USERS (changing users or passwords then signs everyone out).
+ * Secret for signing session cookies. SSO requires SESSION_SECRET. Basic falls back to the key
+ * setup stored in the DB, then to one derived from BASIC_AUTH_USERS (changing users or
+ * passwords then signs everyone out).
  */
 async function cookieSecret(deps: Deps): Promise<string | null> {
   const explicit = deps.getEnv('SESSION_SECRET')
   if (explicit && explicit.length >= 32) return explicit
   if (deps.config.access?.provider.type !== 'basic') return null
+  const stored = await deps.db.first<{ value: string }>(`SELECT value FROM instance_secrets WHERE name = 'session_key'`)
+  if (stored) return stored.value
   const users = deps.getEnv('BASIC_AUTH_USERS')
   return users ? sha256Hex(`statusping-session:${users}`) : null
 }
@@ -143,7 +147,7 @@ async function sessionViewer(c: Context, deps: Deps, provider: Viewer['provider'
   return { email: s.email, groups: s.groups, provider }
 }
 
-async function setSession(c: Context, deps: Deps, viewer: Viewer): Promise<void> {
+export async function setSession(c: Context, deps: Deps, viewer: Viewer): Promise<void> {
   const secret = await cookieSecret(deps)
   if (!secret) return
   const hours = deps.config.access?.sessionHours ?? 12
@@ -163,10 +167,10 @@ async function basicViewer(c: Context, deps: Deps): Promise<Viewer | null> {
   return (await sessionViewer(c, deps, 'basic')) ?? (await basicHeaderViewer(c, deps))
 }
 
-function mountOidc(app: Hono, deps: Deps, p: Oidc) {
+function oidcHandlers(deps: Deps, p: Oidc) {
   const redirectUri = `${deps.config.baseUrl}/auth/callback`
 
-  app.get('/auth/login', async (c) => {
+  const login = async (c: Context) => {
     const d = await discover(p.issuer, deps.fetch)
     const state = randomToken(32)
     const nonce = randomToken(32)
@@ -192,9 +196,9 @@ function mountOidc(app: Hono, deps: Deps, p: Oidc) {
       code_challenge_method: 'S256',
     }).toString()
     return c.redirect(url.toString(), 302)
-  })
+  }
 
-  app.get('/auth/callback', async (c) => {
+  const callback = async (c: Context) => {
     const secret = sessionSecret(deps)
     const now = nowSeconds()
     const login = await unsign<{ exp: number; state: string; nonce: string; verifier: string; next: string }>(
@@ -245,7 +249,9 @@ function mountOidc(app: Hono, deps: Deps, p: Oidc) {
 
     await setSession(c, deps, { email, groups, provider: 'oidc' })
     return c.redirect(safeNext(login.next), 302)
-  })
+  }
+
+  return { login, callback }
 }
 
 // ── Email + password sign-in form ─────────────────────────────────────────────────────────────
@@ -258,19 +264,19 @@ export function sameOrigin(c: Context, deps: Deps): boolean {
   return allowed.has(origin)
 }
 
-function mountPasswordLogin(app: Hono, deps: Deps) {
+function passwordHandlers(deps: Deps) {
   const page = async (c: Context, opts: { next: string; email?: string; error?: string }, status: 200 | 400 | 401 | 403 = 200) => {
     const chrome = await buildChrome(deps, { viewer: null, current: opts.next, signIn: false })
     return c.html(signInPage(chrome, opts), status, { 'cache-control': 'no-store' })
   }
 
-  app.get('/auth/login', async (c) => {
+  const form = async (c: Context) => {
     const next = safeNext(c.req.query('next'))
     if (await sessionViewer(c, deps, 'basic')) return c.redirect(next, 302)
     return page(c, { next })
-  })
+  }
 
-  app.post('/auth/login', async (c) => {
+  const submit = async (c: Context) => {
     const form = await c.req.parseBody()
     const next = safeNext(typeof form.next === 'string' ? form.next : undefined)
     const email = typeof form.email === 'string' ? form.email.trim() : ''
@@ -282,7 +288,9 @@ function mountPasswordLogin(app: Hono, deps: Deps) {
     const res = c.redirect(next, 303)
     res.headers.set('cache-control', 'no-store')
     return res
-  })
+  }
+
+  return { form, submit }
 }
 
 // ── Public surface ────────────────────────────────────────────────────────────────────────────
@@ -319,20 +327,30 @@ export function signInResponse(c: Context, deps: Deps): Response {
   )
 }
 
-/** Adds /auth/login, /auth/callback (SSO) and /auth/logout. */
+/**
+ * Adds /auth/login, /auth/callback (SSO) and /auth/logout. The provider is read per request:
+ * setup and the YAML admin can change it without a restart.
+ */
 export function mountAuthRoutes(app: Hono, deps: Deps) {
-  const p = deps.config.access?.provider
-  if (!p) return
-  if (p.type === 'oidc') mountOidc(app, deps, p)
-  else if (p.type === 'basic') mountPasswordLogin(app, deps)
-  else {
+  const notFound = (c: Context) => c.text('Not found', 404)
+  const password = passwordHandlers(deps)
+  app.get('/auth/login', async (c) => {
+    const p = deps.config.access?.provider
+    if (!p) return notFound(c)
+    if (p.type === 'oidc') return oidcHandlers(deps, p).login(c)
+    if (p.type === 'basic') return password.form(c)
     // Cloudflare Access: Access itself shows the sign-in screen for protected paths.
-    app.get('/auth/login', async (c) => {
-      if (await currentViewer(c, deps)) return c.redirect(safeNext(c.req.query('next')), 302)
-      return signInResponse(c, deps)
-    })
-  }
+    if (await currentViewer(c, deps)) return c.redirect(safeNext(c.req.query('next')), 302)
+    return signInResponse(c, deps)
+  })
+  app.post('/auth/login', async (c) => (deps.config.access?.provider.type === 'basic' ? password.submit(c) : notFound(c)))
+  app.get('/auth/callback', async (c) => {
+    const p = deps.config.access?.provider
+    return p?.type === 'oidc' ? oidcHandlers(deps, p).callback(c) : notFound(c)
+  })
   app.get('/auth/logout', (c) => {
+    const p = deps.config.access?.provider
+    if (!p) return notFound(c)
     deleteCookie(c, SESSION_COOKIE, { path: '/' })
     if (p.type === 'cloudflare-access') return c.redirect(`https://${p.teamDomain}/cdn-cgi/access/logout`, 302)
     const res = c.redirect('/', 302)

@@ -15,6 +15,15 @@ import { ensureSchema } from './schema.ts'
 import { type MonitorStateRow, applyTransition, loadStates } from './state.ts'
 import { syncConfig } from './sync.ts'
 import { nowSeconds } from './util/time.ts'
+import { loadSetupState } from './setup/state.ts'
+
+// A scheduled tick has no request host, and a configured baseUrl may be stale (setup is where
+// it gets set), so the log names the path rather than guessing the site address.
+async function logSetupCode(deps: Deps): Promise<void> {
+  const state = await loadSetupState(deps.db)
+  if (deps.getEnv('STATUSPING_SETUP_TOKEN')) deps.log('info', 'Setup pending. Open /setup on this site and enter the STATUSPING_SETUP_TOKEN value.')
+  else if (state?.code) deps.log('info', `Setup code: ${state.code}. Open /setup on this site to finish setup.`)
+}
 
 export interface TickSummary {
   tickAt: number
@@ -93,6 +102,11 @@ export async function tick(deps: Deps, nowMs: number = Date.now()): Promise<Tick
 
   await ensureSchema(deps.db)
   await refreshAdminConfig(deps, now)
+  if (deps.setupPending) {
+    // No checks until setup finishes. The code is the only thing logged, and only now.
+    await logSetupCode(deps)
+    return summary
+  }
   await syncConfig(deps, now)
 
   const claim = await deps.db.run(
