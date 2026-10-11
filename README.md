@@ -73,6 +73,20 @@ the file, or rerun with `--skip-conflicts` to upgrade everything else and merge
 that file by hand. Upstream changes to your own files (`statusping.config.ts`,
 `wrangler.toml`) are listed for you to apply; they are never overwritten.
 
+### If an upgrade goes wrong
+
+- **The new version misbehaves:** revert the upgrade pull request and let
+  Cloudflare redeploy. Migrations only ever add tables and columns, so the
+  previous release keeps working against the upgraded database.
+- **A migration fails:** each migration runs in a single transaction, so the
+  database stays at its previous schema version and `/healthz` keeps reporting
+  it. Revert the upgrade, then wait for a fixed release (StatusPing ships a
+  repair migration rather than editing the failed one). Error responses never
+  include configuration or secret values.
+- **`npm run upgrade` refuses to run:** it names the reason, such as local
+  changes, an edited updater-owned file, or a release that requires an
+  intermediate version first. Nothing is written until every check passes.
+
 ### Local deployment notes
 
 <!-- statusping:local-notes:start -->
