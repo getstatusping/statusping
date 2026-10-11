@@ -1,9 +1,9 @@
 {
   "name": "@statusping/app",
-  "version": "0.2.26",
+  "version": "0.3.0",
   "statusping": {
-    "minimumUpgradeVersion": "0.1.0",
-    "breaking": false
+    "minimumUpgradeVersion": "0.2.26",
+    "breaking": true
   },
   "private": true,
   "description": "Serverless uptime and cron-job monitoring with a status page, for Cloudflare Workers or Node.",

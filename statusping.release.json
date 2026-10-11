@@ -1,7 +1,7 @@
 {
   "format": "statusping-template/v1",
-  "release": "0.2.26",
-  "template": "0.2.26",
+  "release": "0.3.0",
+  "template": "0.3.0",
   "channel": "stable",
   "source": {
     "repository": "https://github.com/getstatusping/statusping",
@@ -32,7 +32,8 @@
       "wrangler.toml"
     ],
     "optionalCustomerOwnedPaths": [
-      ".dev.vars"
+      ".dev.vars",
+      "statusping.config.ts"
     ],
     "updaterOwnedWranglerBindings": [
       "STATUSPING_TEMPLATE_VERSION"
