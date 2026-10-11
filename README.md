@@ -25,8 +25,9 @@ Deploy Button installations create a repository that you own. The checked-in
 template, canonical source, and file-ownership contract used by future
 reviewable upgrade pull requests.
 
-- **Updater-owned:** the runtime, adapters, scripts, package metadata, CI, and
-  tests. A supported upgrade may replace only these paths.
+- **Updater-owned:** the runtime, adapters, scripts, package metadata, CI,
+  tests, release marker, and this README outside its marked local-notes region.
+  A supported upgrade may replace only these paths.
 - **Customer-owned:** `statusping.config.ts`, `wrangler.toml`, and `.dev.vars`.
   Upgrade tooling must not replace them. Its sole documented exception is the
   public `STATUSPING_TEMPLATE_VERSION` line in `wrangler.toml`.
@@ -38,6 +39,13 @@ Before accepting an upgrade PR, retain any custom runtime edits separately: a
 supported updater will surface conflicts rather than force-push or overwrite
 them. Run `npm run template:verify` to validate the ownership marker in a
 checkout. The release marker contains no secrets.
+
+Upgrade tooling must first run its credential-free preflight against the
+installed and target `statusping.release.json` files plus the target's tracked
+changed paths. It refuses missing or unsupported markers, non-forward version
+changes, customer-owned paths, and unowned paths. The preflight reports the
+updater-owned files it may write and preserves the marked README region
+byte-for-byte before a review PR is created.
 
 ### Local deployment notes
 

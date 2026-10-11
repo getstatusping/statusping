@@ -17,8 +17,10 @@
       "src/",
       "test/",
       "LICENSE",
+      "README.md",
       "package-lock.json",
       "package.json",
+      "statusping.release.json",
       "tsconfig.json",
       "vitest.config.ts"
     ],
