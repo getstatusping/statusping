@@ -73,6 +73,46 @@ describe('three-way upgrade plan', () => {
     expect(result.deletes).toEqual([])
   })
 
+  it('keeps the project name the Deploy Button gave the repository', () => {
+    const pkg = (name: string, version: string) => `{\n  "name": "${name}",\n  "version": "${version}"\n}\n`
+    const lock = (name: string, version: string) => `{\n  "name": "${name}",\n  "version": "${version}",\n  "packages": {\n    "": {\n      "name": "${name}",\n      "version": "${version}"\n    }\n  }\n}\n`
+    const base = release('0.1.0', { 'package.json': pkg('@statusping/app', '0.1.0'), 'package-lock.json': lock('@statusping/app', '0.1.0') })
+    const target = release('0.2.0', { 'package.json': pkg('@statusping/app', '0.2.0'), 'package-lock.json': lock('@statusping/app', '0.2.0') })
+    const current = { ...base, 'package.json': pkg('cardgem-statusping', '0.1.0'), 'package-lock.json': lock('cardgem-statusping', '0.1.0') }
+    const result = planUpgrade({ base: files(base), target: files(target), current: files(current), currentWrangler: encode(wrangler('0.1.0')) })
+    expect(result.conflicts).toEqual([])
+    expect(decode(result.writes.get('package.json'))).toBe(pkg('cardgem-statusping', '0.2.0'))
+    expect(decode(result.writes.get('package-lock.json'))).toBe(lock('cardgem-statusping', '0.2.0'))
+
+    const added = planUpgrade({
+      base: files(release('0.1.0', { 'package.json': pkg('@statusping/app', '0.1.0') })),
+      target: files(target),
+      current: files(release('0.1.0', { 'package.json': pkg('cardgem-statusping', '0.1.0') })),
+      currentWrangler: encode(wrangler('0.1.0')),
+    })
+    expect(decode(added.writes.get('package-lock.json'))).toBe(lock('cardgem-statusping', '0.2.0'))
+
+    const edited = { ...current, 'package.json': `{\n  "name": "cardgem-statusping",\n  "version": "0.1.0",\n  "scripts": {}\n}\n` }
+    expect(planUpgrade({ base: files(base), target: files(target), current: files(edited), currentWrangler: encode(wrangler('0.1.0')) }).conflicts)
+      .toEqual([{ path: 'package.json', reason: 'modified-locally' }])
+  })
+
+  it('adds the template version line when adopting an older repository', () => {
+    const add = (wranglerText: string) => decode(planUpgrade({ base: files(release('0.1.0')), target: files(release('0.2.0')), current: files(release('0.1.0')), currentWrangler: encode(wranglerText), addTemplateVersionLine: true }).writes.get('wrangler.toml'))
+    expect(add('name = "x"\n\n[vars]\nSTATUSPING_ROLE = "primary"\n')).toBe('name = "x"\n\n[vars]\nSTATUSPING_TEMPLATE_VERSION = "0.2.0"\nSTATUSPING_ROLE = "primary"\n')
+    expect(add('name = "x"\n')).toBe('name = "x"\n\n[vars]\nSTATUSPING_TEMPLATE_VERSION = "0.2.0"\n')
+  })
+
+  it('upgrades a README from before the local-notes region when it is unedited', () => {
+    const oldReadme = '# StatusPing\n\nNo notes section yet.\n'
+    const base = release('0.1.0', { 'README.md': oldReadme })
+    const result = planUpgrade({ base: files(base), target: files(release('0.2.0')), current: files(base), currentWrangler: encode(wrangler('0.1.0')) })
+    expect(result.conflicts).toEqual([])
+    expect(decode(result.writes.get('README.md'))).toBe(readme('Release 0.2.0'))
+    const edited = planUpgrade({ base: files(base), target: files(release('0.2.0')), current: files({ ...base, 'README.md': `${oldReadme}mine\n` }), currentWrangler: encode(wrangler('0.1.0')) })
+    expect(edited.conflicts).toEqual([{ path: 'README.md', reason: 'modified-locally' }])
+  })
+
   it('reports a locally deleted file and a missing template version line', () => {
     const current = release('0.1.0', { 'src/app.ts': null, 'wrangler.toml': 'name = "statusping"\n' })
     const result = plan(current)

@@ -42,9 +42,32 @@ function same(a: Uint8Array | undefined, b: Uint8Array | undefined): boolean {
   return true
 }
 
+const record = (value: unknown) => (value && typeof value === 'object' ? value as Record<string, unknown> : {})
+
 function json(bytes: Uint8Array | undefined): unknown {
   if (!bytes) return undefined
   try { return JSON.parse(decoder.decode(bytes)) } catch { return undefined }
+}
+
+// Cloudflare's Deploy Button renames the project in these files. That name is
+// the customer's, so it is neither a local edit nor overwritten by an upgrade.
+const RENAMED_BY_DEPLOY = new Set(['package.json', 'package-lock.json'])
+
+function packageName(bytes: Uint8Array): string | undefined {
+  const name = record(json(bytes)).name
+  return typeof name === 'string' ? name : undefined
+}
+
+function renamePackage(bytes: Uint8Array, from: string, to: string): Uint8Array {
+  if (from === to) return bytes
+  return encoder.encode(decoder.decode(bytes).split(`"name": ${JSON.stringify(from)}`).join(`"name": ${JSON.stringify(to)}`))
+}
+
+/** Apply the customer's project name to both sides so only real edits count. */
+function withCustomerName(base: Uint8Array, target: Uint8Array, current: Uint8Array): { base: Uint8Array; target: Uint8Array } | undefined {
+  const [baseName, targetName, currentName] = [packageName(base), packageName(target), packageName(current)]
+  if (!baseName || !targetName || !currentName) return undefined
+  return { base: renamePackage(base, baseName, currentName), target: renamePackage(target, targetName, currentName) }
 }
 
 /**
@@ -55,7 +78,8 @@ function json(bytes: Uint8Array | undefined): unknown {
  */
 function mergeFile(base: Uint8Array | undefined, target: Uint8Array | undefined, current: Uint8Array | undefined, region: PreservedRegion | undefined):
   { kind: 'unchanged' } | { kind: 'write'; content: Uint8Array } | { kind: 'delete' } | { kind: 'conflict'; reason: UpgradeConflict['reason'] } {
-  if (region && base && target && current) {
+  // A base from before the region existed has no notes to carry: compare it whole.
+  if (region && base && target && current && decoder.decode(base).includes(region.start)) {
     try {
       const [b, t, c] = [decoder.decode(base), decoder.decode(target), decoder.decode(current)]
       if (preserveMarkedRegion(c, b, region) !== c) return { kind: 'conflict', reason: 'modified-locally' }
@@ -71,10 +95,16 @@ function mergeFile(base: Uint8Array | undefined, target: Uint8Array | undefined,
   return target === undefined ? { kind: 'delete' } : { kind: 'write', content: target }
 }
 
-export function planUpgrade(input: { base: Files; target: Files; current: Files; currentWrangler: Uint8Array | undefined }): UpgradePlan {
+export function planUpgrade(input: {
+  base: Files
+  target: Files
+  current: Files
+  currentWrangler: Uint8Array | undefined
+  /** Repositories created before the template version line existed get it added under [vars]. */
+  addTemplateVersionLine?: boolean
+}): UpgradePlan {
   const baseMarker = json(input.base.get(MARKER_PATH))
   const targetMarker = json(input.target.get(MARKER_PATH))
-  const record = (value: unknown) => (value && typeof value === 'object' ? value as Record<string, unknown> : {})
   const currentVersion = String(record(baseMarker).release ?? '')
   const targetVersion = String(record(targetMarker).release ?? '')
   const plan: UpgradePlan = { safe: false, currentVersion, targetVersion, writes: new Map(), deletes: [], conflicts: [], errors: [] }
@@ -108,7 +138,13 @@ export function planUpgrade(input: { base: Files; target: Files; current: Files;
   const target = validateTemplateMarker(targetMarker, targetVersion)
 
   for (const path of preflight.updaterOwnedChanges) {
-    const result = mergeFile(input.base.get(path), input.target.get(path), input.current.get(path), target.ownership.preservedRegions[path])
+    let [base, next] = [input.base.get(path), input.target.get(path)]
+    const current = input.current.get(path)
+    if (RENAMED_BY_DEPLOY.has(path) && base && next && current) ({ base, target: next } = withCustomerName(base, next, current) ?? { base, target: next })
+    // A newly added lock file takes the project name from the customer's package.json.
+    const projectName = input.current.get('package.json') && packageName(input.current.get('package.json')!)
+    if (RENAMED_BY_DEPLOY.has(path) && !base && !current && next && projectName) next = renamePackage(next, packageName(next) ?? projectName, projectName)
+    const result = mergeFile(base, next, current, target.ownership.preservedRegions[path])
     if (result.kind === 'write') plan.writes.set(path, result.content)
     else if (result.kind === 'delete') plan.deletes.push(path)
     else if (result.kind === 'conflict') plan.conflicts.push({ path, reason: result.reason })
@@ -120,6 +156,12 @@ export function planUpgrade(input: { base: Files; target: Files; current: Files;
   if (TEMPLATE_VERSION_LINE.test(wrangler)) {
     const updated = wrangler.replace(TEMPLATE_VERSION_LINE, `STATUSPING_TEMPLATE_VERSION = "${targetVersion}"`)
     if (updated !== wrangler) plan.writes.set(WRANGLER_PATH, encoder.encode(updated))
+  } else if (input.addTemplateVersionLine && wrangler) {
+    const line = `STATUSPING_TEMPLATE_VERSION = "${targetVersion}"`
+    const updated = /^\[vars\][ \t]*$/m.test(wrangler)
+      ? wrangler.replace(/^\[vars\][ \t]*$/m, `[vars]\n${line}`)
+      : `${wrangler.replace(/\n*$/, '\n')}\n[vars]\n${line}\n`
+    plan.writes.set(WRANGLER_PATH, encoder.encode(updated))
   } else {
     plan.conflicts.push({ path: WRANGLER_PATH, reason: 'template-marker-missing' })
   }

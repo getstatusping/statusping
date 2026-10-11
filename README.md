@@ -68,6 +68,16 @@ it through a pull request; Cloudflare deploys the merge, and `/healthz` then
 reports the new version. To roll back the code, revert that pull request;
 database migrations are forward-only and are never rolled back.
 
+Repositories created before `statusping.release.json` existed have no
+`npm run upgrade` yet. Run the command from a copy of the latest template
+instead; `--adopt` finds the template commit your repository was created from
+and uses it as the starting point:
+
+```sh
+git clone --depth 1 https://github.com/getstatusping/statusping.git /tmp/statusping-latest
+node /tmp/statusping-latest/scripts/upgrade.ts --adopt
+```
+
 If you edited an updater-owned file, the command lists it and stops. Restore
 the file, or rerun with `--skip-conflicts` to upgrade everything else and merge
 that file by hand. Upstream changes to your own files (`statusping.config.ts`,
