@@ -76,6 +76,14 @@ export const SETUP_STYLES = `
 .howto { margin: 0 0 16px; font-size: 14px; } .howto summary { cursor: pointer; color: var(--muted-foreground); } .howto ul { margin: 8px 0; }
 .btn-primary[aria-disabled="true"] { opacity: .5; cursor: not-allowed; }
 select.input { width: 100%; }
+.segmented { display: inline-flex; gap: 4px; margin: 0 0 8px; padding: 4px; border-radius: var(--radius); background: var(--muted); }
+.segmented a { padding: 6px 12px; border-radius: calc(var(--radius) - 4px); font-size: 14px; color: var(--muted-foreground); }
+.segmented a:hover { color: var(--foreground); text-decoration: none; }
+.segmented a[aria-current="page"] { background: var(--background); color: var(--foreground); font-weight: 500; box-shadow: 0 1px 2px rgb(0 0 0 / .08); }
+.setup-card .kind-note { margin: 0 0 16px; }
+.summary { display: grid; grid-template-columns: max-content 1fr; gap: 10px 24px; margin: 0 0 20px; }
+.summary dt { color: var(--muted-foreground); } .summary dd { margin: 0; overflow-wrap: anywhere; }
+@media (max-width: 520px) { .summary { grid-template-columns: 1fr; gap: 2px; } .summary dd { margin-bottom: 8px; } }
 .secret { margin: 0 0 16px; padding: 12px 14px; border-radius: calc(var(--radius) - 2px); background: var(--muted); font: 600 16px ui-monospace, SFMono-Regular, Menlo, monospace; word-break: break-all; user-select: all; }
 `
 
@@ -244,20 +252,57 @@ ${field('Timezone', `<input class="input" id="timezone" name="timezone" type="te
 <script>(()=>{const t=document.getElementById('timezone');if(t&&t.value==='UTC'){try{t.value=Intl.DateTimeFormat().resolvedOptions().timeZone||'UTC'}catch{}}})()</script>`)
 }
 
-export function monitorPage(opts: { csrf: string; completed: ReadonlySet<SetupStep>; name: string; url: string; error?: string }): string {
+export type MonitorKind = 'http' | 'push' | 'tcp'
+export interface MonitorValues { name?: string; url?: string; keyword?: string; period?: string; schedule?: string; host?: string; port?: string }
+
+const MONITOR_KINDS: Array<[MonitorKind, string, string]> = [
+  ['http', 'Website', 'StatusPing checks a URL every minute.'],
+  ['push', 'Scheduled job', 'Your cron job or script pings StatusPing; you are alerted when a ping is late or missing.'],
+  ['tcp', 'TCP port', 'StatusPing checks that a port (a database, mail server, SSH…) accepts connections.'],
+]
+const PERIODS: Array<[string, string]> = [['5m', 'Every 5 minutes'], ['15m', 'Every 15 minutes'], ['30m', 'Every 30 minutes'], ['1h', 'Every hour'], ['6h', 'Every 6 hours'], ['1d', 'Every day']]
+
+export function monitorPage(opts: { csrf: string; completed: ReadonlySet<SetupStep>; kind: MonitorKind; values: MonitorValues; error?: string }): string {
+  const v = opts.values
+  const tabs = `<nav class="segmented" aria-label="Monitor type">${MONITOR_KINDS.map(([id, label]) => `<a href="/setup?step=monitor&amp;kind=${id}"${id === opts.kind ? ' aria-current="page"' : ''}>${label}</a>`).join('')}</nav>`
+  const describe = MONITOR_KINDS.find(([id]) => id === opts.kind)![2]
+  const fields = opts.kind === 'push'
+    ? `${field('Name', `<input class="input" id="name" name="name" type="text" value="${escape(v.name ?? 'Nightly backup')}" maxlength="80">`)}
+${field('How often does it run?', `<select class="input" id="period" name="period">${PERIODS.map(([value, label]) => `<option value="${value}"${(v.period ?? '1d') === value ? ' selected' : ''}>${label}</option>`).join('')}</select>`)}
+${field('Or a cron schedule (optional)', `<input class="input" id="schedule" name="schedule" type="text" value="${escape(v.schedule ?? '')}" placeholder="0 3 * * *" spellcheck="false">`, 'Use this instead when the job runs at fixed times, such as <code>0 3 * * *</code> for 3:00 every day in your site timezone.')}
+<p class="hint">After setup you get a ping URL to call at the end of the job, for example with <code>curl</code>.</p>`
+    : opts.kind === 'tcp'
+      ? `${field('Name', `<input class="input" id="name" name="name" type="text" value="${escape(v.name ?? 'Database')}" maxlength="80">`)}
+${field('Host', `<input class="input" id="host" name="host" type="text" value="${escape(v.host ?? '')}" placeholder="db.example.com" spellcheck="false">`)}
+${field('Port', `<input class="input" id="port" name="port" type="number" min="1" max="65535" value="${escape(v.port ?? '')}" placeholder="5432">`)}`
+      : `${field('Name', `<input class="input" id="name" name="name" type="text" value="${escape(v.name ?? 'Website')}" maxlength="80">`)}
+${field('URL to check', `<input class="input" id="url" name="url" type="url" value="${escape(v.url ?? '')}" placeholder="https://example.com">`)}
+${field('Text the page must contain (optional)', `<input class="input" id="keyword" name="keyword" type="text" value="${escape(v.keyword ?? '')}" maxlength="200">`, 'Catches pages that load but show an error.')}`
   return shell('First monitor', 'monitor', opts.completed, `<h1>Add a first monitor</h1>
-<p class="lead">Optional. Check a website every minute. You can add scheduled-job monitors and alert channels later in the YAML admin.</p>${alert(opts.error)}
-<form class="setup-form" method="post" action="/setup/monitor">${hidden(opts.csrf)}
-${field('Name', `<input class="input" id="name" name="name" type="text" value="${escape(opts.name)}" maxlength="80">`)}
-${field('URL to check', `<input class="input" id="url" name="url" type="url" value="${escape(opts.url)}" placeholder="https://example.com">`)}
+<p class="lead">Optional. You can add more monitors and alert channels later in the admin.</p>${alert(opts.error)}
+${tabs}<p class="hint kind-note">${describe}</p>
+<form class="setup-form" method="post" action="/setup/monitor">${hidden(opts.csrf)}<input type="hidden" name="kind" value="${opts.kind}">
+${fields}
 <div class="actions"><button class="btn-primary" type="submit">Add monitor</button><button class="btn-outline" type="submit" name="skip" value="1" formnovalidate>Skip for now</button></div></form>`)
 }
 
-export function reviewPage(opts: { csrf: string; completed: ReadonlySet<SetupStep>; yaml: string; error?: string }): string {
+export function reviewPage(opts: { csrf: string; completed: ReadonlySet<SetupStep>; summary: Array<[string, string]>; yaml: string; error?: string }): string {
   return shell('Review', 'review', opts.completed, `<h1>Review and finish</h1>
-<p class="lead">This is the configuration StatusPing will start with. After setup you edit it as YAML in the admin.</p>${alert(opts.error)}
-<pre>${escape(opts.yaml)}</pre>
+<p class="lead">StatusPing will start with these settings. You can change any of them later in the admin.</p>${alert(opts.error)}
+<dl class="summary">${opts.summary.map(([label, value]) => `<dt>${escape(label)}</dt><dd>${escape(value)}</dd>`).join('')}</dl>
+<details class="howto"><summary>Show as YAML</summary><p class="hint">This is the configuration file the admin lets you edit directly.</p><pre>${escape(opts.yaml)}</pre></details>
 <form method="post" action="/setup/finish">${hidden(opts.csrf)}<div class="actions"><button class="btn-primary" type="submit">Finish setup</button><a class="btn-outline" href="/setup?step=monitor">Back</a></div></form>`)
+}
+
+/** Shown once after setup when the first monitor is a scheduled job: its ping URL is never shown again. */
+export function setupDonePage(opts: { pingUrl: string; monitorName: string }): string {
+  return shell('Setup complete', null, new Set(), `<h1>Setup is complete</h1>
+<p class="lead">Checks start within a minute. One last thing for <strong>${escape(opts.monitorName)}</strong>: have the job call its ping URL when it finishes.</p>
+<p class="alert warning">This URL is shown only once. Copy it now; anyone with it can report on this job. You can generate a new one in the admin.</p>
+<p class="secret">${escape(opts.pingUrl)}</p>
+<p>For example, at the end of the job:</p><pre>curl -fsS ${escape(opts.pingUrl)}</pre>
+<p class="hint">To report a failure instead, call <code>${escape(opts.pingUrl)}/fail</code>; to track run time, call <code>${escape(opts.pingUrl)}/start</code> when the job begins.</p>
+<div class="actions"><a class="btn-primary" href="/admin">Go to the admin</a></div>`)
 }
 
 export function resetPage(opts: { error?: string }): string {

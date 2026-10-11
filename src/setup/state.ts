@@ -9,6 +9,11 @@ export type SetupStatus = 'pending' | 'complete'
 
 export type SetupMethod = 'basic' | 'cloudflare-access' | 'oidc'
 
+export type SetupMonitor =
+  | { kind?: 'http'; name: string; url: string; keyword?: string }
+  | { kind: 'push'; name: string; period?: string; schedule?: string }
+  | { kind: 'tcp'; name: string; host: string; port: number }
+
 export interface SetupDraft {
   method?: SetupMethod
   /** The first administrator: typed for built-in, taken from the verified sign-in otherwise. */
@@ -23,7 +28,8 @@ export interface SetupDraft {
   timezone?: string
   privatePage?: boolean
   updates?: boolean
-  monitor?: { name: string; url: string } | null
+  /** The optional first monitor. A missing kind means HTTP (drafts from before monitor types). */
+  monitor?: SetupMonitor | null
   monitorStepDone?: boolean
 }
 

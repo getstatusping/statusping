@@ -14,16 +14,18 @@ import { validateAdminConfig } from '../admin/security.ts'
 import { stringifyAdminYaml } from '../admin/yaml.ts'
 import { b64urlEncode, verifyJwt } from '../auth/jwt.ts'
 import { discover } from '../auth/providers.ts'
-import type { AuthProviderInput } from '../config.ts'
+import type { AuthProviderInput, MonitorInput } from '../config.ts'
 import { type Deps, refreshAdminConfig, STORABLE_ENV, storedEnvKey } from '../deps.ts'
+import { rotatePingToken } from '../admin/service.ts'
+import { syncConfig } from '../sync.ts'
 import { TEAM_DOMAIN, presetById } from './instructions.ts'
-import { accessPage, type EnvSource, oidcPage } from './ui.ts'
+import { accessPage, type EnvSource, type MonitorValues, oidcPage, setupDonePage } from './ui.ts'
 import { consumePingRateLimit } from '../rate-limit.ts'
 import { randomToken, timingSafeEqual } from '../util/crypto.ts'
 import { isValidTimeZone, nowSeconds } from '../util/time.ts'
 import {
   beginSetup, expectedSetupCode, loadSetupState, recordFailedClaim, saveDraft, setupCodeMatches,
-  type SetupDraft, type SetupMethod, type SetupState,
+  type SetupDraft, type SetupMethod, type SetupMonitor, type SetupState,
 } from './state.ts'
 import { accountPage, basicsPage, claimPage, methodPage, monitorPage, resetPage, reviewPage, type SetupStep } from './ui.ts'
 
@@ -61,10 +63,53 @@ function draftProvider(draft: SetupDraft): AuthProviderInput {
   return { type: 'basic' }
 }
 
+/** Fixed ids for the wizard's single monitor, by kind. */
+export const MONITOR_IDS = { http: 'website', push: 'job', tcp: 'service' } as const
+
+function monitorInput(monitor: SetupMonitor, timezone: string | undefined): MonitorInput {
+  if (monitor.kind === 'push') {
+    return monitor.schedule
+      ? { id: MONITOR_IDS.push, kind: 'push', name: monitor.name, schedule: monitor.schedule, ...(timezone ? { tz: timezone } : {}) }
+      : { id: MONITOR_IDS.push, kind: 'push', name: monitor.name, period: monitor.period ?? '1h' }
+  }
+  if (monitor.kind === 'tcp') return { id: MONITOR_IDS.tcp, kind: 'tcp', name: monitor.name, host: monitor.host, port: monitor.port }
+  return { id: MONITOR_IDS.http, kind: 'http', name: monitor.name, url: monitor.url, ...(monitor.keyword ? { keyword: monitor.keyword } : {}) }
+}
+
+function monitorValues(monitor: SetupMonitor): MonitorValues {
+  if (monitor.kind === 'push') return { name: monitor.name, period: monitor.period, schedule: monitor.schedule }
+  if (monitor.kind === 'tcp') return { name: monitor.name, host: monitor.host, port: String(monitor.port) }
+  return { name: monitor.name, url: monitor.url, keyword: monitor.keyword }
+}
+
+const PERIOD_WORDS: Record<string, string> = { '5m': 'every 5 minutes', '15m': 'every 15 minutes', '30m': 'every 30 minutes', '1h': 'every hour', '6h': 'every 6 hours', '1d': 'every day' }
+
+/** The review step in plain words; the YAML is offered separately. */
+export function draftSummary(draft: SetupDraft): Array<[string, string]> {
+  const signIn = draft.method === 'cloudflare-access' ? `Cloudflare Access (${draft.teamDomain})`
+    : draft.method === 'oidc' ? `Single sign-on with ${presetById(draft.oidcPreset)?.label ?? 'your OpenID Connect provider'}`
+      : 'Email and password'
+  const m = draft.monitor
+  const monitor = !m ? 'None yet'
+    : m.kind === 'push' ? `${m.name}: a scheduled job expected ${m.schedule ? `on the cron schedule ${m.schedule}` : PERIOD_WORDS[m.period ?? '1d'] ?? `every ${m.period}`}`
+      : m.kind === 'tcp' ? `${m.name}: port ${m.port} on ${m.host}, checked every minute`
+        : `${m.name}: ${m.url}, checked every minute${m.keyword ? ` for "${m.keyword}"` : ''}`
+  return [
+    ['Site title', draft.title ?? ''],
+    ['Address', draft.baseUrl ?? ''],
+    ['Timezone', draft.timezone ?? ''],
+    ['Administrator', draft.email ?? ''],
+    ['Sign-in', signIn],
+    ['Status page', draft.privatePage ? 'Private: only administrators can see it' : 'Public: anyone with the link can see it'],
+    ['First monitor', monitor],
+    ['Update checks', draft.updates ? 'On: the admin shows when a new StatusPing version is out' : 'Off'],
+  ]
+}
+
 /** The wizard's configuration, built only from validated draft fields. */
 export function draftConfig(draft: SetupDraft): AdminConfig {
   const email = draft.email!
-  const monitors = draft.monitor ? [{ id: 'website', kind: 'http' as const, name: draft.monitor.name, url: draft.monitor.url }] : []
+  const monitors = draft.monitor ? [monitorInput(draft.monitor, draft.timezone)] : []
   return {
     admin: true,
     title: draft.title!,
@@ -150,8 +195,12 @@ export function mountSetupRoutes(app: Hono, deps: Deps): void {
       case 'method': return html(c, methodPage({ csrf, completed, current: draft.method }))
       case 'account': return html(c, accountPage({ csrf, completed, email: draft.email }))
       case 'basics': return html(c, basicsPage({ csrf, completed, title: draft.title ?? 'Status', baseUrl: draft.baseUrl ?? origin, timezone: draft.timezone ?? 'UTC', privatePage: draft.privatePage ?? true, updates: draft.updates ?? true }))
-      case 'monitor': return html(c, monitorPage({ csrf, completed, name: draft.monitor?.name ?? 'Website', url: draft.monitor?.url ?? '' }))
-      default: return html(c, reviewPage({ csrf, completed, yaml: stringifyAdminYaml(draftConfig(draft)) }))
+      case 'monitor': {
+        const saved = draft.monitor ?? undefined
+        const kind = (['http', 'push', 'tcp'] as const).find((k) => k === c.req.query('kind')) ?? saved?.kind ?? 'http'
+        return html(c, monitorPage({ csrf, completed, kind, values: saved && (saved.kind ?? 'http') === kind ? monitorValues(saved) : {} }))
+      }
+      default: return html(c, reviewPage({ csrf, completed, summary: draftSummary(draft), yaml: stringifyAdminYaml(draftConfig(draft)) }))
     }
   }
 
@@ -349,12 +398,33 @@ export function mountSetupRoutes(app: Hono, deps: Deps): void {
       await saveDraft(deps.db, { ...r.state.draft, monitor: null, monitorStepDone: true }, nowSeconds())
       return c.redirect('/setup', 303)
     }
-    const name = field(r.form, 'name').slice(0, 80) || 'Website'
-    const url = field(r.form, 'url')
-    let valid = false
-    try { valid = ['http:', 'https:'].includes(new URL(url).protocol) } catch { /* reported below */ }
-    if (!valid) return html(c, monitorPage({ csrf: r.csrf, completed: new Set(['claim', 'method', 'account', 'basics']), name, url, error: 'Enter a full http:// or https:// URL, or skip this step.' }), 400)
-    await saveDraft(deps.db, { ...r.state.draft, monitor: { name, url }, monitorStepDone: true }, nowSeconds())
+    const kind = (['http', 'push', 'tcp'] as const).find((k) => k === field(r.form, 'kind')) ?? 'http'
+    const name = field(r.form, 'name').slice(0, 80)
+    const values: MonitorValues = { name, url: field(r.form, 'url'), keyword: field(r.form, 'keyword'), period: field(r.form, 'period'), schedule: field(r.form, 'schedule'), host: field(r.form, 'host'), port: field(r.form, 'port') }
+    let monitor: SetupMonitor | undefined
+    let error: string | undefined
+    if (!name) error = 'Give the monitor a name.'
+    else if (kind === 'http') {
+      let ok = false
+      try { ok = ['http:', 'https:'].includes(new URL(values.url!).protocol) } catch { /* reported below */ }
+      if (!ok) error = 'Enter a full http:// or https:// URL, or skip this step.'
+      else monitor = { kind: 'http', name, url: values.url!, ...(values.keyword ? { keyword: values.keyword.slice(0, 200) } : {}) }
+    } else if (kind === 'push') {
+      monitor = values.schedule ? { kind: 'push', name, schedule: values.schedule } : { kind: 'push', name, period: values.period || '1d' }
+    } else {
+      const port = Number(values.port)
+      if (!/^[a-z0-9.-]+$/i.test(values.host ?? '')) error = 'Enter a host name or IP address, such as db.example.com.'
+      else if (!Number.isInteger(port) || port < 1 || port > 65535) error = 'Enter a port between 1 and 65535.'
+      else monitor = { kind: 'tcp', name, host: values.host!, port }
+    }
+    // Let the full validator judge cron expressions, periods, and the rest.
+    if (monitor) {
+      try { validateAdminConfig(draftConfig({ ...r.state.draft, monitor }), deps.getEnv) } catch (e) {
+        error = kind === 'push' && values.schedule ? `"${values.schedule}" is not a valid cron schedule. Use five fields, such as 0 3 * * *.` : (e as Error).message
+      }
+    }
+    if (error || !monitor) return html(c, monitorPage({ csrf: r.csrf, completed: new Set(['claim', 'method', 'account', 'basics']), kind, values, error }), 400)
+    await saveDraft(deps.db, { ...r.state.draft, monitor, monitorStepDone: true }, nowSeconds())
     return c.redirect('/setup', 303)
   })
 
@@ -368,7 +438,7 @@ export function mountSetupRoutes(app: Hono, deps: Deps): void {
     try {
       config = validateAdminConfig(draftConfig(draft), deps.getEnv).config
     } catch (error) {
-      return html(c, reviewPage({ csrf: r.csrf, completed: new Set(['claim', 'method', 'account', 'basics', 'monitor']), yaml: stringifyAdminYaml(draftConfig(draft)), error: (error as Error).message }), 400)
+      return html(c, reviewPage({ csrf: r.csrf, completed: new Set(['claim', 'method', 'account', 'basics', 'monitor']), summary: draftSummary(draft), yaml: stringifyAdminYaml(draftConfig(draft)), error: (error as Error).message }), 400)
     }
     const email = draft.email!
     const method = draft.method ?? 'basic'
@@ -392,7 +462,13 @@ export function mountSetupRoutes(app: Hono, deps: Deps): void {
     deleteCookie(c, SETUP_COOKIE, { path: '/' })
     // Cloudflare Access signs people in on every request; the other methods use a session.
     if (method !== 'cloudflare-access') await setSession(c, deps, { email, groups: [], provider: method === 'oidc' ? 'oidc' : 'basic' })
-    return c.redirect('/admin?message=' + encodeURIComponent('Setup is complete. Checks start within a minute.'), 303)
+    // A scheduled job needs its ping URL, which exists only once: generate it and show it now.
+    if (draft.monitor?.kind === 'push') {
+      await syncConfig(deps, now)
+      const token = await rotatePingToken(deps.db, MONITOR_IDS.push, email, now)
+      if (token) return html(c, setupDonePage({ pingUrl: `${config.baseUrl.replace(/\/+$/, '')}/ping/${token}`, monitorName: draft.monitor.name }))
+    }
+    return c.redirect('/', 303)
   })
 
   // ── Reset: only exists while the STATUSPING_RESET_TOKEN secret is set ──────────────────────

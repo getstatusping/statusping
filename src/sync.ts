@@ -48,7 +48,10 @@ export async function syncConfig(deps: Deps, now: number): Promise<boolean> {
               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
               ON CONFLICT (id) DO UPDATE SET kind = excluded.kind, name = excluded.name,
                 group_name = excluded.group_name, sort_order = excluded.sort_order,
-                config_json = excluded.config_json, ping_token_hash = excluded.ping_token_hash,
+                -- A token generated in the app (setup or admin rotation) survives config changes;
+                -- PING_TOKENS, when it has an entry, still wins. Non-push monitors never keep one.
+                config_json = excluded.config_json,
+                ping_token_hash = CASE WHEN excluded.kind = 'push' THEN COALESCE(excluded.ping_token_hash, monitors.ping_token_hash) ELSE NULL END,
                 paused = excluded.paused`,
         params: [id, kind, name, group, order, configJson, tokenHashes[id] ?? null, isActive ? 0 : 1, now],
       },

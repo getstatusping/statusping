@@ -98,7 +98,7 @@ describe('setup wizard: Cloudflare Access and OpenID Connect', () => {
     expect((await b.get('/setup?step=account')).body).toContain('owner@acme.test')
 
     const done = await finish(b, csrf)
-    expect(done.res.headers.get('location')).toMatch(/^\/admin/)
+    expect(done.res.headers.get('location')).toBe('/')
     expect(b.jar.has('sp_session')).toBe(false)
     const review = (await db.first<{ config_json: string }>(`SELECT config_json FROM admin_config`))!.config_json
     expect(JSON.parse(review).access).toEqual({ provider: { type: 'cloudflare-access', teamDomain: 'acme.cloudflareaccess.com', audience: { $env: 'CF_ACCESS_AUD' } }, admins: { emails: ['owner@acme.test'] } })
@@ -150,7 +150,7 @@ describe('setup wizard: Cloudflare Access and OpenID Connect', () => {
     expect((await b.get('/setup?step=account')).body).toContain('owner@acme.test')
 
     const done = await finish(b, csrf)
-    expect(done.res.headers.get('location')).toMatch(/^\/admin/)
+    expect(done.res.headers.get('location')).toBe('/')
     expect(b.jar.has('sp_session')).toBe(true)
     expect((await b.get('/admin')).res.status).toBe(200)
     const config = JSON.parse((await db.first<{ config_json: string }>(`SELECT config_json FROM admin_config`))!.config_json)
@@ -195,7 +195,7 @@ describe('setup wizard: Cloudflare Access and OpenID Connect', () => {
     expect(start.searchParams.get('client_id')).toBe('db-client')
     nonce = start.searchParams.get('nonce')!
     expect((await b.get(`/auth/callback?code=c&state=${start.searchParams.get('state')}`)).res.headers.get('location')).toBe('/setup?step=account')
-    expect((await finish(b, csrf)).res.headers.get('location')).toMatch(/^\/admin/)
+    expect((await finish(b, csrf)).res.headers.get('location')).toBe('/')
     expect((await b.get('/admin')).res.status).toBe(200)
 
     // The audit log names what was stored, never the value.
