@@ -84,6 +84,8 @@ select.input { width: 100%; }
 .summary { display: grid; grid-template-columns: max-content 1fr; gap: 10px 24px; margin: 0 0 20px; }
 .summary dt { color: var(--muted-foreground); } .summary dd { margin: 0; overflow-wrap: anywhere; }
 @media (max-width: 520px) { .summary { grid-template-columns: 1fr; gap: 2px; } .summary dd { margin-bottom: 8px; } }
+.fold { margin-top: 24px; } .fold[open] summary { margin-bottom: 8px; }
+.setup-card .alert.success + form .actions { margin-top: 0; }
 .secret { margin: 0 0 16px; padding: 12px 14px; border-radius: calc(var(--radius) - 2px); background: var(--muted); font: 600 16px ui-monospace, SFMono-Regular, Menlo, monospace; word-break: break-all; user-select: all; }
 `
 
@@ -166,6 +168,10 @@ function envChecklist(env: Record<string, EnvSource>): string {
 
 const DB_NOTE = '<p class="hint">Saved values are kept in this site\'s database and never shown again. A Worker secret is more protected (nobody can read it back), and takes precedence when set.</p>'
 
+/** After verification only the confirmation matters; the connection steps fold away. */
+const foldWhenVerified = (verified: boolean, content: string) =>
+  verified ? `<details class="howto fold"><summary>Change connection settings</summary>${content}</details>` : content
+
 function verifiedBlock(csrf: string, email: string, method: string): string {
   return `<p class="alert success" role="status">Verified. <strong>${escape(email)}</strong> signed in with ${method} and will be the first administrator.</p>
 <form method="post" action="/setup/connected">${hidden(csrf)}<div class="actions"><button class="btn-primary" type="submit">Continue</button><a class="btn-outline" href="/setup?step=method">Choose a different method</a></div></form>`
@@ -186,7 +192,7 @@ export function accessPage(opts: { csrf: string; completed: ReadonlySet<SetupSte
   return shell('Cloudflare Access', 'account', opts.completed, `<h1>Connect Cloudflare Access</h1>
 <p class="lead">Cloudflare Access signs people in before requests reach StatusPing. StatusPing then checks the signed Access token on every request.</p>${alert(opts.error)}
 ${opts.verifiedEmail ? verifiedBlock(opts.csrf, opts.verifiedEmail, 'Cloudflare Access') : ''}
-${section(1, 'Create the Access application', `<ol class="steps-list">
+${foldWhenVerified(Boolean(opts.verifiedEmail), `${section(1, 'Create the Access application', `<ol class="steps-list">
 <li>Open <strong>Cloudflare Zero Trust → Access → Applications → Add an application → Self-hosted</strong> (<a href="${ACCESS_DOCS_URL}" target="_blank" rel="noopener">Cloudflare guide</a>).</li>
 <li>Application domain: <code>${escape(opts.host)}</code>. Then choose what Access protects:
 <ul><li><strong>The whole site</strong> (leave the path empty): simplest, but your status page becomes private too.</li>
@@ -200,7 +206,7 @@ ${field('Application Audience (AUD) Tag', `<input class="input" id="CF_ACCESS_AU
 ${section(3, 'Enter the team domain', `<form class="setup-form" method="post" action="/setup/access">${hidden(opts.csrf)}
 ${field('Team domain', `<input class="input" id="teamDomain" name="teamDomain" type="text" value="${escape(opts.teamDomain ?? '')}" placeholder="yourteam.cloudflareaccess.com" spellcheck="false" required>`, 'Shown on the application Overview. It is not secret.')}
 <div class="actions"><button class="btn-outline" type="submit">Save team domain</button></div></form>`)}
-${verifySection(4, { ready, verified: Boolean(opts.verifiedEmail), href: '/auth/setup-verify', label: 'Verify with Cloudflare Access', intro: 'Access asks you to sign in, then StatusPing checks the token against your team domain and audience.', blocked: 'Add CF_ACCESS_AUD and save the team domain first.' })}`)
+${verifySection(4, { ready, verified: Boolean(opts.verifiedEmail), href: '/auth/setup-verify', label: 'Verify with Cloudflare Access', intro: 'Access asks you to sign in, then StatusPing checks the token against your team domain and audience.', blocked: 'Add CF_ACCESS_AUD and save the team domain first.' })}`)}`)
 }
 
 export function oidcPage(opts: { csrf: string; completed: ReadonlySet<SetupStep>; origin: string; preset?: string; issuer?: string; trustUnverifiedEmail?: boolean; env: Record<string, EnvSource>; clientId?: string; sessionKeyNote: boolean; verifiedEmail?: string; error?: string }): string {
@@ -212,7 +218,7 @@ export function oidcPage(opts: { csrf: string; completed: ReadonlySet<SetupStep>
   return shell('OpenID Connect', 'account', opts.completed, `<h1>Connect OpenID Connect (SSO)</h1>
 <p class="lead">Register StatusPing as a web application with your identity provider, then run a real test sign-in.</p>${alert(opts.error)}
 ${opts.verifiedEmail ? verifiedBlock(opts.csrf, opts.verifiedEmail, preset.label) : ''}
-<div class="setup-form">${field('Identity provider', `<select class="input" id="preset" name="preset" onchange="location.href='/setup?step=account&amp;preset='+encodeURIComponent(this.value)">${OIDC_PRESETS.map((p) => `<option value="${p.id}"${p.id === preset.id ? ' selected' : ''}>${p.label}</option>`).join('')}</select>`)}</div>
+${foldWhenVerified(Boolean(opts.verifiedEmail), `<div class="setup-form">${field('Identity provider', `<select class="input" id="preset" name="preset" onchange="location.href='/setup?step=account&amp;preset='+encodeURIComponent(this.value)">${OIDC_PRESETS.map((p) => `<option value="${p.id}"${p.id === preset.id ? ' selected' : ''}>${p.label}</option>`).join('')}</select>`)}</div>
 ${section(1, `Register StatusPing with ${preset.label}`, `<p>${preset.register} (<a href="${preset.docsUrl}" target="_blank" rel="noopener">${preset.label} guide</a>)</p>
 <p>Set the redirect (callback) URL to exactly:</p><pre>${escape(callback)}</pre>${workersDev ? '<p class="alert warning">This is a <code>workers.dev</code> address. If you add a custom domain later, register its callback URL too.</p>' : ''}`)}
 ${section(2, 'Add the client credentials', `<p>Copy the client ID and client secret your provider issued for this application.</p>${envChecklist(opts.env)}
@@ -226,7 +232,7 @@ ${field('Issuer URL', `<input class="input" id="issuer" name="issuer" type="url"
 <label class="check"><input type="checkbox" name="trustUnverifiedEmail" value="1"${opts.trustUnverifiedEmail ? ' checked' : ''}><span>Accept emails this provider has not verified</span></label>
 <p class="hint">Only for a provider you run yourself where you control every account's email, such as Pocket ID. Otherwise someone could use another person's address to sign in as them.</p>
 <div class="actions"><button class="btn-outline" type="submit">Save and check issuer</button></div></form>`)}
-${verifySection(4, { ready, verified: Boolean(opts.verifiedEmail), href: '/setup/oidc/start', label: 'Test sign-in', intro: 'Sign in with your provider. Setup continues once the callback returns your verified email address.', blocked: missing.length ? `Add ${missing.join(' and ')} and save the issuer first.` : 'Save the issuer first.' })}`)
+${verifySection(4, { ready, verified: Boolean(opts.verifiedEmail), href: '/setup/oidc/start', label: 'Test sign-in', intro: 'Sign in with your provider. Setup continues once the callback returns your verified email address.', blocked: missing.length ? `Add ${missing.join(' and ')} and save the issuer first.` : 'Save the issuer first.' })}`)}`)
 }
 
 export function accountPage(opts: { csrf: string; completed: ReadonlySet<SetupStep>; email?: string; error?: string }): string {
@@ -260,7 +266,7 @@ export interface MonitorValues { name?: string; url?: string; keyword?: string; 
 const MONITOR_KINDS: Array<[MonitorKind, string, string]> = [
   ['http', 'Website', 'StatusPing checks a URL every minute.'],
   ['push', 'Scheduled job', 'Your cron job or script pings StatusPing; you are alerted when a ping is late or missing.'],
-  ['tcp', 'TCP port', 'StatusPing checks that a port (a database, mail server, SSH…) accepts connections.'],
+  ['tcp', 'TCP port', 'StatusPing checks that a port (a database, mail server, SSH…) accepts connections. On Cloudflare it cannot reach Cloudflare-proxied hostnames, port 25, or private addresses; use the server\'s public IP or an unproxied hostname.'],
 ]
 const PERIODS: Array<[string, string]> = [['5m', 'Every 5 minutes'], ['15m', 'Every 15 minutes'], ['30m', 'Every 30 minutes'], ['1h', 'Every hour'], ['6h', 'Every 6 hours'], ['1d', 'Every day']]
 

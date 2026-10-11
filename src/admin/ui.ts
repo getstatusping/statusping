@@ -174,6 +174,7 @@ ${field('Or a cron schedule', textInput('schedule', v('schedule'), 'placeholder=
 <div class="grid-2">${field('Schedule timezone', textInput('tz', v('tz', opts.timezone)))}${field('Grace period', textInput('grace', v('grace'), 'placeholder="e.g. 15m"'), 'Extra time before a late job alerts.')}</div>
 ${field('Maximum run time', textInput('maxRuntime', v('maxRuntime'), 'placeholder="e.g. 2h"'), 'Optional. Alerts when a started job has not finished in time.')}`
       : `
+<p class="hint" style="margin:0">On Cloudflare, port checks cannot reach Cloudflare-proxied hostnames, port 25, or private addresses. Use the server's public IP or an unproxied hostname.</p>
 <div class="grid-2">${field('Host', textInput('host', v('host'), 'required placeholder="db.example.com" spellcheck="false"'))}${field('Port', textInput('port', v('port'), 'type="number" min="1" max="65535" required'))}</div>
 <div class="grid-2">${field('Check', selectInput('interval', INTERVALS, v('interval')))}${field('Failed checks before alerting', textInput('retries', v('retries'), 'type="number" min="0" max="10" placeholder="0"'))}</div>`
   const sinkChoices = opts.sinks.length
