@@ -73,7 +73,11 @@ export async function checkForUpdate(opts: { db: Db; config: NormalizedConfig; f
   if (!opts.force && existing && opts.now - existing.checkedAt < DAY) return existing
   let next: StoredUpdateCheck = { result: 'failed', targetVersion: null, checkedAt: opts.now }
   try {
-    const response = await opts.fetch(updates.manifestUrl, { headers: { accept: 'application/json' }, redirect: 'error' })
+    const response = await opts.fetch(updates.manifestUrl, {
+      headers: { accept: 'application/json' },
+      redirect: 'error',
+      signal: AbortSignal.timeout(5_000),
+    })
     const length = Number(response.headers.get('content-length') ?? '0')
     if (!response.ok || (Number.isFinite(length) && length > 64 * 1024)) throw new Error('unusable manifest response')
     const raw = await response.text()
