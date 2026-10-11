@@ -88,8 +88,8 @@ export async function recordFailedClaim(db: Db, state: SetupState, usesEnvToken:
 
 /**
  * Puts the instance into setup mode. The current DB configuration is kept in
- * previous_config_json; built-in accounts, the session key, and CSRF tokens are removed so every
- * existing session ends. Monitor history is kept.
+ * previous_config_json; built-in accounts, the session key, stored sign-in settings, and CSRF
+ * tokens are removed so every existing session ends. Monitor history is kept.
  */
 export async function beginSetup(db: Db, actor: string, now: number): Promise<void> {
   await db.batch([
@@ -104,7 +104,7 @@ export async function beginSetup(db: Db, actor: string, now: number): Promise<vo
     },
     { sql: `DELETE FROM admin_config WHERE id = 1` },
     { sql: `DELETE FROM local_users` },
-    { sql: `DELETE FROM instance_secrets WHERE name = 'session_key'` },
+    { sql: `DELETE FROM instance_secrets WHERE name = 'session_key' OR name LIKE 'env:%'` },
     { sql: `DELETE FROM admin_csrf` },
     { sql: `INSERT INTO audit_log (actor, action, target, before_json, after_json, at) VALUES (?, 'instance.reset', 'setup', NULL, NULL, ?)`, params: [actor, now] },
   ])

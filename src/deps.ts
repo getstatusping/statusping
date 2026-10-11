@@ -30,7 +30,12 @@ export interface Deps {
   /** The instance is in first-run setup mode: only /healthz and /setup respond, and ticks run no checks. */
   setupPending: boolean
   role: Role
+  /** Environment first, then the values setup stored in the DB (see STORABLE_ENV). */
   getEnv: EnvGetter
+  /** Whether a name is set in the real environment (not a stored value). */
+  hasRealEnv: (name: string) => boolean
+  /** Values setup stored in the DB for STORABLE_ENV names; reloaded on every refresh. */
+  storedEnv: Record<string, string>
   /** monitor id → ping token (secret), from the PING_TOKENS env var. */
   pingTokens: Record<string, string>
   fetch: typeof fetch
@@ -84,14 +89,17 @@ export function createDeps(opts: CreateDepsOptions): Deps {
   if (config.subscribers && !opts.getEnv('SUBSCRIBER_TOKEN_SECRET')) {
     throw new Error('SUBSCRIBER_TOKEN_SECRET must be set when subscribers are configured')
   }
-  return {
+  const deps: Deps = {
     db: opts.db,
     config,
     configInput: opts.config,
     adminEnabled: opts.config.admin === true,
     setupPending: false,
     role: roleEnv,
-    getEnv: opts.getEnv,
+    // A Worker secret or env var always wins over a value stored by setup.
+    getEnv: (name) => opts.getEnv(name) ?? (STORABLE_ENV.includes(name) ? deps.storedEnv[name] : undefined),
+    hasRealEnv: (name) => opts.getEnv(name) !== undefined,
+    storedEnv: {},
     pingTokens: parsePingTokens(opts.getEnv('PING_TOKENS')),
     // Bind: Workers throw "Illegal invocation" when fetch is called detached from globalThis.
     fetch: opts.fetch ?? fetch.bind(globalThis),
@@ -103,6 +111,25 @@ export function createDeps(opts: CreateDepsOptions): Deps {
     clientIp: opts.clientIp ?? (() => null),
     log: opts.log ?? consoleLogger,
   }
+  return deps
+}
+
+/**
+ * Settings the setup wizard may store in the DB instead of the environment. A Worker secret is
+ * write-only; a DB value is readable by anyone with database access, so the environment always
+ * takes precedence and the UI never shows a stored value back.
+ */
+export const STORABLE_ENV = ['OIDC_CLIENT_ID', 'OIDC_CLIENT_SECRET', 'CF_ACCESS_AUD']
+export const storedEnvKey = (name: string) => `env:${name}`
+
+async function loadStoredEnv(deps: Deps): Promise<void> {
+  const rows = await deps.db.all<{ name: string; value: string }>(`SELECT name, value FROM instance_secrets WHERE name LIKE 'env:%'`)
+  const stored: Record<string, string> = {}
+  for (const row of rows) {
+    const name = row.name.slice(4)
+    if (STORABLE_ENV.includes(name)) stored[name] = row.value
+  }
+  deps.storedEnv = stored
 }
 
 /**
@@ -112,6 +139,7 @@ export function createDeps(opts: CreateDepsOptions): Deps {
  * authoritative. Call after migrations, before work that reads `deps.config`.
  */
 export async function refreshAdminConfig(deps: Deps, now: number): Promise<boolean> {
+  await loadStoredEnv(deps)
   const setup = await loadSetupState(deps.db)
   deps.setupPending = setup?.status === 'pending'
   if (deps.setupPending) return false

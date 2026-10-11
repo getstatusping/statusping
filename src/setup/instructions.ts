@@ -54,6 +54,13 @@ export const OIDC_PRESETS: OidcPreset[] = [
     register: 'Keycloak admin console → your realm → Clients → Create client → OpenID Connect, with client authentication on.',
   },
   {
+    id: 'pocket-id',
+    label: 'Pocket ID',
+    issuerHint: 'Your Pocket ID address, such as https://id.example.com (its APP_URL).',
+    docsUrl: 'https://pocket-id.org/docs/',
+    register: 'Pocket ID → Administration → OIDC Clients → Add OIDC Client. Leave it a confidential client (not public) so it issues a client secret.',
+  },
+  {
     id: 'other',
     label: 'Other OIDC provider',
     issuerHint: 'The issuer URL from your provider. StatusPing reads &lt;issuer&gt;/.well-known/openid-configuration.',

@@ -21,6 +21,8 @@ function browser(app: ReturnType<typeof createApp>) {
       if (/max-age=0|expires=thu, 01 jan 1970/i.test(cookie) || value.join('=') === '') jar.delete(name!)
       else jar.set(name!, value.join('='))
     }
+    // /setup redirects to the address of the current step, as a browser would follow.
+    if (path === '/setup' && !init.method && res.status === 302) return send(res.headers.get('location')!, init)
     return { res, body: await res.text() }
   }
   return {

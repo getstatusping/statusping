@@ -15,9 +15,9 @@ import { stringifyAdminYaml } from '../admin/yaml.ts'
 import { b64urlEncode, verifyJwt } from '../auth/jwt.ts'
 import { discover } from '../auth/providers.ts'
 import type { AuthProviderInput } from '../config.ts'
-import { type Deps, refreshAdminConfig } from '../deps.ts'
+import { type Deps, refreshAdminConfig, STORABLE_ENV, storedEnvKey } from '../deps.ts'
 import { TEAM_DOMAIN, presetById } from './instructions.ts'
-import { accessPage, oidcPage } from './ui.ts'
+import { accessPage, type EnvSource, oidcPage } from './ui.ts'
 import { consumePingRateLimit } from '../rate-limit.ts'
 import { randomToken, timingSafeEqual } from '../util/crypto.ts'
 import { isValidTimeZone, nowSeconds } from '../util/time.ts'
@@ -96,8 +96,9 @@ export function mountSetupRoutes(app: Hono, deps: Deps): void {
   const html = (c: Context, body: string, status: 200 | 400 | 401 | 403 | 429 = 200) => c.html(body, status, headers)
 
   const sessionSecretSet = () => (deps.getEnv('SESSION_SECRET')?.length ?? 0) >= 32
-  /** Names only: whether each OIDC secret is set. */
-  const oidcEnv = () => ({ OIDC_CLIENT_ID: Boolean(deps.getEnv('OIDC_CLIENT_ID')), OIDC_CLIENT_SECRET: Boolean(deps.getEnv('OIDC_CLIENT_SECRET')) })
+  /** Where a setting is set: a Worker secret wins over a value saved here. Never the value. */
+  const source = (name: string): EnvSource => (deps.hasRealEnv(name) ? 'env' : deps.storedEnv[name] ? 'db' : false)
+  const oidcEnv = () => ({ OIDC_CLIENT_ID: source('OIDC_CLIENT_ID'), OIDC_CLIENT_SECRET: source('OIDC_CLIENT_SECRET') })
 
   const limited = async (c: Context, bucket: string) => {
     const ip = deps.clientIp(c.req.raw)
@@ -136,14 +137,14 @@ export function mountSetupRoutes(app: Hono, deps: Deps): void {
     const origin = new URL(c.req.url).origin
     const verifiedEmail = draft.verified ? draft.email : undefined
     if (step === 'account' && draft.method === 'cloudflare-access') {
-      return html(c, accessPage({ csrf, completed, host: new URL(c.req.url).host, teamDomain: draft.teamDomain, audSet: Boolean(deps.getEnv('CF_ACCESS_AUD')), verifiedEmail, error }))
+      return html(c, accessPage({ csrf, completed, host: new URL(c.req.url).host, teamDomain: draft.teamDomain, audSource: source('CF_ACCESS_AUD'), verifiedEmail, error }))
     }
     if (step === 'account' && draft.method === 'oidc') {
       // ?preset= previews another provider's instructions before anything is saved.
       const previewed = presetById(c.req.query('preset'))
       const preset = previewed?.id ?? draft.oidcPreset
       const issuer = previewed && previewed.id !== draft.oidcPreset ? previewed.issuer : draft.issuer
-      return html(c, oidcPage({ csrf, completed, origin, preset, issuer, env: oidcEnv(), sessionKeyNote: !sessionSecretSet(), verifiedEmail, error }))
+      return html(c, oidcPage({ csrf, completed, origin, preset, issuer, env: oidcEnv(), clientId: deps.storedEnv.OIDC_CLIENT_ID, sessionKeyNote: !sessionSecretSet(), verifiedEmail, error }))
     }
     switch (step) {
       case 'method': return html(c, methodPage({ csrf, completed, current: draft.method }))
@@ -158,7 +159,14 @@ export function mountSetupRoutes(app: Hono, deps: Deps): void {
     const loaded = await pending(c)
     if ('response' in loaded) return loaded.response
     if (!loaded.session) return html(c, claimPage({ usesEnvToken: Boolean(deps.getEnv('STATUSPING_SETUP_TOKEN')) }))
-    return render(c, loaded.state, loaded.session.csrf, c.req.query('step'), VERIFY_ERRORS[c.req.query('error') ?? ''])
+    // Every step has its own address, so the browser's Back button returns to the previous step.
+    const requested = c.req.query('step')
+    if (!requested) {
+      const res = c.redirect(`/setup?step=${currentStep(loaded.state.draft)}`, 302)
+      res.headers.set('cache-control', 'no-store')
+      return res
+    }
+    return render(c, loaded.state, loaded.session.csrf, requested, VERIFY_ERRORS[c.req.query('error') ?? ''])
   })
 
   // ── Cloudflare Access and OIDC: connect & verify ────────────────────────────────────────────
@@ -219,6 +227,38 @@ export function mountSetupRoutes(app: Hono, deps: Deps): void {
       scope: 'openid email profile', state, nonce, code_challenge: challenge, code_challenge_method: 'S256',
     }).toString()
     return c.redirect(url.toString(), 302)
+  })
+
+  /**
+   * Saves sign-in settings in the DB, for owners who prefer not to add Worker secrets. Values
+   * are write-only: blank fields keep what is saved, and nothing is ever rendered back except
+   * the (non-secret) client ID. A Worker secret with the same name still takes precedence.
+   */
+  app.post('/setup/stored-env', async (c) => {
+    const r = await claimedForm(c)
+    if ('response' in r) return r.response
+    const allowed = r.state.draft.method === 'oidc' ? ['OIDC_CLIENT_ID', 'OIDC_CLIENT_SECRET'] : r.state.draft.method === 'cloudflare-access' ? ['CF_ACCESS_AUD'] : []
+    const now = nowSeconds()
+    const writes = allowed
+      .filter((name) => STORABLE_ENV.includes(name) && !deps.hasRealEnv(name))
+      .map((name) => ({ name, value: field(r.form, name) }))
+      .filter(({ value }) => value.length > 0 && value.length <= 2048)
+    if (writes.length) {
+      await deps.db.batch([
+        ...writes.map(({ name, value }) => ({
+          sql: `INSERT INTO instance_secrets (name, value, created_at) VALUES (?, ?, ?)
+                ON CONFLICT(name) DO UPDATE SET value = excluded.value, created_at = excluded.created_at`,
+          params: [storedEnvKey(name), value, now],
+        })),
+        // A changed credential invalidates an earlier test sign-in.
+        { sql: `UPDATE setup_state SET draft_json = ?, updated_at = ? WHERE id = 1 AND status = 'pending'`, params: [JSON.stringify({ ...r.state.draft, verified: false, email: undefined }), now] },
+        ...writes.map(({ name }) => ({
+          sql: `INSERT INTO audit_log (actor, action, target, before_json, after_json, at) VALUES ('setup', 'setting.store', ?, NULL, NULL, ?)`,
+          params: [name, now],
+        })),
+      ])
+    }
+    return c.redirect('/setup?step=account', 303)
   })
 
   app.post('/setup/connected', async (c) => {

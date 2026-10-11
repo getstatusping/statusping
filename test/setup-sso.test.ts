@@ -32,6 +32,8 @@ function browser(app: ReturnType<typeof createApp>) {
       if (/max-age=0|expires=thu, 01 jan 1970/i.test(cookie) || value.join('=') === '') jar.delete(name!)
       else jar.set(name!, value.join('='))
     }
+    // /setup redirects to the address of the current step, as a browser would follow.
+    if (path === '/setup' && !init.method && res.status === 302) return send(res.headers.get('location')!, init)
     return { res, body: await res.text() }
   }
   return {
@@ -155,6 +157,64 @@ describe('setup wizard: Cloudflare Access and OpenID Connect', () => {
     expect(config.access.provider).toEqual({ type: 'oidc', issuer: 'https://idp.test', clientId: { $env: 'OIDC_CLIENT_ID' }, clientSecret: { $env: 'OIDC_CLIENT_SECRET' } })
     // After setup, /auth/callback belongs to the normal sign-in flow again.
     expect((await browser(app).get('/auth/callback?code=x&state=y')).res.status).toBe(400)
+  })
+
+  it('connects OIDC with credentials saved in the database, without Worker secrets', async () => {
+    const idp = await signer('idp-2')
+    let nonce = ''
+    const handler = async (call: FetchCall) => {
+      if (call.url === 'https://idp2.test/.well-known/openid-configuration') {
+        return Response.json({ issuer: 'https://idp2.test', authorization_endpoint: 'https://idp2.test/authorize', token_endpoint: 'https://idp2.test/token', jwks_uri: 'https://idp2.test/jwks' })
+      }
+      if (call.url === 'https://idp2.test/jwks') return Response.json({ keys: [idp.jwk] })
+      if (call.url === 'https://idp2.test/token') {
+        const body = new URLSearchParams(String(call.body))
+        if (body.get('client_id') !== 'db-client' || body.get('client_secret') !== 'db-secret-value') return new Response('bad client', { status: 401 })
+        return Response.json({ id_token: await idp.sign({ iss: 'https://idp2.test', aud: 'db-client', email: 'owner@acme.test', email_verified: true, nonce, exp: now() + 300 }) })
+      }
+      return new Response('not found', { status: 404 })
+    }
+    const { app, b, csrf, db } = await claimedWizard({}, handler, 'oidc')
+    expect((await b.get('/setup')).body).toContain('<code>OIDC_CLIENT_SECRET</code> is missing')
+
+    expect((await b.post('/setup/stored-env', { csrf, return: 'oidc', OIDC_CLIENT_ID: 'db-client', OIDC_CLIENT_SECRET: 'db-secret-value' })).res.status).toBe(303)
+    const page = (await b.get('/setup')).body
+    expect(page).toContain('<code>OIDC_CLIENT_SECRET</code> is saved in the database')
+    expect(page).toContain('value="db-client"')
+    expect(page).not.toContain('db-secret-value')
+
+    // A blank secret keeps the saved one; the ID can be corrected on its own.
+    await b.post('/setup/stored-env', { csrf, return: 'oidc', OIDC_CLIENT_ID: 'db-client', OIDC_CLIENT_SECRET: '' })
+    expect((await db.first<{ value: string }>(`SELECT value FROM instance_secrets WHERE name = 'env:OIDC_CLIENT_SECRET'`))!.value).toBe('db-secret-value')
+    // Only the settings for the chosen method can be stored, and never other names.
+    await b.post('/setup/stored-env', { csrf, CF_ACCESS_AUD: 'x', SESSION_SECRET: 'y'.repeat(40) })
+    expect(await db.all(`SELECT name FROM instance_secrets WHERE name LIKE 'env:%' ORDER BY name`)).toEqual([{ name: 'env:OIDC_CLIENT_ID' }, { name: 'env:OIDC_CLIENT_SECRET' }])
+
+    await b.post('/setup/oidc', { csrf, preset: 'other', issuer: 'https://idp2.test' })
+    const start = new URL((await b.get('/setup/oidc/start')).res.headers.get('location')!)
+    expect(start.searchParams.get('client_id')).toBe('db-client')
+    nonce = start.searchParams.get('nonce')!
+    expect((await b.get(`/auth/callback?code=c&state=${start.searchParams.get('state')}`)).res.headers.get('location')).toBe('/setup?step=account')
+    expect((await finish(b, csrf)).res.headers.get('location')).toMatch(/^\/admin/)
+    expect((await b.get('/admin')).res.status).toBe(200)
+
+    // The audit log names what was stored, never the value.
+    const audit = await db.all<{ action: string; target: string; after_json: string | null }>(`SELECT action, target, after_json FROM audit_log WHERE action = 'setting.store'`)
+    expect(audit.map((row) => row.target)).toContain('OIDC_CLIENT_SECRET')
+    expect(JSON.stringify(audit)).not.toContain('db-secret-value')
+
+    // A reset forgets saved sign-in settings.
+    await browser(app).post('/setup/reset', { token: RESET_TOKEN, confirm: 'reset' })
+    expect(await db.first(`SELECT name FROM instance_secrets WHERE name LIKE 'env:%'`)).toBeNull()
+  })
+
+  it('prefers a Worker secret over a saved value and hides the form for it', async () => {
+    const { b, csrf, db } = await claimedWizard({ CF_ACCESS_AUD: 'from-env' }, () => new Response('not found', { status: 404 }), 'cloudflare-access')
+    const page = (await b.get('/setup')).body
+    expect(page).toContain('<code>CF_ACCESS_AUD</code> is set as a Worker secret')
+    expect(page).not.toContain('name="CF_ACCESS_AUD"')
+    await b.post('/setup/stored-env', { csrf, CF_ACCESS_AUD: 'from-db' })
+    expect(await db.first(`SELECT name FROM instance_secrets WHERE name = 'env:CF_ACCESS_AUD'`)).toBeNull()
   })
 
   it('switching methods clears the previous verification', async () => {

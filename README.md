@@ -152,11 +152,11 @@ you create in the browser:
    your own code instead, set the `STATUSPING_SETUP_TOKEN` secret.
 4. Choose a sign-in method and connect it:
    - **Email + password:** choose the administrator's password (at least 12 characters).
-   - **Cloudflare Access:** create the Access application, store its audience tag as
-     `CF_ACCESS_AUD`, and verify by signing in through Access.
+   - **Cloudflare Access:** create the Access application, save its audience tag (in the wizard,
+     or as the Worker secret `CF_ACCESS_AUD`), and verify by signing in through Access.
    - **OpenID Connect:** register StatusPing with Google, Microsoft Entra ID, Okta, Auth0,
-     Keycloak or another provider, store `OIDC_CLIENT_ID` and `OIDC_CLIENT_SECRET`, and run a
-     test sign-in.
+     Keycloak, Pocket ID or another provider, save its client ID and secret (in the wizard, or as
+     the Worker secrets `OIDC_CLIENT_ID` and `OIDC_CLIENT_SECRET`), and run a test sign-in.
 5. Describe the site and optionally add a first monitor. **Finish** saves the configuration and
    signs you in to `/admin`; checks start on the next minute.
 6. Remove the `STATUSPING_RESET_TOKEN` secret. Without it, `/setup/reset` does not exist.

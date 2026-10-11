@@ -43,7 +43,12 @@ export const SETUP_STYLES = `
 .setup-form { display: grid; gap: 16px; }
 .setup-form .field { display: grid; gap: 8px; } .setup-form .field label { font-size: 14px; font-weight: 500; }
 .setup-form .input { width: 100%; }
-.hint { margin: -8px 0 0; font-size: 13px; font-weight: 400; color: var(--muted-foreground); }
+.reveal { display: flex; gap: 8px; } .reveal .input { flex: 1; min-width: 0; } .reveal-toggle { flex: none; min-width: 64px; }
+.hint, .setup-card .hint { margin: -8px 0 0; font-size: 13px; font-weight: 400; color: var(--muted-foreground); }
+.setup-card .setup-form > .hint { margin: -10px 0 0; }
+.setup-card form + .hint, .setup-card form + .howto { margin-top: 16px; }
+.setup-card .hint + .howto { margin-top: 8px; }
+.setup-card .setup-form .actions, .connect-step .setup-form .actions { margin-top: 0; }
 .actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }
 .actions a { color: var(--muted-foreground); font-size: 14px; }
 .alert { margin: 0 0 16px; padding: 10px 12px; border: 1px solid var(--border); border-radius: calc(var(--radius) - 2px); font-size: 14px; }
@@ -74,6 +79,17 @@ select.input { width: 100%; }
 .secret { margin: 0 0 16px; padding: 12px 14px; border-radius: calc(var(--radius) - 2px); background: var(--muted); font: 600 16px ui-monospace, SFMono-Regular, Menlo, monospace; word-break: break-all; user-select: all; }
 `
 
+/**
+ * Adds a Show/Hide toggle to every password field, so a mistyped secret can be checked before
+ * saving. Without JavaScript the fields simply stay masked.
+ */
+const REVEAL_SCRIPT = `document.querySelectorAll('.setup-form input[type=password]').forEach(function(input){
+var wrap=document.createElement('div');wrap.className='reveal';input.parentNode.insertBefore(wrap,input);wrap.appendChild(input);
+var button=document.createElement('button');button.type='button';button.className='btn-outline reveal-toggle';button.textContent='Show';
+button.setAttribute('aria-controls',input.id);button.setAttribute('aria-pressed','false');
+button.addEventListener('click',function(){var shown=input.type==='password';input.type=shown?'text':'password';button.textContent=shown?'Hide':'Show';button.setAttribute('aria-pressed',String(shown));input.focus()});
+input.form&&input.form.addEventListener('submit',function(){input.type='password'});wrap.appendChild(button)})`
+
 function shell(title: string, step: SetupStep | null, completed: ReadonlySet<SetupStep>, body: string): string {
   const steps = step
     ? `<nav aria-label="Setup progress"><ol class="steps">${STEPS.map(([id, label]) => `<li${id === step ? ' aria-current="step"' : completed.has(id) ? ' class="done"' : ''}>${label}</li>`).join('')}</ol></nav>`
@@ -81,7 +97,7 @@ function shell(title: string, step: SetupStep | null, completed: ReadonlySet<Set
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex"><title>${escape(title)} · StatusPing setup</title><style>${STYLES}${SETUP_STYLES}</style></head><body>
 <header class="site-header"><div class="wrap site-header-inner"><div class="account"></div></div></header>
 <main class="wrap"><div class="setup${step ? '' : ' solo'}">${steps}<section class="card setup-card">${body}</section></div></main>
-<footer class="wrap foot"><div class="foot-brand">Powered by <a href="https://statusp.ing">StatusPing</a></div></footer></body></html>`
+<footer class="wrap foot"><div class="foot-brand">Powered by <a href="https://statusp.ing">StatusPing</a></div></footer><script>${REVEAL_SCRIPT}</script></body></html>`
 }
 
 const alert = (text: string | undefined, kind: 'error' | 'warning' = 'error') =>
@@ -116,24 +132,31 @@ export function methodPage(opts: { csrf: string; completed: ReadonlySet<SetupSte
 <form class="setup-form" method="post" action="/setup/method">${hidden(opts.csrf)}<div class="choices">
 ${choice('basic', 'Email + password (built-in)', 'One person or a small team; the quickest start', 'Nothing else', 'About 1 minute')}
 ${choice('cloudflare-access', 'Cloudflare Access', 'Sites already on Cloudflare; Google, GitHub or one-time PIN login', 'A Cloudflare Zero Trust account (free for up to 50 users)', 'About 5 minutes')}
-${choice('oidc', 'OpenID Connect (SSO)', 'Google Workspace, Microsoft Entra ID, Okta, Auth0 or Keycloak', 'Permission to register an OIDC app with your identity provider', 'About 10 minutes')}
+${choice('oidc', 'OpenID Connect (SSO)', 'Google Workspace, Microsoft Entra ID, Okta, Auth0, Keycloak or Pocket ID', 'Permission to register an OIDC app with your identity provider', 'About 10 minutes')}
 </div><div class="actions"><button class="btn-primary" type="submit">Continue</button></div></form>`)
 }
 
 /** How to add a secret on each runtime. Saving one on Cloudflare redeploys the Worker; setup resumes where it was. */
-function secretHowTo(names: string[]): string {
+function secretHowTo(names: string[], alternative = false): string {
+  if (!names.length) return ''
   const list = names.map((name) => `<code>${name}</code>`).join(' and ')
-  return `<details class="howto"><summary>How to add ${list}</summary><ul>
+  return `${alternative ? DB_NOTE : ''}<details class="howto"><summary>${alternative ? 'Use a Worker secret instead' : `How to add ${list}`}</summary><ul>
 <li><strong>Cloudflare dashboard:</strong> Workers &amp; Pages → <em>your Worker</em> → Settings → <strong>Variables and Secrets</strong> → Add → type <em>Secret</em>.</li>
 <li><strong>Wrangler:</strong> ${names.map((name) => `<code>npx wrangler secret put ${name}</code>`).join(', ')}.</li>
 <li><strong>Node:</strong> add ${names.map((name) => `<code>${name}=…</code>`).join(' and ')} to <code>.env</code> and restart.</li></ul>
 <p class="hint">Saving a secret on Cloudflare redeploys the Worker. Reload this page afterwards; setup continues where you left off.</p></details>`
 }
 
+/** Where a setting comes from: a Worker secret / env var, the DB (saved here), or nowhere. */
+export type EnvSource = 'env' | 'db' | false
+
 /** Names only, never values. */
-function envChecklist(env: Record<string, boolean>): string {
-  return `<ul class="envlist">${Object.entries(env).map(([name, set]) => `<li class="${set ? 'set' : 'missing'}"><span aria-hidden="true">${set ? '✓' : '✗'}</span> <code>${name}</code> ${set ? 'is set' : 'is missing'}</li>`).join('')}</ul>`
+function envChecklist(env: Record<string, EnvSource>): string {
+  const state = (source: EnvSource) => (source === 'env' ? 'is set as a Worker secret' : source === 'db' ? 'is saved in the database' : 'is missing')
+  return `<ul class="envlist">${Object.entries(env).map(([name, source]) => `<li class="${source ? 'set' : 'missing'}"><span aria-hidden="true">${source ? '✓' : '✗'}</span> <code>${name}</code> ${state(source)}</li>`).join('')}</ul>`
 }
+
+const DB_NOTE = '<p class="hint">Saved values are kept in this site\'s database and never shown again. A Worker secret is more protected (nobody can read it back), and takes precedence when set.</p>'
 
 function verifiedBlock(csrf: string, email: string, method: string): string {
   return `<p class="alert success" role="status">Verified. <strong>${escape(email)}</strong> signed in with ${method} and will be the first administrator.</p>
@@ -150,8 +173,8 @@ function verifySection(n: number, opts: { ready: boolean; verified: boolean; hre
   return section(n, 'Verify', `<p>${opts.intro}</p>${opts.ready ? '' : `<p class="hint">${opts.blocked}</p>`}<div class="actions">${action}<a class="btn-outline" href="/setup?step=method">Back</a></div>`)
 }
 
-export function accessPage(opts: { csrf: string; completed: ReadonlySet<SetupStep>; host: string; teamDomain?: string; audSet: boolean; verifiedEmail?: string; error?: string }): string {
-  const ready = Boolean(opts.teamDomain && opts.audSet)
+export function accessPage(opts: { csrf: string; completed: ReadonlySet<SetupStep>; host: string; teamDomain?: string; audSource: EnvSource; verifiedEmail?: string; error?: string }): string {
+  const ready = Boolean(opts.teamDomain && opts.audSource)
   return shell('Cloudflare Access', 'account', opts.completed, `<h1>Connect Cloudflare Access</h1>
 <p class="lead">Cloudflare Access signs people in before requests reach StatusPing. StatusPing then checks the signed Access token on every request.</p>${alert(opts.error)}
 ${opts.verifiedEmail ? verifiedBlock(opts.csrf, opts.verifiedEmail, 'Cloudflare Access') : ''}
@@ -162,14 +185,17 @@ ${section(1, 'Create the Access application', `<ol class="steps-list">
 <li><strong>Only sign-in</strong>: add two paths, <code>/admin</code> and <code>/auth</code>. Status pages stay public.</li></ul></li>
 <li>Add a policy: <strong>Allow</strong> → <em>Emails</em> → your email address. Add more people later in Access, not in StatusPing.</li>
 <li>Save the application and open its <strong>Overview</strong>.</li></ol>`)}
-${section(2, 'Add the audience tag', `<p>Copy the <strong>Application Audience (AUD) Tag</strong> from the Overview and store it as a secret.</p>${envChecklist({ CF_ACCESS_AUD: opts.audSet })}${opts.audSet ? '' : secretHowTo(['CF_ACCESS_AUD'])}`)}
+${section(2, 'Add the audience tag', `<p>Copy the <strong>Application Audience (AUD) Tag</strong> from the Overview.</p>${envChecklist({ CF_ACCESS_AUD: opts.audSource })}
+${opts.audSource === 'env' ? '' : `<form class="setup-form" method="post" action="/setup/stored-env">${hidden(opts.csrf)}<input type="hidden" name="return" value="access">
+${field('Application Audience (AUD) Tag', `<input class="input" id="CF_ACCESS_AUD" name="CF_ACCESS_AUD" type="text" autocomplete="off" spellcheck="false" placeholder="${opts.audSource === 'db' ? 'Saved. Enter a new value to replace it.' : '64 hexadecimal characters'}"${opts.audSource === 'db' ? '' : ' required'}>`)}
+<div class="actions"><button class="btn-outline" type="submit">Save</button></div></form>${secretHowTo(['CF_ACCESS_AUD'], true)}`}`)}
 ${section(3, 'Enter the team domain', `<form class="setup-form" method="post" action="/setup/access">${hidden(opts.csrf)}
 ${field('Team domain', `<input class="input" id="teamDomain" name="teamDomain" type="text" value="${escape(opts.teamDomain ?? '')}" placeholder="yourteam.cloudflareaccess.com" spellcheck="false" required>`, 'Shown on the application Overview. It is not secret.')}
 <div class="actions"><button class="btn-outline" type="submit">Save team domain</button></div></form>`)}
 ${verifySection(4, { ready, verified: Boolean(opts.verifiedEmail), href: '/auth/setup-verify', label: 'Verify with Cloudflare Access', intro: 'Access asks you to sign in, then StatusPing checks the token against your team domain and audience.', blocked: 'Add CF_ACCESS_AUD and save the team domain first.' })}`)
 }
 
-export function oidcPage(opts: { csrf: string; completed: ReadonlySet<SetupStep>; origin: string; preset?: string; issuer?: string; env: Record<string, boolean>; sessionKeyNote: boolean; verifiedEmail?: string; error?: string }): string {
+export function oidcPage(opts: { csrf: string; completed: ReadonlySet<SetupStep>; origin: string; preset?: string; issuer?: string; env: Record<string, EnvSource>; clientId?: string; sessionKeyNote: boolean; verifiedEmail?: string; error?: string }): string {
   const preset = presetById(opts.preset) ?? OIDC_PRESETS[0]!
   const callback = `${opts.origin}/auth/callback`
   const workersDev = /\.workers\.dev$/i.test(new URL(opts.origin).hostname)
@@ -181,7 +207,12 @@ ${opts.verifiedEmail ? verifiedBlock(opts.csrf, opts.verifiedEmail, preset.label
 <div class="setup-form">${field('Identity provider', `<select class="input" id="preset" name="preset" onchange="location.href='/setup?step=account&amp;preset='+encodeURIComponent(this.value)">${OIDC_PRESETS.map((p) => `<option value="${p.id}"${p.id === preset.id ? ' selected' : ''}>${p.label}</option>`).join('')}</select>`)}</div>
 ${section(1, `Register StatusPing with ${preset.label}`, `<p>${preset.register} (<a href="${preset.docsUrl}" target="_blank" rel="noopener">${preset.label} guide</a>)</p>
 <p>Set the redirect (callback) URL to exactly:</p><pre>${escape(callback)}</pre>${workersDev ? '<p class="alert warning">This is a <code>workers.dev</code> address. If you add a custom domain later, register its callback URL too.</p>' : ''}`)}
-${section(2, 'Add the client credentials', `<p>Store the application's client ID and client secret as secrets.</p>${envChecklist(opts.env)}${missing.length ? secretHowTo(missing) : ''}${opts.sessionKeyNote ? '<p class="hint"><code>SESSION_SECRET</code> is optional: without it StatusPing generates and stores a session signing key.</p>' : ''}`)}
+${section(2, 'Add the client credentials', `<p>Copy the client ID and client secret your provider issued for this application.</p>${envChecklist(opts.env)}
+${opts.env.OIDC_CLIENT_ID === 'env' && opts.env.OIDC_CLIENT_SECRET === 'env' ? '' : `<form class="setup-form" method="post" action="/setup/stored-env">${hidden(opts.csrf)}<input type="hidden" name="return" value="oidc">
+${opts.env.OIDC_CLIENT_ID === 'env' ? '' : field('Client ID', `<input class="input" id="OIDC_CLIENT_ID" name="OIDC_CLIENT_ID" type="text" autocomplete="off" spellcheck="false" value="${escape(opts.clientId ?? '')}">`)}
+${opts.env.OIDC_CLIENT_SECRET === 'env' ? '' : field('Client secret', `<input class="input" id="OIDC_CLIENT_SECRET" name="OIDC_CLIENT_SECRET" type="password" autocomplete="off" placeholder="${opts.env.OIDC_CLIENT_SECRET === 'db' ? 'Saved. Leave blank to keep it.' : ''}">`)}
+<div class="actions"><button class="btn-outline" type="submit">Save credentials</button></div></form>${secretHowTo(['OIDC_CLIENT_ID', 'OIDC_CLIENT_SECRET'].filter((name) => opts.env[name] !== 'env'), true)}`}
+${opts.sessionKeyNote ? '<p class="hint"><code>SESSION_SECRET</code> is optional: without it StatusPing generates and stores a session signing key.</p>' : ''}`)}
 ${section(3, 'Enter the issuer', `<form class="setup-form" method="post" action="/setup/oidc">${hidden(opts.csrf)}<input type="hidden" name="preset" value="${preset.id}">
 ${field('Issuer URL', `<input class="input" id="issuer" name="issuer" type="url" value="${escape(opts.issuer ?? preset.issuer ?? '')}" placeholder="https://…" spellcheck="false" required>`, preset.issuer ? 'Pre-filled for this provider.' : preset.issuerHint ?? '')}
 <div class="actions"><button class="btn-outline" type="submit">Save and check issuer</button></div></form>`)}
