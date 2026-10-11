@@ -2,6 +2,7 @@ import type { Context, Hono } from 'hono'
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie'
 import { type AuthProviderInput, resolveSecret } from '../config.ts'
 import type { Deps } from '../deps.ts'
+import { consumePingRateLimit } from '../rate-limit.ts'
 import { randomToken, sha256Hex, timingSafeEqual } from '../util/crypto.ts'
 import { nowSeconds } from '../util/time.ts'
 import { b64urlEncode, verifyJwt } from './jwt.ts'
@@ -25,12 +26,46 @@ export function safeNext(next: string | undefined): string {
 // ── Basic ─────────────────────────────────────────────────────────────────────────────────────
 
 /**
- * BASIC_AUTH_USERS: JSON `{ "alice@example.com": "sha256:<salt>:<hex>" }`, created with
- * `npm run cli -- add-user <email>`. Passwords are generated (high entropy), so a salted SHA-256
- * is sufficient and fits the Workers 10 ms CPU budget, unlike PBKDF2/bcrypt.
+ * Fast salted SHA-256, `sha256:<salt>:<hex>`. Only for generated, high-entropy passwords:
+ * BASIC_AUTH_USERS entries created with `npm run cli -- add-user <email>` and accounts from older
+ * setups. Passwords a person chooses use {@link hashUserPassword}; {@link verifyPassword} accepts both.
  */
 export async function hashPassword(password: string, salt = randomToken(16)): Promise<string> {
   return `sha256:${salt}:${await sha256Hex(`${salt}:${password}`)}`
+}
+
+/** 100,000 is the most iterations Cloudflare Workers' WebCrypto PBKDF2 accepts. */
+const PBKDF2_ITERATIONS = 100_000
+const toHex = (bytes: Uint8Array) => [...bytes].map((b) => b.toString(16).padStart(2, '0')).join('')
+
+async function pbkdf2Hex(password: string, salt: string, iterations: number): Promise<string> {
+  const enc = new TextEncoder()
+  const key = await crypto.subtle.importKey('raw', enc.encode(password), 'PBKDF2', false, ['deriveBits'])
+  const bits = await crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt: enc.encode(salt), iterations }, key, 256)
+  return toHex(new Uint8Array(bits))
+}
+
+/**
+ * Hash for a password a person chose (setup wizard): PBKDF2-HMAC-SHA256, 100,000 iterations,
+ * 16-byte random salt, 32-byte output, encoded `pbkdf2-sha256:100000:<salt hex>:<hex>`.
+ */
+export async function hashUserPassword(password: string): Promise<string> {
+  const salt = toHex(crypto.getRandomValues(new Uint8Array(16)))
+  return `pbkdf2-sha256:${PBKDF2_ITERATIONS}:${salt}:${await pbkdf2Hex(password, salt, PBKDF2_ITERATIONS)}`
+}
+
+/** Checks a password against a stored `sha256:` or `pbkdf2-sha256:` entry, in constant time. */
+export async function passwordMatches(password: string, entry: string): Promise<boolean> {
+  const parts = entry.split(':')
+  if (parts[0] === 'sha256' && parts.length === 3 && parts[1]) {
+    return timingSafeEqual(await hashPassword(password, parts[1]), entry)
+  }
+  if (parts[0] === 'pbkdf2-sha256' && parts.length === 4 && parts[2] && /^\d{1,6}$/.test(parts[1] ?? '')) {
+    const iterations = Number(parts[1])
+    if (iterations < 1 || iterations > PBKDF2_ITERATIONS) return false
+    return timingSafeEqual(await pbkdf2Hex(password, parts[2], iterations), parts[3] ?? '')
+  }
+  return false
 }
 
 /** Checks an email + password against BASIC_AUTH_USERS, then the accounts created by setup. */
@@ -46,9 +81,8 @@ export async function verifyPassword(deps: Deps, rawEmail: string, password: str
   }
   const entry = Object.entries(users).find(([k]) => k.toLowerCase() === email)?.[1]
     ?? (await deps.db.first<{ password_hash: string }>(`SELECT password_hash FROM local_users WHERE email = ?`, [email]))?.password_hash
-  const [alg, salt] = entry?.split(':') ?? []
-  if (!entry || alg !== 'sha256' || !salt) return null
-  return timingSafeEqual(await hashPassword(password, salt), entry) ? { email, groups: [], provider: 'basic' } : null
+  if (!entry) return null
+  return (await passwordMatches(password, entry)) ? { email, groups: [], provider: 'basic' } : null
 }
 
 /**
@@ -99,7 +133,7 @@ interface Discovery {
 }
 const discoveryCache = new Map<string, { doc: Discovery; expires: number }>()
 
-async function discover(issuer: string, fetchFn: typeof fetch): Promise<Discovery> {
+export async function discover(issuer: string, fetchFn: typeof fetch): Promise<Discovery> {
   const hit = discoveryCache.get(issuer)
   if (hit && hit.expires > Date.now()) return hit.doc
   const res = await fetchFn(`${issuer.replace(/\/+$/, '')}/.well-known/openid-configuration`)
@@ -109,23 +143,32 @@ async function discover(issuer: string, fetchFn: typeof fetch): Promise<Discover
   return doc
 }
 
-function sessionSecret(deps: Deps): string {
+/** The session key setup stored in the DB, used when SESSION_SECRET is not set. */
+async function storedSessionKey(deps: Deps): Promise<string | null> {
+  return (await deps.db.first<{ value: string }>(`SELECT value FROM instance_secrets WHERE name = 'session_key'`))?.value ?? null
+}
+
+async function sessionSecret(deps: Deps): Promise<string> {
   const s = deps.getEnv('SESSION_SECRET')
-  if (!s || s.length < 32) throw new Error('SESSION_SECRET must be set (at least 32 characters) for SSO')
-  return s
+  if (s && s.length >= 32) return s
+  const stored = await storedSessionKey(deps)
+  if (stored) return stored
+  throw new Error('SESSION_SECRET must be set (at least 32 characters) for SSO')
 }
 
 /**
- * Secret for signing session cookies. SSO requires SESSION_SECRET. Basic falls back to the key
- * setup stored in the DB, then to one derived from BASIC_AUTH_USERS (changing users or
- * passwords then signs everyone out).
+ * Secret for signing session cookies: SESSION_SECRET, else the key setup stored in the DB.
+ * Basic finally falls back to a key derived from BASIC_AUTH_USERS (changing users or passwords
+ * then signs everyone out).
  */
 async function cookieSecret(deps: Deps): Promise<string | null> {
   const explicit = deps.getEnv('SESSION_SECRET')
   if (explicit && explicit.length >= 32) return explicit
-  if (deps.config.access?.provider.type !== 'basic') return null
-  const stored = await deps.db.first<{ value: string }>(`SELECT value FROM instance_secrets WHERE name = 'session_key'`)
-  if (stored) return stored.value
+  const type = deps.config.access?.provider.type
+  if (type !== 'basic' && type !== 'oidc') return null
+  const stored = await storedSessionKey(deps)
+  if (stored) return stored
+  if (type !== 'basic') return null
   const users = deps.getEnv('BASIC_AUTH_USERS')
   return users ? sha256Hex(`statusping-session:${users}`) : null
 }
@@ -177,7 +220,7 @@ function oidcHandlers(deps: Deps, p: Oidc) {
     const verifier = randomToken(64)
     const challenge = b64urlEncode(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier))))
     const next = safeNext(c.req.query('next'))
-    setCookie(c, LOGIN_COOKIE, await sign({ state, nonce, verifier, next, exp: nowSeconds() + 600 }, sessionSecret(deps)), {
+    setCookie(c, LOGIN_COOKIE, await sign({ state, nonce, verifier, next, exp: nowSeconds() + 600 }, await sessionSecret(deps)), {
       httpOnly: true,
       secure: secureCookies(deps),
       sameSite: 'Lax',
@@ -199,7 +242,7 @@ function oidcHandlers(deps: Deps, p: Oidc) {
   }
 
   const callback = async (c: Context) => {
-    const secret = sessionSecret(deps)
+    const secret = await sessionSecret(deps)
     const now = nowSeconds()
     const login = await unsign<{ exp: number; state: string; nonce: string; verifier: string; next: string }>(
       getCookie(c, LOGIN_COOKIE),
@@ -265,7 +308,7 @@ export function sameOrigin(c: Context, deps: Deps): boolean {
 }
 
 function passwordHandlers(deps: Deps) {
-  const page = async (c: Context, opts: { next: string; email?: string; error?: string }, status: 200 | 400 | 401 | 403 = 200) => {
+  const page = async (c: Context, opts: { next: string; email?: string; error?: string }, status: 200 | 400 | 401 | 403 | 429 = 200) => {
     const chrome = await buildChrome(deps, { viewer: null, current: opts.next, signIn: false })
     return c.html(signInPage(chrome, opts), status, { 'cache-control': 'no-store' })
   }
@@ -282,6 +325,10 @@ function passwordHandlers(deps: Deps) {
     const email = typeof form.email === 'string' ? form.email.trim() : ''
     const password = typeof form.password === 'string' ? form.password : ''
     if (!sameOrigin(c, deps)) return page(c, { next, email, error: 'Please try again.' }, 403)
+    const ip = deps.clientIp(c.req.raw)
+    if (ip !== null && !(await consumePingRateLimit(deps.db, `login:${ip}`, nowSeconds(), 10))) {
+      return page(c, { next, email, error: 'Too many attempts. Wait a minute and try again.' }, 429)
+    }
     const viewer = await verifyPassword(deps, email, password)
     if (!viewer) return page(c, { next, email, error: 'Incorrect email or password.' }, 401)
     await setSession(c, deps, viewer)

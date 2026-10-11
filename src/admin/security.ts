@@ -146,12 +146,20 @@ export function authorizeAdminToken(header: string | undefined, getEnv: EnvGette
 }
 
 /**
- * Per-session CSRF token. The token is stored hashed, bound to the HttpOnly session cookie, and
- * can be safely placed in a form. API bearer-token requests are not cookie-authenticated and do
+ * The credential a browser signed in with: StatusPing's session cookie, or the Cloudflare
+ * Access token for Access sign-in (Access authenticates every request and sets no session).
+ */
+function signInBinding(c: Context): string | undefined {
+  return getCookie(c, 'sp_session') ?? getCookie(c, 'CF_Authorization') ?? c.req.header('cf-access-jwt-assertion')
+}
+
+/**
+ * Per-session CSRF token. The token is stored hashed, bound to the sign-in credential, and can
+ * be safely placed in a form. API bearer-token requests are not cookie-authenticated and do
  * not use this mechanism.
  */
 export async function issueCsrfToken(db: Db, c: Context, now: number): Promise<string | null> {
-  const session = getCookie(c, 'sp_session')
+  const session = signInBinding(c)
   if (!session) return null
   const sessionHash = await sha256Hex(session)
   const token = randomToken(32)
@@ -165,7 +173,7 @@ export async function issueCsrfToken(db: Db, c: Context, now: number): Promise<s
 
 export async function verifyCsrfToken(db: Db, c: Context, token: unknown, now: number): Promise<boolean> {
   if (typeof token !== 'string' || token.length < 32) return false
-  const session = getCookie(c, 'sp_session')
+  const session = signInBinding(c)
   if (!session) return false
   const sessionHash = await sha256Hex(session)
   const row = await db.first<{ token_hash: string; expires_at: number }>(

@@ -7,11 +7,17 @@ import { randomToken, timingSafeEqual } from '../util/crypto.ts'
 
 export type SetupStatus = 'pending' | 'complete'
 
+export type SetupMethod = 'basic' | 'cloudflare-access' | 'oidc'
+
 export interface SetupDraft {
-  method?: 'basic'
+  method?: SetupMethod
+  /** The first administrator: typed for built-in, taken from the verified sign-in otherwise. */
   email?: string
   passwordHash?: string
   verified?: boolean
+  teamDomain?: string
+  oidcPreset?: string
+  issuer?: string
   title?: string
   baseUrl?: string
   timezone?: string

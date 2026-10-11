@@ -21,7 +21,7 @@ import { acknowledgePage, type PageCtx, messagePage, monitorPage, statusPage } f
 import { confirmSubscription, consumeSubscribeLimit, dispatchSubscriberOutbox, enqueueAnnouncement, startSubscription, unsubscribe } from '../subscribers.ts'
 import { refreshAdminConfig } from '../deps.ts'
 import { mountAdminRoutes } from '../admin/routes.ts'
-import { mountSetupRoutes } from '../setup/routes.ts'
+import { mountSetupAuthRoutes, mountSetupRoutes, SETUP_AUTH_PATHS } from '../setup/routes.ts'
 import { setupModePage } from '../setup/ui.ts'
 import { consumePingRateLimit } from '../rate-limit.ts'
 import { runHttpCheck } from '../evaluate/http.ts'
@@ -84,7 +84,7 @@ export function createApp(deps: Deps): Hono {
     await ensureSchema(deps.db)
     await refreshAdminConfig(deps, nowSeconds())
     // Setup mode: only the health check and the wizard respond until setup is finished.
-    if (deps.setupPending && c.req.path !== '/healthz' && c.req.path !== '/setup' && !c.req.path.startsWith('/setup/')) {
+    if (deps.setupPending && c.req.path !== '/healthz' && c.req.path !== '/setup' && !c.req.path.startsWith('/setup/') && !SETUP_AUTH_PATHS.includes(c.req.path)) {
       return c.html(setupModePage(), 503, { 'cache-control': 'no-store', 'x-robots-tag': 'noindex', 'retry-after': '60' })
     }
     config = deps.config
@@ -240,7 +240,8 @@ export function createApp(deps: Deps): Hono {
   app.patch('/api/admin/incidents/:id', async (c) => updateAnnouncement(c, await parseJson(c), c.req.param('id')))
   app.patch('/api/admin/incidents', async (c) => updateAnnouncement(c, await parseJson(c)))
 
-  // ── Sign-in ────────────────────────────────────────────────────────────────────────────────
+  // ── Sign-in (setup verification first: it shares /auth paths and hands over outside setup) ──
+  mountSetupAuthRoutes(app, deps)
   mountAuthRoutes(app, deps)
 
   // ── Browser admin + management API (opt-in via `admin: true`, or on after setup) ───────────

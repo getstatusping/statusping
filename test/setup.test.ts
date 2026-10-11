@@ -32,7 +32,6 @@ function browser(app: ReturnType<typeof createApp>) {
 }
 
 const csrfOf = (html: string) => /name="csrf" value="([^"]+)"/.exec(html)?.[1] ?? ''
-const passwordOf = (html: string) => /<p class="secret">([^<]+)<\/p>/.exec(html)?.[1] ?? ''
 
 describe('first-run setup wizard and reset', () => {
   let close: (() => Promise<void>) | undefined
@@ -91,17 +90,30 @@ describe('first-run setup wizard and reset', () => {
 
     // Every wizard form needs the CSRF value; a method must be chosen.
     expect((await b.post('/setup/method', { csrf: 'x'.repeat(32), method: 'basic' })).res.status).toBe(403)
-    expect((await b.post('/setup/method', { csrf, method: 'oidc' })).res.status).toBe(400)
+    expect((await b.post('/setup/method', { csrf, method: 'carrier-pigeon' })).res.status).toBe(400)
     expect((await b.post('/setup/method', { csrf, method: 'basic' })).res.status).toBe(303)
 
-    // Account: the generated password is shown once and must be typed back.
-    expect((await b.post('/setup/account', { csrf, email: 'not-an-email' })).res.status).toBe(400)
-    const account = await b.post('/setup/account', { csrf, email: 'Owner@Example.test' })
-    const password = passwordOf(account.body)
-    expect(password).toHaveLength(24)
-    expect((await b.get('/setup')).body).not.toContain(password)
-    expect((await b.post('/setup/verify', { csrf, password: 'wrong' })).res.status).toBe(401)
-    expect((await b.post('/setup/verify', { csrf, password })).res.status).toBe(303)
+    // Account: the administrator chooses a password; errors re-render without echoing it.
+    const password = 'correct horse battery staple'
+    expect((await b.post('/setup/account', { csrf, email: 'not-an-email', password, confirm: password })).res.status).toBe(400)
+    const short = await b.post('/setup/account', { csrf, email: 'Owner@Example.test', password: 'short-pw', confirm: 'short-pw' })
+    expect(short.res.status).toBe(400)
+    expect(short.body).toContain('at least 12 characters')
+    expect(short.body).toContain('value="owner@example.test"')
+    expect(short.body).not.toContain('short-pw')
+    const mismatch = await b.post('/setup/account', { csrf, email: 'owner@example.test', password, confirm: `${password}!` })
+    expect(mismatch.res.status).toBe(400)
+    expect(mismatch.body).toContain('do not match')
+    expect(mismatch.body).not.toContain(password)
+    expect((await b.post('/setup/account', { csrf, email: 'owner@example.test', password: 'Owner@Example.test', confirm: 'Owner@Example.test' })).res.status).toBe(400)
+    expect((await b.post('/setup/account', { csrf, email: 'owner@example.test', password: 'x'.repeat(257), confirm: 'x'.repeat(257) })).res.status).toBe(400)
+    expect((await loadSetupState(db))!.draft.verified).toBeFalsy()
+    const account = await b.post('/setup/account', { csrf, email: 'Owner@Example.test', password, confirm: password })
+    expect(account.res.status).toBe(303)
+    expect(account.res.headers.get('location')).toBe('/setup')
+    const draft = (await loadSetupState(db))!.draft
+    expect(draft).toMatchObject({ email: 'owner@example.test', verified: true })
+    expect(draft.passwordHash).toMatch(/^pbkdf2-sha256:100000:[0-9a-f]{32}:[0-9a-f]{64}$/)
 
     // Basics and monitor.
     expect((await b.post('/setup/basics', { csrf, title: 'Acme', baseUrl: 'http://status.example.com', timezone: 'UTC' })).res.status).toBe(400)
@@ -165,12 +177,16 @@ describe('first-run setup wizard and reset', () => {
     await b.post('/setup/claim', { code: (await loadSetupState(db))!.code! })
     const csrf = csrfOf((await b.get('/setup')).body)
     await b.post('/setup/method', { csrf, method: 'basic' })
-    const password = passwordOf((await b.post('/setup/account', { csrf, email: 'owner@example.test' })).body)
-    await b.post('/setup/verify', { csrf, password })
+    const password = 'first-owner-password'
+    expect((await b.post('/setup/account', { csrf, email: 'owner@example.test', password, confirm: password })).res.status).toBe(303)
     await b.post('/setup/basics', { csrf, title: 'First', baseUrl: ORIGIN, timezone: 'UTC' })
     await b.post('/setup/monitor', { csrf, skip: '1' })
     await b.post('/setup/finish', { csrf })
     expect((await b.get('/admin')).res.status).toBe(200)
+    // No monitors and no tick yet: there are no statuses to call out of date.
+    const status = await b.get('/')
+    expect(status.res.status).toBe(200)
+    expect(status.body).not.toContain('Monitoring may be stalled')
 
     await browser(app).post('/setup/reset', { token: RESET_TOKEN, confirm: 'reset' })
     expect((await b.get('/admin')).res.status).toBe(503)

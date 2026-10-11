@@ -266,6 +266,8 @@ function warningBanner(data: StatusData, ctx: PageCtx): Html | '' {
 
 /** Warning shown inside the status alert when checks have stopped running (statuses may be stale). */
 function staleWarning(data: StatusData): Html | '' {
+  // With nothing on the page there are no statuses to be out of date.
+  if (data.groups.every((group) => group.monitors.length === 0)) return ''
   const lag = data.lastTickAt === null ? null : data.now - data.lastTickAt
   if (lag !== null && lag <= 180) return ''
   return html`<p class="stale-warning">Monitoring may be stalled: no checks have run for ${lag === null ? 'a while' : formatDuration(lag)}. Statuses below may be out of date.</p>`

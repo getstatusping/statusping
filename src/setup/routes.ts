@@ -7,22 +7,45 @@
  */
 import type { Context, Hono } from 'hono'
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie'
-import { hashPassword, sameOrigin, setSession } from '../auth/providers.ts'
+import { hashUserPassword, sameOrigin, setSession } from '../auth/providers.ts'
 import { sign, unsign } from '../auth/session.ts'
 import type { AdminConfig } from '../admin/security.ts'
 import { validateAdminConfig } from '../admin/security.ts'
 import { stringifyAdminYaml } from '../admin/yaml.ts'
+import { b64urlEncode, verifyJwt } from '../auth/jwt.ts'
+import { discover } from '../auth/providers.ts'
+import type { AuthProviderInput } from '../config.ts'
 import { type Deps, refreshAdminConfig } from '../deps.ts'
+import { TEAM_DOMAIN, presetById } from './instructions.ts'
+import { accessPage, oidcPage } from './ui.ts'
 import { consumePingRateLimit } from '../rate-limit.ts'
 import { randomToken, timingSafeEqual } from '../util/crypto.ts'
 import { isValidTimeZone, nowSeconds } from '../util/time.ts'
 import {
   beginSetup, expectedSetupCode, loadSetupState, recordFailedClaim, saveDraft, setupCodeMatches,
-  type SetupDraft, type SetupState,
+  type SetupDraft, type SetupMethod, type SetupState,
 } from './state.ts'
-import { accountPage, basicsPage, claimPage, methodPage, monitorPage, passwordPage, resetPage, reviewPage, type SetupStep } from './ui.ts'
+import { accountPage, basicsPage, claimPage, methodPage, monitorPage, resetPage, reviewPage, type SetupStep } from './ui.ts'
 
 const SETUP_COOKIE = 'sp_setup'
+/** Short-lived state for the setup OIDC test sign-in (state, nonce, PKCE verifier). */
+const SETUP_LOGIN_COOKIE = 'sp_setup_oidc'
+
+/** Verification failures, each with the fix the owner needs. Keys travel in the redirect URL. */
+const VERIFY_ERRORS: Record<string, string> = {
+  'access-no-token': 'The request reached StatusPing without a Cloudflare Access token. Make sure the Access application covers this host (the whole site, or /admin and /auth), then try again.',
+  'access-no-aud': 'CF_ACCESS_AUD is not set. Add it as a secret, wait for the Worker to redeploy, then try again.',
+  'access-wrong-audience': 'The Access token is for a different application. Copy the Application Audience (AUD) Tag from this application into CF_ACCESS_AUD.',
+  'access-wrong-issuer': 'The Access token came from a different team. Check the team domain on the application Overview page.',
+  'access-invalid': 'The Access token could not be verified. Check the team domain, then sign in through Access again.',
+  'access-no-email': 'The Access token has no email address. Use an Access policy that identifies people by email.',
+  'oidc-discovery': 'StatusPing could not read the provider configuration. Check the issuer URL.',
+  'oidc-state': 'The sign-in expired or was started in another browser. Start the test sign-in again.',
+  'oidc-denied': 'The provider did not complete the sign-in. Check that your account is allowed to use the application, then try again.',
+  'oidc-token': 'The provider rejected the code exchange. Check OIDC_CLIENT_ID, OIDC_CLIENT_SECRET, and that the callback URL is registered exactly.',
+  'oidc-id-token': 'The ID token could not be verified. Check that the issuer URL matches your provider.',
+  'oidc-email': 'Your account has no verified email address at the provider. Verify it there, then try again.',
+}
 const SETUP_SESSION_SECONDS = 2 * 60 * 60
 const ATTEMPTS_PER_MINUTE = 5
 const EMAIL = /^[^@\s]+@[^@\s]+\.[^@\s]+$/
@@ -30,6 +53,13 @@ const headers = { 'cache-control': 'no-store', 'x-robots-tag': 'noindex' }
 
 type Form = Record<string, unknown>
 const field = (form: Form, name: string) => (typeof form[name] === 'string' ? (form[name] as string).trim() : '')
+
+/** The sign-in provider the draft verified. Secrets are only ever named, never stored. */
+function draftProvider(draft: SetupDraft): AuthProviderInput {
+  if (draft.method === 'cloudflare-access') return { type: 'cloudflare-access', teamDomain: draft.teamDomain!, audience: { $env: 'CF_ACCESS_AUD' } }
+  if (draft.method === 'oidc') return { type: 'oidc', issuer: draft.issuer!, clientId: { $env: 'OIDC_CLIENT_ID' }, clientSecret: { $env: 'OIDC_CLIENT_SECRET' } }
+  return { type: 'basic' }
+}
 
 /** The wizard's configuration, built only from validated draft fields. */
 export function draftConfig(draft: SetupDraft): AdminConfig {
@@ -40,7 +70,7 @@ export function draftConfig(draft: SetupDraft): AdminConfig {
     title: draft.title!,
     baseUrl: draft.baseUrl!,
     timezone: draft.timezone!,
-    access: { provider: { type: 'basic' }, admins: { emails: [email] } },
+    access: { provider: draftProvider(draft), admins: { emails: [email] } },
     groups: monitors.length ? [{ name: 'Services', monitors }] : [],
     pages: [{ slug: 'status', title: draft.title!, access: draft.privatePage ? { emails: [email] } : 'public', monitors: monitors.map((m) => m.id) }],
     home: 'status',
@@ -64,6 +94,10 @@ export function mountSetupRoutes(app: Hono, deps: Deps): void {
   const secure = (c: Context) => new URL(c.req.url).protocol === 'https:'
   const notFound = (c: Context) => c.text('Not found', 404, headers)
   const html = (c: Context, body: string, status: 200 | 400 | 401 | 403 | 429 = 200) => c.html(body, status, headers)
+
+  const sessionSecretSet = () => (deps.getEnv('SESSION_SECRET')?.length ?? 0) >= 32
+  /** Names only: whether each OIDC secret is set. */
+  const oidcEnv = () => ({ OIDC_CLIENT_ID: Boolean(deps.getEnv('OIDC_CLIENT_ID')), OIDC_CLIENT_SECRET: Boolean(deps.getEnv('OIDC_CLIENT_SECRET')) })
 
   const limited = async (c: Context, bucket: string) => {
     const ip = deps.clientIp(c.req.raw)
@@ -94,18 +128,27 @@ export function mountSetupRoutes(app: Hono, deps: Deps): void {
     return { state: loaded.state, csrf: loaded.session.csrf, form }
   }
 
-  const render = (c: Context, state: SetupState, csrf: string, requested?: string) => {
+  const render = (c: Context, state: SetupState, csrf: string, requested?: string, error?: string) => {
     const draft = state.draft
     const reached = currentStep(draft)
     const step = (ORDER.includes(requested as SetupStep) && ORDER.indexOf(requested as SetupStep) <= ORDER.indexOf(reached) && requested !== 'claim' ? requested : reached) as SetupStep
     const completed = completedBefore(step, reached)
     const origin = new URL(c.req.url).origin
+    const verifiedEmail = draft.verified ? draft.email : undefined
+    if (step === 'account' && draft.method === 'cloudflare-access') {
+      return html(c, accessPage({ csrf, completed, host: new URL(c.req.url).host, teamDomain: draft.teamDomain, audSet: Boolean(deps.getEnv('CF_ACCESS_AUD')), verifiedEmail, error }))
+    }
+    if (step === 'account' && draft.method === 'oidc') {
+      // ?preset= previews another provider's instructions before anything is saved.
+      const previewed = presetById(c.req.query('preset'))
+      const preset = previewed?.id ?? draft.oidcPreset
+      const issuer = previewed && previewed.id !== draft.oidcPreset ? previewed.issuer : draft.issuer
+      return html(c, oidcPage({ csrf, completed, origin, preset, issuer, env: oidcEnv(), sessionKeyNote: !sessionSecretSet(), verifiedEmail, error }))
+    }
     switch (step) {
       case 'method': return html(c, methodPage({ csrf, completed, current: draft.method }))
-      case 'account': return html(c, draft.email && draft.passwordHash && !draft.verified
-        ? passwordPage({ csrf, completed, email: draft.email })
-        : accountPage({ csrf, completed, email: draft.email }))
-      case 'basics': return html(c, basicsPage({ csrf, completed, title: draft.title ?? 'Status', baseUrl: draft.baseUrl ?? origin, timezone: draft.timezone ?? 'UTC', privatePage: draft.privatePage ?? false, updates: draft.updates ?? false }))
+      case 'account': return html(c, accountPage({ csrf, completed, email: draft.email }))
+      case 'basics': return html(c, basicsPage({ csrf, completed, title: draft.title ?? 'Status', baseUrl: draft.baseUrl ?? origin, timezone: draft.timezone ?? 'UTC', privatePage: draft.privatePage ?? true, updates: draft.updates ?? true }))
       case 'monitor': return html(c, monitorPage({ csrf, completed, name: draft.monitor?.name ?? 'Website', url: draft.monitor?.url ?? '' }))
       default: return html(c, reviewPage({ csrf, completed, yaml: stringifyAdminYaml(draftConfig(draft)) }))
     }
@@ -115,7 +158,73 @@ export function mountSetupRoutes(app: Hono, deps: Deps): void {
     const loaded = await pending(c)
     if ('response' in loaded) return loaded.response
     if (!loaded.session) return html(c, claimPage({ usesEnvToken: Boolean(deps.getEnv('STATUSPING_SETUP_TOKEN')) }))
-    return render(c, loaded.state, loaded.session.csrf, c.req.query('step'))
+    return render(c, loaded.state, loaded.session.csrf, c.req.query('step'), VERIFY_ERRORS[c.req.query('error') ?? ''])
+  })
+
+  // ── Cloudflare Access and OIDC: connect & verify ────────────────────────────────────────────
+
+  app.post('/setup/access', async (c) => {
+    const r = await claimedForm(c)
+    if ('response' in r) return r.response
+    if (r.state.draft.method !== 'cloudflare-access') return c.redirect('/setup', 303)
+    const teamDomain = field(r.form, 'teamDomain').toLowerCase().replace(/^https?:\/\//, '').replace(/\/+$/, '')
+    if (!TEAM_DOMAIN.test(teamDomain)) {
+      return render(c, { ...r.state, draft: { ...r.state.draft, teamDomain } }, r.csrf, 'account', 'Enter the team domain exactly as Access shows it, such as yourteam.cloudflareaccess.com.')
+    }
+    await saveDraft(deps.db, { ...r.state.draft, teamDomain, verified: false, email: undefined }, nowSeconds())
+    return c.redirect('/setup?step=account', 303)
+  })
+
+  app.post('/setup/oidc', async (c) => {
+    const r = await claimedForm(c)
+    if ('response' in r) return r.response
+    if (r.state.draft.method !== 'oidc') return c.redirect('/setup', 303)
+    const preset = presetById(field(r.form, 'preset'))?.id ?? 'other'
+    // Kept as typed: discovery tolerates a trailing slash, and tokens are checked against the
+    // issuer the discovery document declares (Auth0's includes the slash).
+    const issuer = field(r.form, 'issuer')
+    const draft = { ...r.state.draft, oidcPreset: preset, issuer, verified: false, email: undefined }
+    let error: string | undefined
+    try {
+      if (new URL(issuer).protocol !== 'https:') error = 'The issuer must be an https:// URL.'
+    } catch { error = 'Enter the issuer URL, such as https://accounts.google.com.' }
+    if (!error) {
+      try { await discover(issuer, deps.fetch) } catch (e) {
+        error = `StatusPing could not read ${issuer}/.well-known/openid-configuration (${(e as Error).message}). Check the issuer URL.`
+      }
+    }
+    await saveDraft(deps.db, error ? { ...draft, issuer: undefined } : draft, nowSeconds())
+    if (error) return render(c, { ...r.state, draft: { ...draft, issuer } }, r.csrf, 'account', error)
+    return c.redirect('/setup?step=account', 303)
+  })
+
+  /** Starts a real authorization-code round trip with the draft provider; /auth/callback finishes it. */
+  app.get('/setup/oidc/start', async (c) => {
+    const loaded = await pending(c)
+    if ('response' in loaded) return loaded.response
+    if (!loaded.session || !loaded.state.sessionKey) return c.redirect('/setup', 303)
+    const { draft } = loaded.state
+    const clientId = deps.getEnv('OIDC_CLIENT_ID')
+    if (draft.method !== 'oidc' || !draft.issuer || !clientId || !deps.getEnv('OIDC_CLIENT_SECRET')) return c.redirect('/setup?step=account', 303)
+    let endpoint: string
+    try { endpoint = (await discover(draft.issuer, deps.fetch)).authorization_endpoint } catch { return c.redirect('/setup?step=account&error=oidc-discovery', 303) }
+    const [state, nonce, verifier] = [randomToken(32), randomToken(32), randomToken(64)]
+    const challenge = b64urlEncode(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier))))
+    setCookie(c, SETUP_LOGIN_COOKIE, await sign({ state, nonce, verifier, exp: nowSeconds() + 600 }, loaded.state.sessionKey), {
+      httpOnly: true, secure: secure(c), sameSite: 'Lax', path: '/auth', maxAge: 600,
+    })
+    const url = new URL(endpoint)
+    url.search = new URLSearchParams({
+      response_type: 'code', client_id: clientId, redirect_uri: `${new URL(c.req.url).origin}/auth/callback`,
+      scope: 'openid email profile', state, nonce, code_challenge: challenge, code_challenge_method: 'S256',
+    }).toString()
+    return c.redirect(url.toString(), 302)
+  })
+
+  app.post('/setup/connected', async (c) => {
+    const r = await claimedForm(c)
+    if ('response' in r) return r.response
+    return c.redirect('/setup', 303)
   })
 
   app.post('/setup/claim', async (c) => {
@@ -132,7 +241,7 @@ export function mountSetupRoutes(app: Hono, deps: Deps): void {
     }
     await deps.db.run(`UPDATE setup_state SET failed_attempts = 0 WHERE id = 1`)
     setCookie(c, SETUP_COOKIE, await sign({ exp: nowSeconds() + SETUP_SESSION_SECONDS, csrf: randomToken(32) }, loaded.state.sessionKey), {
-      httpOnly: true, secure: secure(c), sameSite: 'Strict', path: '/setup', maxAge: SETUP_SESSION_SECONDS,
+      httpOnly: true, secure: secure(c), sameSite: 'Lax', path: '/', maxAge: SETUP_SESSION_SECONDS,
     })
     return c.redirect('/setup', 303)
   })
@@ -140,8 +249,10 @@ export function mountSetupRoutes(app: Hono, deps: Deps): void {
   app.post('/setup/method', async (c) => {
     const r = await claimedForm(c)
     if ('response' in r) return r.response
-    if (field(r.form, 'method') !== 'basic') return html(c, methodPage({ csrf: r.csrf, completed: new Set(['claim']), error: 'Choose a sign-in method.' }), 400)
-    const draft = r.state.draft.method === 'basic' ? r.state.draft : { ...r.state.draft, method: 'basic' as const, verified: false }
+    const method = field(r.form, 'method') as SetupMethod
+    if (method !== 'basic' && method !== 'cloudflare-access' && method !== 'oidc') return html(c, methodPage({ csrf: r.csrf, completed: new Set(['claim']), error: 'Choose a sign-in method.' }), 400)
+    // Switching methods discards the previous method's verification and identity.
+    const draft = r.state.draft.method === method ? r.state.draft : { ...r.state.draft, method, verified: false, email: undefined, passwordHash: undefined }
     await saveDraft(deps.db, draft, nowSeconds())
     return c.redirect('/setup', 303)
   })
@@ -151,25 +262,19 @@ export function mountSetupRoutes(app: Hono, deps: Deps): void {
     if ('response' in r) return r.response
     const completed = new Set<SetupStep>(['claim', 'method'])
     const email = field(r.form, 'email').toLowerCase()
-    if (!r.state.draft.method) return c.redirect('/setup', 303)
-    if (!EMAIL.test(email)) return html(c, accountPage({ csrf: r.csrf, completed, email, error: 'Enter a valid email address.' }), 400)
-    // Generated passwords only (plan 011 D3): high entropy is what makes the fast hash safe.
-    const password = randomToken(24)
-    await saveDraft(deps.db, { ...r.state.draft, email, passwordHash: await hashPassword(password), verified: false }, nowSeconds())
-    return html(c, passwordPage({ csrf: r.csrf, completed, email, password }))
-  })
-
-  app.post('/setup/verify', async (c) => {
-    const r = await claimedForm(c)
-    if ('response' in r) return r.response
-    const { email, passwordHash } = r.state.draft
-    if (!email || !passwordHash) return c.redirect('/setup', 303)
-    if (await limited(c, 'setup-verify')) return html(c, passwordPage({ csrf: r.csrf, completed: new Set(['claim', 'method']), email, error: 'Too many attempts. Wait a minute and try again.' }), 429)
-    const salt = passwordHash.split(':')[1] ?? ''
-    if (!timingSafeEqual(await hashPassword(field(r.form, 'password'), salt), passwordHash)) {
-      return html(c, passwordPage({ csrf: r.csrf, completed: new Set(['claim', 'method']), email, error: 'That password does not match. Paste it from your password manager.' }), 401)
-    }
-    await saveDraft(deps.db, { ...r.state.draft, verified: true }, nowSeconds())
+    // Only the built-in method creates a password account; SSO methods verify through their provider.
+    if (r.state.draft.method !== 'basic') return c.redirect('/setup', 303)
+    // Passwords are not trimmed; the email is never echoed with the password.
+    const password = typeof r.form.password === 'string' ? r.form.password : ''
+    const confirm = typeof r.form.confirm === 'string' ? r.form.confirm : ''
+    let error: string | undefined
+    if (!EMAIL.test(email)) error = 'Enter a valid email address.'
+    else if (password.length < 12) error = 'Use a password of at least 12 characters.'
+    else if (password.length > 256) error = 'Use a password of at most 256 characters.'
+    else if (password !== confirm) error = 'The passwords do not match.'
+    else if (password.trim().toLowerCase() === email) error = 'Do not use your email address as the password.'
+    if (error) return html(c, accountPage({ csrf: r.csrf, completed, email, error }), 400)
+    await saveDraft(deps.db, { ...r.state.draft, email, passwordHash: await hashUserPassword(password), verified: true }, nowSeconds())
     return c.redirect('/setup', 303)
   })
 
@@ -226,23 +331,27 @@ export function mountSetupRoutes(app: Hono, deps: Deps): void {
       return html(c, reviewPage({ csrf: r.csrf, completed: new Set(['claim', 'method', 'account', 'basics', 'monitor']), yaml: stringifyAdminYaml(draftConfig(draft)), error: (error as Error).message }), 400)
     }
     const email = draft.email!
+    const method = draft.method ?? 'basic'
     // One batch: config, account, session key, audit, and the end of setup mode. The status
     // guard makes a double-submitted Finish a no-op instead of a second write.
     await deps.db.batch([
       { sql: `INSERT INTO admin_config (id, config_json, updated_at, updated_by) VALUES (1, ?, ?, ?)
               ON CONFLICT(id) DO UPDATE SET config_json = excluded.config_json, updated_at = excluded.updated_at, updated_by = excluded.updated_by`,
         params: [JSON.stringify(config), now, email] },
-      { sql: `INSERT INTO local_users (email, password_hash, created_at) VALUES (?, ?, ?)
-              ON CONFLICT(email) DO UPDATE SET password_hash = excluded.password_hash`, params: [email, draft.passwordHash!, now] },
+      ...(method === 'basic'
+        ? [{ sql: `INSERT INTO local_users (email, password_hash, created_at) VALUES (?, ?, ?)
+              ON CONFLICT(email) DO UPDATE SET password_hash = excluded.password_hash`, params: [email, draft.passwordHash!, now] }]
+        : []),
       { sql: `INSERT INTO instance_secrets (name, value, created_at) VALUES ('session_key', ?, ?)
               ON CONFLICT(name) DO UPDATE SET value = excluded.value, created_at = excluded.created_at`, params: [randomToken(48), now] },
       { sql: `INSERT INTO audit_log (actor, action, target, before_json, after_json, at) VALUES (?, 'setup.complete', 'setup', NULL, ?, ?)`,
-        params: [email, JSON.stringify({ method: 'basic' }), now] },
+        params: [email, JSON.stringify({ method }), now] },
       { sql: `UPDATE setup_state SET status = 'complete', code = NULL, session_key = NULL, draft_json = '{}', failed_attempts = 0, updated_at = ? WHERE id = 1 AND status = 'pending'`, params: [now] },
     ])
     await refreshAdminConfig(deps, now)
-    deleteCookie(c, SETUP_COOKIE, { path: '/setup' })
-    await setSession(c, deps, { email, groups: [], provider: 'basic' })
+    deleteCookie(c, SETUP_COOKIE, { path: '/' })
+    // Cloudflare Access signs people in on every request; the other methods use a session.
+    if (method !== 'cloudflare-access') await setSession(c, deps, { email, groups: [], provider: method === 'oidc' ? 'oidc' : 'basic' })
     return c.redirect('/admin?message=' + encodeURIComponent('Setup is complete. Checks start within a minute.'), 303)
   })
 
@@ -265,5 +374,86 @@ export function mountSetupRoutes(app: Hono, deps: Deps): void {
     const code = deps.getEnv('STATUSPING_SETUP_TOKEN') ? null : (await loadSetupState(deps.db))?.code
     deps.log('info', `Instance reset to setup mode.${code ? ` Setup code: ${code}.` : ''} Open ${new URL(c.req.url).origin}/setup to finish setup.`)
     return c.redirect('/setup', 303)
+  })
+}
+
+/** Paths under /auth that answer while setup is pending. */
+export const SETUP_AUTH_PATHS = ['/auth/setup-verify', '/auth/callback']
+
+/**
+ * Verification endpoints that must live under /auth: Cloudflare Access typically protects
+ * /auth, and the OIDC callback has to be the URL the owner registers for good. Mount before
+ * the normal sign-in routes; outside setup mode these hand over to them.
+ */
+export function mountSetupAuthRoutes(app: Hono, deps: Deps): void {
+  const back = (c: Context, error?: string) => c.redirect(`/setup?step=account${error ? `&error=${error}` : ''}`, 303)
+
+  /** The pending setup and this browser's claim; the Lax cookie survives the identity-provider redirect. */
+  const claimed = async (c: Context) => {
+    const state = await loadSetupState(deps.db)
+    if (!state || state.status !== 'pending' || !state.sessionKey) return null
+    return (await unsign<{ exp: number; csrf: string }>(getCookie(c, SETUP_COOKIE), state.sessionKey, nowSeconds())) ? state : null
+  }
+
+  app.get('/auth/setup-verify', async (c, next) => {
+    if (!deps.setupPending) return next()
+    const state = await claimed(c)
+    if (!state) return c.redirect('/setup', 303)
+    const { draft } = state
+    if (draft.method !== 'cloudflare-access' || !draft.teamDomain) return back(c)
+    const audience = deps.getEnv('CF_ACCESS_AUD')
+    if (!audience) return back(c, 'access-no-aud')
+    const token = c.req.header('cf-access-jwt-assertion') ?? getCookie(c, 'CF_Authorization')
+    if (!token) return back(c, 'access-no-token')
+    let claims: Record<string, unknown>
+    try {
+      claims = await verifyJwt(token, {
+        jwksUrl: `https://${draft.teamDomain}/cdn-cgi/access/certs`, issuer: `https://${draft.teamDomain}`, audience, fetch: deps.fetch, now: nowSeconds(),
+      })
+    } catch (error) {
+      const message = (error as Error).message
+      return back(c, message === 'wrong audience' ? 'access-wrong-audience' : message === 'wrong issuer' ? 'access-wrong-issuer' : 'access-invalid')
+    }
+    const email = typeof claims.email === 'string' ? claims.email.toLowerCase() : ''
+    if (!email) return back(c, 'access-no-email')
+    await saveDraft(deps.db, { ...draft, email, verified: true }, nowSeconds())
+    return back(c)
+  })
+
+  app.get('/auth/callback', async (c, next) => {
+    if (!deps.setupPending) return next()
+    const state = await claimed(c)
+    if (!state) return c.redirect('/setup', 303)
+    const { draft } = state
+    const login = await unsign<{ exp: number; state: string; nonce: string; verifier: string }>(getCookie(c, SETUP_LOGIN_COOKIE), state.sessionKey!, nowSeconds())
+    deleteCookie(c, SETUP_LOGIN_COOKIE, { path: '/auth' })
+    if (draft.method !== 'oidc' || !draft.issuer) return back(c)
+    if (c.req.query('error')) return back(c, 'oidc-denied')
+    const code = c.req.query('code')
+    if (!login || !code || !timingSafeEqual(c.req.query('state') ?? '', login.state)) return back(c, 'oidc-state')
+    const clientId = deps.getEnv('OIDC_CLIENT_ID') ?? ''
+    let claims: Record<string, unknown>
+    try {
+      const d = await discover(draft.issuer, deps.fetch)
+      const res = await deps.fetch(d.token_endpoint, {
+        method: 'POST',
+        headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/json' },
+        body: new URLSearchParams({
+          grant_type: 'authorization_code', code, redirect_uri: `${new URL(c.req.url).origin}/auth/callback`,
+          client_id: clientId, client_secret: deps.getEnv('OIDC_CLIENT_SECRET') ?? '', code_verifier: login.verifier,
+        }),
+      })
+      if (!res.ok) return back(c, 'oidc-token')
+      const idToken = ((await res.json()) as { id_token?: string }).id_token
+      if (!idToken) return back(c, 'oidc-token')
+      try {
+        claims = await verifyJwt(idToken, { jwksUrl: d.jwks_uri, issuer: d.issuer, audience: clientId, fetch: deps.fetch, now: nowSeconds() })
+      } catch { return back(c, 'oidc-id-token') }
+    } catch { return back(c, 'oidc-discovery') }
+    if (claims.nonce !== login.nonce) return back(c, 'oidc-state')
+    const email = typeof claims.email === 'string' ? claims.email.toLowerCase() : ''
+    if (!email || claims.email_verified === false) return back(c, 'oidc-email')
+    await saveDraft(deps.db, { ...draft, email, verified: true }, nowSeconds())
+    return back(c)
   })
 }

@@ -3,6 +3,7 @@
  * theme as the status pages (Card, Button, Input, Alert) and work without JavaScript.
  */
 import { STYLES } from '../web/styles.ts'
+import { ACCESS_DOCS_URL, OIDC_PRESETS, presetById } from './instructions.ts'
 
 const escape = (value: string) => value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
 
@@ -58,6 +59,14 @@ export const SETUP_STYLES = `
 .choice .hint { margin: 8px 0 0; }
 .check { display: flex; gap: 10px; align-items: flex-start; font-weight: 400; }
 .setup-form input[type="radio"], .setup-form input[type="checkbox"] { flex: none; align-self: flex-start; margin: 3px 0 0; accent-color: var(--primary); }
+.alert.success { border-color: color-mix(in oklab, var(--success) 55%, var(--border)); background: color-mix(in oklab, var(--success) 8%, var(--card)); }
+.setup-card h2 { margin: 24px 0 8px; font-size: 16px; font-weight: 600; }
+.steps-list { margin: 0 0 16px; padding-left: 20px; } .steps-list li { margin: 8px 0; } .steps-list ul { margin: 6px 0; }
+.envlist { margin: 0 0 12px; padding: 0; list-style: none; } .envlist li { margin: 4px 0; }
+.envlist .set span { color: var(--success); } .envlist .missing span { color: var(--destructive); }
+.howto { margin: 0 0 16px; font-size: 14px; } .howto summary { cursor: pointer; color: var(--muted-foreground); } .howto ul { margin: 8px 0; }
+.btn-primary[aria-disabled="true"] { opacity: .5; cursor: not-allowed; }
+select.input { width: 100%; }
 .secret { margin: 0 0 16px; padding: 12px 14px; border-radius: calc(var(--radius) - 2px); background: var(--muted); font: 600 16px ui-monospace, SFMono-Regular, Menlo, monospace; word-break: break-all; user-select: all; }
 `
 
@@ -100,37 +109,96 @@ ${alert(opts.error)}${alert(opts.note, 'warning')}
 }
 
 export function methodPage(opts: { csrf: string; completed: ReadonlySet<SetupStep>; current?: string; error?: string }): string {
-  const later = '<p class="hint">Guided setup is coming. For now, finish with the built-in method, then switch <code>access.provider</code> in the YAML admin.</p>'
-  const choice = (id: string, title: string, best: string, need: string, time: string, enabled: boolean, extra = '') => `<label class="choice${enabled ? '' : ' disabled'}">
-<input type="radio" name="method" value="${id}" aria-labelledby="method-${id}"${enabled ? '' : ' disabled'}${opts.current === id ? ' checked' : ''} required><span><strong id="method-${id}">${title}</strong>
-<dl><dt>Best for</dt><dd>${best}</dd><dt>You need</dt><dd>${need}</dd><dt>Time</dt><dd>${time}</dd></dl>${extra}</span></label>`
+  const choice = (id: string, title: string, best: string, need: string, time: string) => `<label class="choice">
+<input type="radio" name="method" value="${id}" aria-labelledby="method-${id}"${opts.current === id ? ' checked' : ''} required><span><strong id="method-${id}">${title}</strong>
+<dl><dt>Best for</dt><dd>${best}</dd><dt>You need</dt><dd>${need}</dd><dt>Time</dt><dd>${time}</dd></dl></span></label>`
   return shell('Sign-in method', 'method', opts.completed, `<h1>How will administrators sign in?</h1>
-<p class="lead">Choose a sign-in method. Setup cannot continue without one.</p>${alert(opts.error)}
+<p class="lead">Choose a sign-in method. Setup cannot continue without one, and you can come back and switch until you finish.</p>${alert(opts.error)}
 <form class="setup-form" method="post" action="/setup/method">${hidden(opts.csrf)}<div class="choices">
-${choice('basic', 'Email + password (built-in)', 'One person or a small team; the quickest start', 'Nothing else', 'About 1 minute', true)}
-${choice('cloudflare-access', 'Cloudflare Access', 'Sites already on Cloudflare; Google, GitHub or one-time PIN login', 'A Cloudflare Zero Trust account (free for up to 50 users)', 'About 5 minutes', false, later)}
-${choice('oidc', 'OpenID Connect (SSO)', 'Google Workspace, Microsoft Entra ID, Okta, Auth0 or Keycloak', 'Permission to register an OIDC app with your identity provider', 'About 10 minutes', false, later)}
+${choice('basic', 'Email + password (built-in)', 'One person or a small team; the quickest start', 'Nothing else', 'About 1 minute')}
+${choice('cloudflare-access', 'Cloudflare Access', 'Sites already on Cloudflare; Google, GitHub or one-time PIN login', 'A Cloudflare Zero Trust account (free for up to 50 users)', 'About 5 minutes')}
+${choice('oidc', 'OpenID Connect (SSO)', 'Google Workspace, Microsoft Entra ID, Okta, Auth0 or Keycloak', 'Permission to register an OIDC app with your identity provider', 'About 10 minutes')}
 </div><div class="actions"><button class="btn-primary" type="submit">Continue</button></div></form>`)
+}
+
+/** How to add a secret on each runtime. Saving one on Cloudflare redeploys the Worker; setup resumes where it was. */
+function secretHowTo(names: string[]): string {
+  const list = names.map((name) => `<code>${name}</code>`).join(' and ')
+  return `<details class="howto"><summary>How to add ${list}</summary><ul>
+<li><strong>Cloudflare dashboard:</strong> Workers &amp; Pages → <em>your Worker</em> → Settings → <strong>Variables and Secrets</strong> → Add → type <em>Secret</em>.</li>
+<li><strong>Wrangler:</strong> ${names.map((name) => `<code>npx wrangler secret put ${name}</code>`).join(', ')}.</li>
+<li><strong>Node:</strong> add ${names.map((name) => `<code>${name}=…</code>`).join(' and ')} to <code>.env</code> and restart.</li></ul>
+<p class="hint">Saving a secret on Cloudflare redeploys the Worker. Reload this page afterwards; setup continues where you left off.</p></details>`
+}
+
+/** Names only, never values. */
+function envChecklist(env: Record<string, boolean>): string {
+  return `<ul class="envlist">${Object.entries(env).map(([name, set]) => `<li class="${set ? 'set' : 'missing'}"><span aria-hidden="true">${set ? '✓' : '✗'}</span> <code>${name}</code> ${set ? 'is set' : 'is missing'}</li>`).join('')}</ul>`
+}
+
+function verifiedBlock(csrf: string, email: string, method: string): string {
+  return `<p class="alert success" role="status">Verified. <strong>${escape(email)}</strong> signed in with ${method} and will be the first administrator.</p>
+<form method="post" action="/setup/connected">${hidden(csrf)}<div class="actions"><button class="btn-primary" type="submit">Continue</button><a class="btn-outline" href="/setup?step=method">Choose a different method</a></div></form>`
+}
+
+export function accessPage(opts: { csrf: string; completed: ReadonlySet<SetupStep>; host: string; teamDomain?: string; audSet: boolean; verifiedEmail?: string; error?: string }): string {
+  const ready = Boolean(opts.teamDomain && opts.audSet)
+  return shell('Cloudflare Access', 'account', opts.completed, `<h1>Connect Cloudflare Access</h1>
+<p class="lead">Cloudflare Access signs people in before requests reach StatusPing. StatusPing then checks the signed Access token on every request.</p>${alert(opts.error)}
+${opts.verifiedEmail ? verifiedBlock(opts.csrf, opts.verifiedEmail, 'Cloudflare Access') : ''}
+<ol class="steps-list">
+<li>Open <strong>Cloudflare Zero Trust → Access → Applications → Add an application → Self-hosted</strong> (<a href="${ACCESS_DOCS_URL}" target="_blank" rel="noopener">Cloudflare guide</a>).</li>
+<li>Application domain: <code>${escape(opts.host)}</code>. Then choose what Access protects:
+<ul><li><strong>The whole site</strong> (leave the path empty): simplest, but your public status page becomes private too.</li>
+<li><strong>Only sign-in</strong>: add two paths, <code>/admin</code> and <code>/auth</code>. Status pages stay public.</li></ul></li>
+<li>Add a policy: <strong>Allow</strong> → <em>Emails</em> → your email address. Add more people later in Access, not in StatusPing.</li>
+<li>Save, then copy two values from the application's <strong>Overview</strong>: the <strong>team domain</strong> (enter it below) and the <strong>Application Audience (AUD) Tag</strong> (store it as the secret <code>CF_ACCESS_AUD</code>).</li>
+</ol>
+${envChecklist({ CF_ACCESS_AUD: opts.audSet })}${opts.audSet ? '' : secretHowTo(['CF_ACCESS_AUD'])}
+<form class="setup-form" method="post" action="/setup/access">${hidden(opts.csrf)}
+${field('Team domain', `<input class="input" id="teamDomain" name="teamDomain" type="text" value="${escape(opts.teamDomain ?? '')}" placeholder="yourteam.cloudflareaccess.com" spellcheck="false" required>`)}
+<div class="actions"><button class="btn-outline" type="submit">Save team domain</button></div></form>
+<h2>Verify</h2>
+<p>Open the check below. Access asks you to sign in first, then StatusPing confirms the token is valid for this team domain and audience.</p>
+<div class="actions">${ready && !opts.verifiedEmail ? '<a class="btn-primary" href="/auth/setup-verify">Verify with Cloudflare Access</a>' : `<span class="btn-primary" aria-disabled="true">Verify with Cloudflare Access</span>`}<a class="btn-outline" href="/setup?step=method">Back</a></div>
+${ready ? '' : '<p class="hint">Save the team domain and add <code>CF_ACCESS_AUD</code> first.</p>'}`)
+}
+
+export function oidcPage(opts: { csrf: string; completed: ReadonlySet<SetupStep>; origin: string; preset?: string; issuer?: string; env: Record<string, boolean>; sessionKeyNote: boolean; verifiedEmail?: string; error?: string }): string {
+  const preset = presetById(opts.preset) ?? OIDC_PRESETS[0]!
+  const callback = `${opts.origin}/auth/callback`
+  const workersDev = /\.workers\.dev$/i.test(new URL(opts.origin).hostname)
+  const missing = Object.entries(opts.env).filter(([, set]) => !set).map(([name]) => name)
+  const ready = Boolean(opts.issuer) && missing.length === 0
+  return shell('OpenID Connect', 'account', opts.completed, `<h1>Connect OpenID Connect (SSO)</h1>
+<p class="lead">Register StatusPing as a web application with your identity provider, then run a real test sign-in.</p>${alert(opts.error)}
+${opts.verifiedEmail ? verifiedBlock(opts.csrf, opts.verifiedEmail, preset.label) : ''}
+<form class="setup-form" method="post" action="/setup/oidc">${hidden(opts.csrf)}
+${field('Identity provider', `<select class="input" id="preset" name="preset" onchange="location.href='/setup?step=account&amp;preset='+encodeURIComponent(this.value)">${OIDC_PRESETS.map((p) => `<option value="${p.id}"${p.id === preset.id ? ' selected' : ''}>${p.label}</option>`).join('')}</select>`)}
+<ol class="steps-list">
+<li>Register a web application: ${preset.register} (<a href="${preset.docsUrl}" target="_blank" rel="noopener">${preset.label} guide</a>)</li>
+<li>Set the redirect (callback) URL to exactly <code class="copy">${escape(callback)}</code>${workersDev ? '<p class="alert warning">This is a <code>workers.dev</code> address. If you add a custom domain later, register its callback URL too.</p>' : ''}</li>
+<li>Store the client ID and client secret as the secrets <code>OIDC_CLIENT_ID</code> and <code>OIDC_CLIENT_SECRET</code>.</li>
+<li>Enter the issuer URL below${preset.issuer ? '' : `: ${preset.issuerHint}`}</li>
+</ol>
+${field('Issuer URL', `<input class="input" id="issuer" name="issuer" type="url" value="${escape(opts.issuer ?? preset.issuer ?? '')}" placeholder="https://…" spellcheck="false" required>`, 'StatusPing checks <code>&lt;issuer&gt;/.well-known/openid-configuration</code> when you save.')}
+<div class="actions"><button class="btn-outline" type="submit">Save and check issuer</button></div></form>
+${envChecklist(opts.env)}${missing.length ? secretHowTo(missing) : ''}
+${opts.sessionKeyNote ? '<p class="hint"><code>SESSION_SECRET</code> is optional: without it StatusPing generates and stores a session signing key.</p>' : ''}
+<h2>Verify</h2>
+<p>Sign in with your provider. Setup continues once the callback returns your verified email address.</p>
+<div class="actions">${ready && !opts.verifiedEmail ? '<a class="btn-primary" href="/setup/oidc/start">Test sign-in</a>' : '<span class="btn-primary" aria-disabled="true">Test sign-in</span>'}<a class="btn-outline" href="/setup?step=method">Back</a></div>
+${ready ? '' : '<p class="hint">Save the issuer and add the missing secrets first.</p>'}`)
 }
 
 export function accountPage(opts: { csrf: string; completed: ReadonlySet<SetupStep>; email?: string; error?: string }): string {
   return shell('Administrator account', 'account', opts.completed, `<h1>Create the administrator account</h1>
-<p class="lead">StatusPing generates a strong password for you and shows it once. Have your password manager ready.</p>${alert(opts.error)}
+<p class="lead">You will sign in with this email and password. Choose a password you do not use anywhere else.</p>${alert(opts.error)}
 <form class="setup-form" method="post" action="/setup/account">${hidden(opts.csrf)}
-${field('Administrator email', `<input class="input" id="email" name="email" type="email" autocomplete="email" value="${escape(opts.email ?? '')}" required autofocus>`)}
-<div class="actions"><button class="btn-primary" type="submit">Generate password</button><a class="btn-outline" href="/setup?step=method">Back</a></div></form>`)
-}
-
-export function passwordPage(opts: { csrf: string; completed: ReadonlySet<SetupStep>; email: string; password?: string; error?: string }): string {
-  const reveal = opts.password
-    ? `<p class="alert warning">This is the only time the password is shown. Store it in your password manager now.</p><p class="secret">${escape(opts.password)}</p>`
-    : '<p>Enter the password you saved for this account.</p>'
-  return shell('Verify sign-in', 'account', opts.completed, `<h1>Sign in to verify</h1>
-<p class="lead">Administrator: <strong>${escape(opts.email)}</strong></p>${reveal}${alert(opts.error)}
-<form class="setup-form" method="post" action="/setup/verify">${hidden(opts.csrf)}<input type="hidden" name="email" value="${escape(opts.email)}" autocomplete="username">
-${field('Password', '<input class="input" id="password" name="password" type="password" autocomplete="new-password" required autofocus>', 'Typing it here confirms you saved it correctly.')}
-<div class="actions"><button class="btn-primary" type="submit">Verify and continue</button></div></form>
-<form method="post" action="/setup/account">${hidden(opts.csrf)}<input type="hidden" name="email" value="${escape(opts.email)}"><div class="actions"><button class="btn-outline" type="submit">Lost it? Generate a new password</button></div></form>`)
+${field('Administrator email', `<input class="input" id="email" name="email" type="email" autocomplete="username" value="${escape(opts.email ?? '')}" required${opts.email ? '' : ' autofocus'}>`)}
+${field('Password', `<input class="input" id="password" name="password" type="password" autocomplete="new-password" minlength="12" maxlength="256" required${opts.email ? ' autofocus' : ''}>`, 'At least 12 characters. A password manager can generate and remember a strong one.')}
+${field('Confirm password', '<input class="input" id="confirm" name="confirm" type="password" autocomplete="new-password" minlength="12" maxlength="256" required>')}
+<div class="actions"><button class="btn-primary" type="submit">Create account</button><a class="btn-outline" href="/setup?step=method">Back</a></div></form>`)
 }
 
 export function basicsPage(opts: { csrf: string; completed: ReadonlySet<SetupStep>; title: string; baseUrl: string; timezone: string; privatePage: boolean; updates: boolean; error?: string }): string {
