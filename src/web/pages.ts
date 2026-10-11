@@ -139,7 +139,7 @@ function pageSwitcher(c: Chrome, title: string): Html {
   if (c.pages.length < 2) return pageHeading(title)
   return html`<div class="head">
     <details class="switcher">
-      <summary aria-label="Switch status page"><h1>${title}<svg class="chevron" viewBox="0 0 20 20" width="20" height="20" aria-hidden="true"><path d="M5 8l5 5 5-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></h1></summary>
+      <summary><h1>${title}<svg class="chevron" viewBox="0 0 20 20" width="20" height="20" aria-hidden="true"><path d="M5 8l5 5 5-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></h1><span class="sr-only">Switch status page</span></summary>
       <div class="switcher-menu" role="menu">
         <div class="menu-label">Status pages</div>
         <div class="menu-sep" role="separator"></div>
@@ -443,11 +443,11 @@ function bar(b: DayBar, index: number, total: number, o: BarOpts): Html {
     // Healthy / no-data days: a small popover too. tabindex=-1 → opens on hover or tap, but
     // doesn't add 90 stops per monitor to keyboard Tab navigation.
     const text = b.uptime === null ? 'No data' : '100% uptime · No downtime'
-    return html`<span class="bar ${barClass(b)}${maintenance ? ' maintenance' : ''}" tabindex="-1" aria-label="${dayLabel(b.day)}: ${text}${latencyText}${maintenance ? ` · ${maintenanceText}` : ''}"><span class="pop ${edge}" role="tooltip"><span class="pop-head"><strong>${dayLabel(b.day)}</strong></span><span class="pop-sub">${text}${latencyText}</span>${maintenance ? html`<span class="pop-maintenance">${maintenanceText}</span>` : ''}</span></span>`
+    return html`<span class="bar ${barClass(b)}${maintenance ? ' maintenance' : ''}" role="img" tabindex="-1" aria-label="${dayLabel(b.day)}: ${text}${latencyText}${maintenance ? ` · ${maintenanceText}` : ''}"><span class="pop ${edge}" role="tooltip"><span class="pop-head"><strong>${dayLabel(b.day)}</strong></span><span class="pop-sub">${text}${latencyText}</span>${maintenance ? html`<span class="pop-maintenance">${maintenanceText}</span>` : ''}</span></span>`
   }
   const items = o.fields.has('incidents') ? b.outages.slice(0, MAX_POP_ITEMS) : []
   const more = o.fields.has('incidents') ? b.outages.length - items.length : 0
-  return html`<span class="bar ${barClass(b)}${maintenance ? ' maintenance' : ''}" tabindex="0" aria-label="${dayLabel(b.day)}: ${summary}, ${formatDuration(b.downSeconds)} down${maintenance ? ` · ${maintenanceText}` : ''}">
+  return html`<span class="bar ${barClass(b)}${maintenance ? ' maintenance' : ''}" role="img" tabindex="0" aria-label="${dayLabel(b.day)}: ${summary}, ${formatDuration(b.downSeconds)} down${maintenance ? ` · ${maintenanceText}` : ''}">
     <span class="pop ${edge}" role="tooltip">
       <span class="pop-head"><strong>${dayLabel(b.day)}</strong><span class="pop-total">${formatDuration(b.downSeconds)} down</span></span>
       <span class="pop-sub">${summary}${b.outages.length ? ` · ${b.outages.length} outage${b.outages.length === 1 ? '' : 's'}` : ''}${latencyText}</span>
@@ -467,7 +467,7 @@ function bar(b: DayBar, index: number, total: number, o: BarOpts): Html {
 }
 
 function bars(view: MonitorView, o: Omit<BarOpts, 'label'>): Html {
-  return html`<div class="bars" aria-label="Uptime over the last 90 days: ${pct(view.uptime90)}">
+  return html`<div class="bars" role="group" aria-label="Uptime over the last 90 days: ${pct(view.uptime90)}">
     ${view.bars.map((b, i) => bar(b, i, view.bars.length, { ...o, label: 'uptime' }))}
   </div>
   <div class="bar-legend"><span>90 days ago</span><span>${pct(view.uptime90)} uptime</span><span>Today</span></div>`
@@ -725,19 +725,19 @@ export function monitorPage(d: MonitorDetail, ctx: PageCtx & { now: number }): H
         <h2>Incidents</h2>
         ${outages.length === 0 && resolvedAnnouncements.length === 0
           ? html`<p class="muted">No incidents recorded.</p>`
-          : html`<div class="scroll"><table>
+          : html`<div class="scroll" tabindex="0" role="region" aria-label="Incidents"><table>
               <thead><tr><th>Started</th><th>Reason</th>${fields.has('errors') ? html`<th>Detail</th>` : ''}<th class="num">Duration</th></tr></thead>
               <tbody>${outages.map(
                 (i) => html`<tr>
                   <td class="nowrap">${when(i.startedAt, now, tz, 'datetime')}</td>
                   <td class="nowrap">${REASON_LABEL[i.reason]}</td>
-                  ${fields.has('errors') ? html`<td class="muted">${i.detail ?? ''}</td>` : ''}
+                  ${fields.has('errors') ? html`<td class="muted incident-detail">${i.detail ?? ''}</td>` : ''}
                   <td class="num nowrap">${i.resolvedAt === null
                     ? html`<span class="pill down">Ongoing</span><span>${formatDuration(now - i.startedAt)}</span>`
                     : formatDuration(i.resolvedAt - i.startedAt)}</td>
                 </tr>`,
               )}${resolvedAnnouncements.map(
-                (announcement) => html`<tr class="announcement-history"><td class="nowrap">${when(announcement.createdAt, now, tz, 'datetime')}</td><td class="nowrap">${announcement.title}</td>${fields.has('errors') ? html`<td class="muted">${announcement.updates[0]?.body ?? ''}</td>` : ''}<td class="num nowrap">${announcement.resolvedAt ? formatDuration(announcement.resolvedAt - announcement.createdAt) : 'Resolved'}</td></tr>`,
+                (announcement) => html`<tr class="announcement-history"><td class="nowrap">${when(announcement.createdAt, now, tz, 'datetime')}</td><td class="nowrap">${announcement.title}</td>${fields.has('errors') ? html`<td class="muted incident-detail">${announcement.updates[0]?.body ?? ''}</td>` : ''}<td class="num nowrap">${announcement.resolvedAt ? formatDuration(announcement.resolvedAt - announcement.createdAt) : 'Resolved'}</td></tr>`,
               )}</tbody></table></div>`}
       </section>`
     : ''
@@ -757,7 +757,7 @@ export function monitorPage(d: MonitorDetail, ctx: PageCtx & { now: number }): H
           <h2>Recent runs</h2>
           ${runs.length === 0
             ? html`<p class="muted">No pings received yet.</p>`
-            : html`<div class="scroll"><table class="runs">
+            : html`<div class="scroll" tabindex="0" role="region" aria-label="Recent runs"><table class="runs">
                 <thead><tr><th>Started</th><th class="num">Result</th></tr></thead>
                 <tbody>${runs.map((r) => {
                   const [label, tone] = RUN_LABEL[r.result]

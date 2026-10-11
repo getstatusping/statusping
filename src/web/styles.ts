@@ -175,6 +175,9 @@ tr.has-detail:has(details[open]) + .detail-row { display: table-row; }
 tr.has-detail:has(details[open]) td { border-bottom-color: transparent; }
 tbody tr.detail-row:hover { background: none; }
 .runs th:first-child, .runs td:first-child { width: 100%; }
+/* Error detail keeps a readable width on phones; the table scrolls sideways instead of crushing it. */
+.incident-detail { min-width: 14em; }
+.scroll:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; border-radius: 4px; }
 .detail-row td { height: auto; padding: 0 0 14px; }
 .run-detail { margin-left: 20px; padding: 2px 0 4px; }
 .run-facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px 24px; margin: 0; }

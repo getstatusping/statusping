@@ -382,7 +382,7 @@ describe('bar popovers', () => {
     expect(pub).toContain('Check failed')
     expect(pub).not.toContain('origin-secret')
     // Healthy days get a popover too (hover/tap only, not in the Tab order).
-    expect(pub).toMatch(/<span class="bar up" tabindex="-1" aria-label="[^"]+: 100% uptime · No downtime"><span class="pop[^"]*" role="tooltip">/)
+    expect(pub).toMatch(/<span class="bar up" role="img" tabindex="-1" aria-label="[^"]+: 100% uptime · No downtime"><span class="pop[^"]*" role="tooltip">/)
     const full = await (await app.request('/pages/full')).text()
     expect(full).toContain('HTTP 502 from origin-secret')
   })

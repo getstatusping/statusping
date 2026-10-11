@@ -38,13 +38,14 @@ const SECTIONS: Array<[Section, string, string]> = [
 const ADMIN_STYLES = `
 [hidden] { display: none !important; }
 .settings { display: grid; grid-template-columns: 200px minmax(0, 1fr); gap: 32px; align-items: start; }
+.settings > * { min-width: 0; }
 .settings-nav ul { margin: 0; padding: 0; list-style: none; display: grid; gap: 2px; }
 .settings-nav a { display: block; padding: 6px 10px; border-radius: calc(var(--radius) - 4px); font-size: 14px; color: var(--muted-foreground); }
 .settings-nav a:hover { background: var(--accent); color: var(--foreground); text-decoration: none; }
 .settings-nav a[aria-current="page"] { background: var(--muted); color: var(--foreground); font-weight: 500; }
 .settings-nav .nav-foot { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--border); }
 @media (max-width: 760px) {
-  .settings { grid-template-columns: 1fr; gap: 16px; }
+  .settings { grid-template-columns: minmax(0, 1fr); gap: 16px; }
   .settings-nav ul { display: flex; gap: 4px; overflow-x: auto; padding-bottom: 4px; }
   .settings-nav a { white-space: nowrap; } .settings-nav .nav-foot { display: none; }
 }
@@ -70,8 +71,10 @@ textarea.code { min-height: 24rem; font: 13px/1.5 ui-monospace, SFMono-Regular, 
 .alert.success { border-color: color-mix(in oklab, var(--success) 55%, var(--border)); background: color-mix(in oklab, var(--success) 8%, var(--card)); }
 .table { width: 100%; border-collapse: collapse; font-size: 14px; }
 .table th { padding: 0 12px 8px 0; text-align: left; font-weight: 500; color: var(--muted-foreground); border-bottom: 1px solid var(--border); }
-.table td { padding: 10px 12px 10px 0; border-bottom: 1px solid var(--border); vertical-align: middle; }
+.table td { padding: 10px 12px 10px 0; border-bottom: 1px solid var(--border); vertical-align: middle; overflow-wrap: normal; }
 .table tr:last-child td { border-bottom: 0; } .table tbody tr:hover { background: transparent; } .table td.end { text-align: right; white-space: nowrap; padding-right: 0; }
+.table td:first-child { min-width: 9em; }
+.scroll:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; border-radius: 4px; }
 .table .sub { display: block; color: var(--muted-foreground); font-size: 13px; overflow-wrap: anywhere; }
 .badge { display: inline-flex; align-items: center; height: 22px; padding: 0 8px; border: 1px solid var(--border); border-radius: 999px; font-size: 12px; font-weight: 500; white-space: nowrap; }
 .empty { padding: 24px; text-align: center; color: var(--muted-foreground); }
@@ -166,7 +169,7 @@ export function monitorsPage(opts: { viewer: Viewer; rows: MonitorRow[]; notice?
 <td><span class="badge">${KIND_LABEL[monitor.kind]}</span></td><td>${escape(group)}</td><td class="end"><a class="btn-outline" href="/admin/monitors/${encodeURIComponent(monitor.id)}">Edit</a></td></tr>`).join('')
   return layout({ ...opts, section: 'monitors', title: 'Monitors', description: 'What StatusPing checks, and how often.', body: `
 <section class="card">${add}</section>
-<section class="card">${opts.rows.length ? `<table class="table"><thead><tr><th>Monitor</th><th>Type</th><th>Group</th><th></th></tr></thead><tbody>${rows}</tbody></table>` : '<p class="empty">No monitors yet. Add one above.</p>'}</section>` })
+<section class="card">${opts.rows.length ? `<div class="scroll" tabindex="0" role="region" aria-label="Monitors"><table class="table"><thead><tr><th>Monitor</th><th>Type</th><th>Group</th><th><span class="sr-only">Actions</span></th></tr></thead><tbody>${rows}</tbody></table></div>` : '<p class="empty">No monitors yet. Add one above.</p>'}</section>` })
 }
 
 export function monitorForm(opts: { viewer: Viewer; csrf: string; kind: MonitorInput['kind']; monitor?: MonitorInput; values?: Record<string, string>; group: string; groups: string[]; sinks: string[]; timezone: string; pingPath?: string; error?: string }): string {
@@ -225,9 +228,9 @@ export function pagesPage(opts: { viewer: Viewer; csrf: string; pages: PageInput
     ? `<form method="post" action="/admin/pages/${encodeURIComponent(slug)}/home" style="display:inline">${hidden(opts.csrf)}<button class="btn-outline" type="submit">Make home page</button></form> ` : ''
   const rows = opts.pages.map((p) => `<tr><td><a href="/admin/pages/${encodeURIComponent(p.slug)}"><strong>${escape(p.title)}</strong></a><span class="sub">/${escape(p.slug)}${opts.pages.length > 1 && p.slug === opts.home ? ' · home page (/)' : ''}</span></td>
 <td><span class="badge">${p.access === undefined || p.access === 'public' ? 'Public' : 'Private'}</span></td><td>${p.monitors.includes('*') ? 'All monitors' : `${p.monitors.length} monitor${p.monitors.length === 1 ? '' : 's'}`}</td>
-<td class="end">${makeHome(p.slug)}<a class="btn-outline" href="/${encodeURIComponent(p.slug)}">View</a> <a class="btn-outline" href="/admin/pages/${encodeURIComponent(p.slug)}">Edit</a></td></tr>`).join('')
+<td class="end">${makeHome(p.slug)}<a class="btn-outline" href="/pages/${encodeURIComponent(p.slug)}">View</a> <a class="btn-outline" href="/admin/pages/${encodeURIComponent(p.slug)}">Edit</a></td></tr>`).join('')
   return layout({ ...opts, section: 'pages', title: 'Status pages', description: 'Who sees which monitors.', actions: '<a class="btn-primary" href="/admin/pages/new">Add page</a>', body: `
-<section class="card"><table class="table"><thead><tr><th>Page</th><th>Visibility</th><th>Shows</th><th></th></tr></thead><tbody>${rows}</tbody></table></section>` })
+<section class="card"><div class="scroll" tabindex="0" role="region" aria-label="Status pages"><table class="table"><thead><tr><th>Page</th><th>Visibility</th><th>Shows</th><th><span class="sr-only">Actions</span></th></tr></thead><tbody>${rows}</tbody></table></div></section>` })
 }
 
 export function pageForm(opts: { viewer: Viewer; csrf: string; page?: PageInput; monitors: Array<{ id: string; name: string }>; values?: Record<string, string>; error?: string }): string {
@@ -263,7 +266,7 @@ export function channelsPage(opts: { viewer: Viewer; csrf: string; sinks: Array<
 <td class="end"><form method="post" action="/admin/sinks/${encodeURIComponent(s.name)}/test" style="display:inline">${hidden(opts.csrf)}<button class="btn-outline" type="submit">Send test</button></form> <a class="btn-outline" href="/admin/channels/${encodeURIComponent(s.name)}">Edit</a></td></tr>`).join('')
   return layout({ ...opts, section: 'channels', title: 'Alert channels', description: 'Where StatusPing sends alerts. Monitors use every channel unless they choose otherwise.', body: `
 <section class="card"><h2>Add a channel</h2><p class="lead">Choose where alerts should go.</p>${add}</section>
-<section class="card">${opts.sinks.length ? `<table class="table"><thead><tr><th>Channel</th><th>Type</th><th></th></tr></thead><tbody>${rows}</tbody></table>` : '<p class="empty">No alert channels yet.</p>'}</section>` })
+<section class="card">${opts.sinks.length ? `<div class="scroll" tabindex="0" role="region" aria-label="Alert channels"><table class="table"><thead><tr><th>Channel</th><th>Type</th><th><span class="sr-only">Actions</span></th></tr></thead><tbody>${rows}</tbody></table></div>` : '<p class="empty">No alert channels yet.</p>'}</section>` })
 }
 
 /** Email has three ways to send; only the chosen one's fields are shown. */
@@ -339,7 +342,7 @@ export function mcpPage(opts: { viewer: Viewer; csrf: string; baseUrl: string; t
 <td class="end"><form method="post" action="/admin/mcp/${t.id}/revoke" style="display:inline">${hidden(opts.csrf)}<button class="btn-outline" type="submit">Revoke</button></form></td></tr>`).join('')
   return layout({ ...opts, section: 'mcp', title: 'MCP', description: 'Let AI assistants such as Claude read your status and, if you allow it, post incidents or manage monitors.', body: `
 <section class="card"><h2>Server address</h2><p class="lead">Add this to an MCP client, with a token below as a bearer token.</p><pre>${escape(endpoint)}</pre></section>
-${rows ? `<section class="card"><table class="table"><thead><tr><th>Token</th><th>Can</th><th>Last used</th><th></th></tr></thead><tbody>${rows}</tbody></table></section>` : ''}
+${rows ? `<section class="card"><div class="scroll" tabindex="0" role="region" aria-label="MCP tokens"><table class="table"><thead><tr><th>Token</th><th>Can</th><th>Last used</th><th><span class="sr-only">Actions</span></th></tr></thead><tbody>${rows}</tbody></table></div></section>` : ''}
 <section class="card"><h2>Create a token</h2><p class="lead">Give each assistant or person its own token, so you can revoke it on its own.</p>
 <form class="form" method="post" action="/admin/mcp">${hidden(opts.csrf)}
 ${field('Name', textInput('name', [opts.values?.name ?? ''].flat()[0], 'maxlength="60" placeholder="for example Claude on my laptop" required'))}
