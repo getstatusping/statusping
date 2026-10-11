@@ -25,7 +25,7 @@ new_sqlite_classes = ["RegionalProbe"]
 STATUSPING_ROLE = "primary"
 # Updated by each public template release. It is an opaque, public marker for
 # upgrade tooling; it carries no account, monitor, or secret data.
-STATUSPING_TEMPLATE_VERSION = "0.2.13"
+STATUSPING_TEMPLATE_VERSION = "0.2.14"
 # Public, non-secret deployment metadata exposed by /healthz. Keep the instance
 # value opaque (for example a generated UUID); never place a secret here.
 # STATUSPING_RELEASE_CHANNEL = "stable"
