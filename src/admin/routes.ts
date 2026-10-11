@@ -10,7 +10,7 @@ import {
   removeMonitor, removePage, removeSink, SINK_FIELDS, sinkEnvName, sinkFromForm, type SinkType, text,
 } from './forms.ts'
 import {
-  accessPage, activityPage, channelForm, channelsPage, generalPage, configurationPage, importPreview, monitorForm, monitorsPage,
+  accessPage, activityPage, mcpPage, mcpTokenCreated, channelForm, channelsPage, generalPage, configurationPage, importPreview, monitorForm, monitorsPage,
   pageForm, pagesPage, pingUrlPage, type SecretSource,
 } from './ui.ts'
 import { appendAudit, listAudit, loadAdminConfig, rotatePingToken, saveAdminConfig, sendSinkTest } from './service.ts'
@@ -19,6 +19,7 @@ import { parseAdminYaml, stringifyAdminYaml } from './yaml.ts'
 import { beginSetup } from '../setup/state.ts'
 import { deleteCookie } from 'hono/cookie'
 import { checkForUpdate } from '../updates.ts'
+import { createApiToken, isMcpScope, listApiTokens, revokeApiToken } from '../mcp/tokens.ts'
 import { APP_VERSION } from '../version.ts'
 
 const noStore = { 'cache-control': 'no-store' }
@@ -41,6 +42,7 @@ const NOTICES: Record<string, string> = {
   'admins-saved': 'Administrators saved.',
   imported: 'Configuration imported.',
   'updates-saved': 'Update checks saved.',
+  'mcp-token-revoked': 'Token revoked. Clients using it can no longer connect.',
   'home-saved': 'Home page changed.',
   'update-available': 'A new version is available.',
   'update-current': 'This installation is up to date.',
@@ -490,6 +492,35 @@ export function mountAdminRoutes(app: Hono, deps: Deps): void {
     const v = await view(c)
     if (v instanceof Response) return v
     return c.body(stringifyAdminYaml(v.config), 200, { ...noStore, 'content-type': 'application/yaml; charset=utf-8', 'content-disposition': 'attachment; filename="statusping.yaml"' })
+  })
+
+  // ── MCP ───────────────────────────────────────────────────────────────────────────────────
+
+  app.get('/admin/mcp', async (c) => {
+    const v = await view(c)
+    if (v instanceof Response) return v
+    return html(c, mcpPage({ viewer: v.viewer, csrf: v.csrf, baseUrl: deps.config.baseUrl, tokens: await listApiTokens(deps.db), notice: v.notice }))
+  })
+
+  app.post('/admin/mcp', async (c) => {
+    const p = await post(c)
+    if (p instanceof Response) return p
+    const name = text(p.form, 'name').slice(0, 60)
+    const raw = p.form.scopes
+    const scopes = [...new Set((Array.isArray(raw) ? raw : raw === undefined ? [] : [raw]).filter(isMcpScope))]
+    const error = !name ? 'Give the token a name.' : !scopes.length ? 'Choose at least one thing the token can do.' : null
+    if (error) {
+      return html(c, mcpPage({ viewer: p.viewer, csrf: p.csrf, baseUrl: deps.config.baseUrl, tokens: await listApiTokens(deps.db), values: { name, scopes: scopes.length ? scopes : [] }, error }), 400)
+    }
+    const token = await createApiToken(deps.db, name, scopes, p.viewer.email, nowSeconds())
+    return html(c, mcpTokenCreated({ viewer: p.viewer, baseUrl: deps.config.baseUrl, name, token, scopes }))
+  })
+
+  app.post('/admin/mcp/:id/revoke', async (c) => {
+    const p = await post(c)
+    if (p instanceof Response) return p
+    if (!(await revokeApiToken(deps.db, Number(c.req.param('id')), p.viewer.email, nowSeconds()))) return notFound(c)
+    return done(c, '/admin/mcp', 'mcp-token-revoked')
   })
 
   app.get('/admin/activity', async (c) => {

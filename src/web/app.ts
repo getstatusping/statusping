@@ -21,6 +21,7 @@ import { acknowledgePage, type PageCtx, messagePage, monitorPage, statusPage } f
 import { confirmSubscription, consumeSubscribeLimit, dispatchSubscriberOutbox, enqueueAnnouncement, startSubscription, unsubscribe } from '../subscribers.ts'
 import { refreshAdminConfig } from '../deps.ts'
 import { mountAdminRoutes } from '../admin/routes.ts'
+import { mountMcp } from '../mcp/server.ts'
 import { mountSetupAuthRoutes, mountSetupRoutes, SETUP_AUTH_PATHS } from '../setup/routes.ts'
 import { consumePingRateLimit } from '../rate-limit.ts'
 import { runHttpCheck } from '../evaluate/http.ts'
@@ -252,6 +253,7 @@ export function createApp(deps: Deps): Hono {
 
   // ── Browser admin + management API (opt-in via `admin: true`, or on after setup) ───────────
   mountAdminRoutes(app, deps)
+  mountMcp(app, deps)
 
   // ── First-run setup wizard and guarded reset ────────────────────────────────────────────────
   mountSetupRoutes(app, deps)

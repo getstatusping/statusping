@@ -265,6 +265,18 @@ export const MIGRATIONS: string[][] = [
       created_at INTEGER NOT NULL
     )`,
   ],
+  [
+    // MCP access tokens, created in Settings. Only a hash is stored; scopes is a JSON array.
+    `CREATE TABLE IF NOT EXISTS api_tokens (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      token_hash TEXT NOT NULL UNIQUE,
+      scopes TEXT NOT NULL,
+      created_by TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      last_used_at INTEGER
+    )`,
+  ],
 ]
 
 export const SCHEMA_VERSION = MIGRATIONS.length

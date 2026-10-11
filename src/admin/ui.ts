@@ -9,13 +9,14 @@ import type { AuditEntry } from './service.ts'
 import type { MonitorRow, SinkType } from './forms.ts'
 import { SINK_FIELDS } from './forms.ts'
 import type { StoredUpdateCheck } from '../updates.ts'
+import { type ApiToken, MCP_SCOPES, type McpScope } from '../mcp/tokens.ts'
 import { releaseNotesUrl } from '../updates.ts'
 import { STYLES } from '../web/styles.ts'
 import { timezoneSelect } from '../util/timezones.ts'
 
 const escape = (value: string) => value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
 
-export type Section = 'general' | 'monitors' | 'pages' | 'channels' | 'access' | 'configuration' | 'activity'
+export type Section = 'general' | 'monitors' | 'pages' | 'channels' | 'access' | 'mcp' | 'configuration' | 'activity'
 export type UpdateState = StoredUpdateCheck | { result: 'disabled'; targetVersion: null; checkedAt: null }
 /** Where a credential comes from: a Worker secret, the database, or nowhere. */
 export type SecretSource = 'env' | 'db' | false
@@ -29,6 +30,7 @@ const SECTIONS: Array<[Section, string, string]> = [
   ['pages', 'Status pages', '/admin/pages'],
   ['channels', 'Alert channels', '/admin/channels'],
   ['access', 'Access', '/admin/access'],
+  ['mcp', 'MCP', '/admin/mcp'],
   ['configuration', 'Configuration', '/admin/configuration'],
   ['activity', 'Activity', '/admin/activity'],
 ]
@@ -299,6 +301,40 @@ export function accessPage(opts: { viewer: Viewer; csrf: string; providerSummary
 <form class="form" method="post" action="/admin/access">${hidden(opts.csrf)}
 ${field('Administrator emails', `<textarea class="input" id="admins" name="admins" placeholder="one per line, or *@your-domain.com">${escape(opts.values?.admins ?? opts.admins.join('\n'))}</textarea>`, 'You cannot remove yourself; another administrator has to.')}
 <div class="actions"><button class="btn-primary" type="submit">Save administrators</button></div></form></section>` })
+}
+
+// ── MCP ─────────────────────────────────────────────────────────────────────────────────────
+
+const when = (seconds: number | null) => (seconds === null ? 'Never' : new Date(seconds * 1000).toISOString().replace('T', ' ').slice(0, 16) + ' UTC')
+
+export function mcpPage(opts: { viewer: Viewer; csrf: string; baseUrl: string; tokens: ApiToken[]; values?: Record<string, string | string[]>; notice?: string; error?: string }): string {
+  const endpoint = `${opts.baseUrl.replace(/\/+$/, '')}/mcp`
+  const chosen = new Set([opts.values?.scopes ?? 'read'].flat())
+  const rows = opts.tokens.map((t) => `<tr><td><strong>${escape(t.name)}</strong><span class="sub">Created by ${escape(t.createdBy)}, ${when(t.createdAt)}</span></td>
+<td>${t.scopes.map((s) => `<span class="badge">${escape(MCP_SCOPES[s].label)}</span>`).join(' ')}</td><td class="small">${when(t.lastUsedAt)}</td>
+<td class="end"><form method="post" action="/admin/mcp/${t.id}/revoke" style="display:inline">${hidden(opts.csrf)}<button class="btn-outline" type="submit">Revoke</button></form></td></tr>`).join('')
+  return layout({ ...opts, section: 'mcp', title: 'MCP', description: 'Let AI assistants such as Claude read your status and, if you allow it, post incidents or manage monitors.', body: `
+<section class="card"><h2>Server address</h2><p class="lead">Add this to an MCP client, with a token below as a bearer token.</p><pre>${escape(endpoint)}</pre></section>
+${rows ? `<section class="card"><table class="table"><thead><tr><th>Token</th><th>Can</th><th>Last used</th><th></th></tr></thead><tbody>${rows}</tbody></table></section>` : ''}
+<section class="card"><h2>Create a token</h2><p class="lead">Give each assistant or person its own token, so you can revoke it on its own.</p>
+<form class="form" method="post" action="/admin/mcp">${hidden(opts.csrf)}
+${field('Name', textInput('name', [opts.values?.name ?? ''].flat()[0], 'maxlength="60" placeholder="for example Claude on my laptop" required'))}
+<div class="field"><span class="legend">What it can do</span><div class="choices">
+${(Object.keys(MCP_SCOPES) as McpScope[]).map((s) => `<label class="check"><input type="checkbox" name="scopes" value="${s}"${chosen.has(s) ? ' checked' : ''}><span><strong>${escape(MCP_SCOPES[s].label)}</strong>. ${escape(MCP_SCOPES[s].help)}</span></label>`).join('')}
+</div></div>
+<div class="actions"><button class="btn-primary" type="submit">Create token</button></div></form></section>` })
+}
+
+export function mcpTokenCreated(opts: { viewer: Viewer; baseUrl: string; name: string; token: string; scopes: McpScope[] }): string {
+  const endpoint = `${opts.baseUrl.replace(/\/+$/, '')}/mcp`
+  const cli = `claude mcp add --transport http statusping ${endpoint} --header "Authorization: Bearer ${opts.token}"`
+  const json = JSON.stringify({ mcpServers: { statusping: { type: 'http', url: endpoint, headers: { Authorization: `Bearer ${opts.token}` } } } }, null, 2)
+  return layout({ ...opts, section: 'mcp', title: 'Token created', description: `${opts.name}: ${opts.scopes.map((s) => MCP_SCOPES[s].label.toLowerCase()).join(', ')}.`, body: `
+<section class="card"><p class="alert warning">Copy the token now. It is not shown again; if you lose it, revoke it and create another.</p>
+${field('Token', `<input class="input code" readonly value="${escape(opts.token)}" onclick="this.select()">`)}
+<h2 style="margin-top:24px">Claude Code</h2><pre>${escape(cli)}</pre>
+<h2 style="margin-top:24px">Other MCP clients</h2><p class="lead">For clients configured with JSON, such as an <code>.mcp.json</code> file:</p><pre>${escape(json)}</pre>
+<div class="actions"><a class="btn-primary" href="/admin/mcp">Done</a></div></section>` })
 }
 
 // ── Import / export / activity ──────────────────────────────────────────────────────────────

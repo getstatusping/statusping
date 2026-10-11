@@ -136,6 +136,22 @@ Every YAML import is parsed as safe plain data, validated by the same StatusPing
 
 When browser admin is enabled, the validated D1-backed configuration becomes the running configuration. The checked-in configuration or `STATUSPING_CONFIG` remains the initial seed and is still the recommended approach for automated or version-controlled deployments.
 
+## Connect AI assistants (MCP)
+
+With the browser admin enabled, StatusPing is also a remote [MCP](https://modelcontextprotocol.io) server at `https://<your-site>/mcp`. Create a token in **Settings → MCP** and choose what it can do:
+
+- **Read status**: `get_status`, `get_monitor`, `list_incidents`.
+- **Post incidents**: `create_incident`, `update_incident` (these may notify subscribers and alert channels).
+- **Manage monitors**: `add_monitor`, `update_monitor`, `delete_monitor`.
+
+The token is shown once and only its hash is stored; revoke it in the same place. For Claude Code:
+
+```bash
+claude mcp add --transport http statusping https://<your-site>/mcp --header "Authorization: Bearer <token>"
+```
+
+Changes made through MCP are recorded in Activity as `mcp:<token name>`.
+
 ## Setup wizard and reset
 
 An instance can be returned to a guided setup wizard, which replaces its configuration with one
