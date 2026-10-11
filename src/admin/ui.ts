@@ -10,7 +10,6 @@ const escape = (value: string) => value.replace(/&/g, '&amp;').replace(/</g, '&l
 
 /** Admin layout on top of the shared shadcn/ui theme used by the status pages. */
 const ADMIN_STYLES = `
-.admin-brand { font-weight: 500; }
 .admin .card h2 { margin-bottom: 12px; }
 .admin .card p { margin: 0 0 12px; }
 .admin code { padding: 1px 5px; border-radius: 4px; background: var(--muted); font: 12.5px ui-monospace, SFMono-Regular, Menlo, monospace; }
@@ -42,9 +41,9 @@ export function adminPage(opts: { viewer: Viewer; csrf: string; config: unknown;
   const csrf = `<input type="hidden" name="csrf" value="${escape(opts.csrf)}">`
   const inlineButton = (action: string, label: string) => `<form class="inline" method="post" action="${action}">${csrf}<button class="btn-outline" type="submit">${label}</button></form>`
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex"><title>StatusPing administration</title><style>${STYLES}${ADMIN_STYLES}</style></head><body>
-<header class="site-header"><div class="wrap site-header-inner"><a class="admin-brand" href="/">Status page</a><div class="account"><span class="muted small account-email">Signed in as ${escape(opts.viewer.email)}</span><a class="btn-outline" href="/auth/logout">Sign out</a></div></div></header>
+<header class="site-header"><div class="wrap site-header-inner"><div class="account"><span class="muted small account-email">${escape(opts.viewer.email)}</span><a class="btn-outline" href="/auth/logout">Sign out</a></div></div></header>
 <main class="wrap admin">
-<div class="head"><h1>Administration</h1></div>${opts.message ? `<p class="alert" role="status">${escape(opts.message)}</p>` : ''}
+<div class="head"><nav class="crumbs"><a href="/">← Status page</a></nav><h1>Administration</h1><p class="desc">Signed in as ${escape(opts.viewer.email)}</p></div>${opts.message ? `<p class="alert" role="status">${escape(opts.message)}</p>` : ''}
 <section class="card"><h2>Updates</h2><p>Installed version <code>v${escape(opts.installedVersion)}</code>. ${updateDetail}</p><div class="row"><span class="muted">${lastChecked}</span>${update.result !== 'disabled' ? inlineButton('/admin/updates/check', 'Check for updates') : ''}</div></section>
 <section class="card"><h2>Monitors, pages, access, and alert channels</h2>
 <p class="alert warning">Edit or import YAML. Secret values are never stored or shown here; use <code>$env: NAME</code> references. Credential-bearing headers and URLs remain config-as-code only.</p>
@@ -57,6 +56,6 @@ export function adminPage(opts: { viewer: Viewer; csrf: string; config: unknown;
 
 export function pingTokenPage(monitorId: string, token: string): string {
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex"><title>New ping token</title><style>${STYLES}${ADMIN_STYLES}</style></head><body>
-<header class="site-header"><div class="wrap site-header-inner"><a class="admin-brand" href="/admin">← Administration</a></div></header>
-<main class="wrap admin"><section class="card"><h2>Copy this ping token now</h2><p class="alert warning">This value will not be shown again. Rotating it invalidates the prior token.</p><pre>${escape(token)}</pre><p>Use it as <code>/ping/${escape(token)}</code> for monitor <strong>${escape(monitorId)}</strong>.</p></section></main></body></html>`
+<header class="site-header"><div class="wrap site-header-inner"><div class="account"><a class="btn-outline" href="/auth/logout">Sign out</a></div></div></header>
+<main class="wrap admin"><div class="head"><nav class="crumbs"><a href="/admin">← Administration</a></nav><h1>New ping token</h1></div><section class="card"><h2>Copy this ping token now</h2><p class="alert warning">This value will not be shown again. Rotating it invalidates the prior token.</p><pre>${escape(token)}</pre><p>Use it as <code>/ping/${escape(token)}</code> for monitor <strong>${escape(monitorId)}</strong>.</p></section></main></body></html>`
 }

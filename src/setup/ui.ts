@@ -19,8 +19,6 @@ const STEPS: Array<[SetupStep, string]> = [
 
 /** Wizard layout on top of the shared theme tokens and components. */
 export const SETUP_STYLES = `
-.setup-brand { font-weight: 600; letter-spacing: -0.01em; }
-.setup-brand span { color: var(--muted-foreground); font-weight: 400; }
 .setup { display: grid; grid-template-columns: 180px minmax(0, 1fr); gap: 32px; align-items: start; }
 .setup.solo { grid-template-columns: minmax(0, 1fr); max-width: 560px; margin: 0 auto; }
 .steps { list-style: none; margin: 0; padding: 0; border-left: 1px solid var(--border); }
@@ -34,7 +32,7 @@ export const SETUP_STYLES = `
   .steps li { margin: 0 0 -1px; padding: 6px 8px; border-left: 0; border-bottom: 2px solid transparent; }
   .steps li[aria-current="step"] { border-bottom-color: var(--primary); }
 }
-.setup-card { margin: 0; }
+.setup-card { margin: 0 0 24px; }
 .setup-card h1 { margin: 0 0 6px; font-size: 20px; font-weight: 600; letter-spacing: -0.01em; }
 .setup-card .lead { margin: 0 0 20px; color: var(--muted-foreground); }
 .setup-card p { margin: 0 0 12px; }
@@ -68,8 +66,9 @@ function shell(title: string, step: SetupStep | null, completed: ReadonlySet<Set
     ? `<nav aria-label="Setup progress"><ol class="steps">${STEPS.map(([id, label]) => `<li${id === step ? ' aria-current="step"' : completed.has(id) ? ' class="done"' : ''}>${label}</li>`).join('')}</ol></nav>`
     : ''
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex"><title>${escape(title)} · StatusPing setup</title><style>${STYLES}${SETUP_STYLES}</style></head><body>
-<header class="site-header"><div class="wrap site-header-inner"><span class="setup-brand">StatusPing <span>setup</span></span></div></header>
-<main class="wrap"><div class="setup${step ? '' : ' solo'}">${steps}<section class="card setup-card">${body}</section></div></main></body></html>`
+<header class="site-header"><div class="wrap site-header-inner"><div class="account"></div></div></header>
+<main class="wrap"><div class="setup${step ? '' : ' solo'}">${steps}<section class="card setup-card">${body}</section></div></main>
+<footer class="wrap foot"><div class="foot-brand">Powered by <a href="https://statusp.ing">StatusPing</a></div></footer></body></html>`
 }
 
 const alert = (text: string | undefined, kind: 'error' | 'warning' = 'error') =>
