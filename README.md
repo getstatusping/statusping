@@ -68,6 +68,11 @@ it through a pull request; Cloudflare deploys the merge, and `/healthz` then
 reports the new version. To roll back the code, revert that pull request;
 database migrations are forward-only and are never rolled back.
 
+If your Cloudflare project builds non-production branches, its preview build
+for the upgrade branch fails unless `wrangler.toml` has a `[previews]` block.
+That does not affect the production deploy after you merge; turn off builds for
+non-production branches under **Settings → Build** if you do not use previews.
+
 Repositories created before `statusping.release.json` existed have no
 `npm run upgrade` yet. Run the command from a copy of the latest template
 instead; `--adopt` finds the template commit your repository was created from
