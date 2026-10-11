@@ -371,6 +371,15 @@ describe('bar popovers', () => {
     return { app: createApp(deps) }
   }
 
+  it('auto-refreshes with a script that waits for the reader; meta refresh only without JS', async () => {
+    const { app } = await setup(testConfig({ pages: [{ slug: 'status', title: 'S', monitors: ['*'] }] }))
+    const pub = await (await app.request('/')).text()
+    expect(pub).toContain('<noscript><meta http-equiv="refresh" content="60"></noscript>')
+    expect(pub.replace(/<noscript>.*?<\/noscript>/gs, '')).not.toContain('http-equiv="refresh"')
+    expect(pub).toContain('location.reload()')
+    expect(pub).toContain("details[open], .bar:hover")
+  })
+
   it('bars with outages get a popover with the duration; details only with errors', async () => {
     const { app } = await setup(
       testConfig({ pages: [{ slug: 'status', title: 'S', monitors: ['*'] }, { slug: 'full', title: 'F', show: 'all', monitors: ['*'] }] }),

@@ -100,7 +100,7 @@ function layout(title: string, body: Html, chrome: Chrome, opts: { refresh?: boo
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-${opts.refresh ? html`<meta http-equiv="refresh" content="60">` : ''}
+${opts.refresh ? html`<noscript><meta http-equiv="refresh" content="${REFRESH_SECONDS}"></noscript>` : ''}
 <title>${title}</title>
 ${opts.description ? html`<meta name="description" content="${opts.description}">` : ''}
 <link rel="icon" href="data:image/svg+xml,${raw(encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6" fill="#16a34a"/></svg>'))}">
@@ -112,6 +112,7 @@ ${chrome.notice ? html`<div class="wrap"><p class="site-notice" role="status">${
 <main class="wrap">${body}</main>
 ${siteFooter(chrome)}
 <script>${raw(LOCAL_TIME_SCRIPT)}</script>
+${opts.refresh ? html`<script>${raw(REFRESH_SCRIPT)}</script>` : ''}
 </body>
 </html>`
 }
@@ -370,6 +371,31 @@ function timesNote(tz: string, lastTickAt: number | null, now: number): Html {
   return html`<p>Times shown in ${tzLabel(tz)}.</p>
     <p>${lastTickAt === null ? 'Not checked yet' : html`Last updated ${when(lastTickAt, now, tz, 'at')}`}</p>`
 }
+
+const REFRESH_SECONDS = 60
+
+/**
+ * Keeps status pages live without yanking the page from under a reader (WCAG 2.2.1): reloads every
+ * REFRESH_SECONDS, but waits while the visitor is interacting — recent input or scrolling, focus on
+ * a form field or keyboard focus on any control, an open dropdown or run log, selected text, a hovered uptime bar — or the tab is hidden.
+ * Without JavaScript the <noscript> meta refresh takes over.
+ */
+export const REFRESH_SCRIPT = `(() => {
+  const every = ${REFRESH_SECONDS * 1000}, idle = 15000, start = Date.now();
+  let last = 0;
+  for (const e of ['pointerdown', 'keydown', 'wheel', 'touchstart', 'scroll']) addEventListener(e, () => { last = Date.now(); }, { passive: true, capture: true });
+  const busy = () => {
+    if (document.hidden || Date.now() - last < idle) return true;
+    const a = document.activeElement;
+    if (a && a !== document.body && (a.matches('input, textarea, select, [contenteditable]') || a.matches(':focus-visible'))) return true;
+    if (document.querySelector('details[open], .bar:hover')) return true;
+    const sel = getSelection();
+    return Boolean(sel && !sel.isCollapsed);
+  };
+  const check = () => { if (Date.now() - start >= every && !busy()) location.reload(); };
+  setInterval(check, 5000);
+  document.addEventListener('visibilitychange', check);
+})();`
 
 /** Rewrites server-rendered times into the visitor's local timezone. Keep formats in sync with formatWhen/rangeText. */
 export const LOCAL_TIME_SCRIPT = `(() => {
