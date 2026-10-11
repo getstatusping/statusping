@@ -158,6 +158,20 @@ describe('first-run setup wizard and reset', () => {
     expect((await tick(deps, Date.parse('2026-10-11T00:05:00Z'))).checks).toBe(1)
   })
 
+  it('ignores a stale setup cookie from an earlier setup or an older version', async () => {
+    const { app, db } = await instance({ STATUSPING_RESET_TOKEN: RESET_TOKEN })
+    const b = browser(app)
+    await b.post('/setup/reset', { token: RESET_TOKEN, confirm: 'reset' })
+    const claim = await b.post('/setup/claim', { code: (await loadSetupState(db))!.code! })
+    // The claim also expires any copy scoped to /setup by older versions.
+    expect(claim.res.headers.getSetCookie().some((c) => c.startsWith('sp_setup=;') && c.includes('Path=/setup'))).toBe(true)
+    const valid = b.jar.get('sp_setup')!
+    // Browsers send the more specific (stale) path first.
+    const res = await app.request(`${ORIGIN}/setup`, { headers: { cookie: `sp_setup=stale.value; sp_setup=${valid}` } })
+    expect(res.status).toBe(302)
+    expect(res.headers.get('location')).toMatch(/^\/setup\?step=/)
+  })
+
   it('replaces a generated code after repeated failures and honours STATUSPING_SETUP_TOKEN', async () => {
     const { app, db } = await instance({ STATUSPING_RESET_TOKEN: RESET_TOKEN })
     const b = browser(app)

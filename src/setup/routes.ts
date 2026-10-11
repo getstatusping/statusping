@@ -63,6 +63,22 @@ function draftProvider(draft: SetupDraft): AuthProviderInput {
   return { type: 'basic' }
 }
 
+/**
+ * The setup session for this browser. A browser can hold several sp_setup cookies (a stale one
+ * from an earlier setup, or one scoped to /setup by an older version); any one that verifies
+ * against the current key counts, so a leftover cookie can never lock the owner out.
+ */
+async function readSetupSession(c: Context, state: SetupState): Promise<{ exp: number; csrf: string } | null> {
+  if (!state.sessionKey) return null
+  const values = (c.req.header('cookie') ?? '').split(';').map((part) => part.trim())
+    .filter((part) => part.startsWith(`${SETUP_COOKIE}=`)).map((part) => decodeURIComponent(part.slice(SETUP_COOKIE.length + 1)))
+  for (const value of values) {
+    const s = await unsign<{ exp: number; csrf: string }>(value, state.sessionKey, nowSeconds())
+    if (s) return s
+  }
+  return null
+}
+
 /** Fixed ids for the wizard's single monitor, by kind. */
 export const MONITOR_IDS = { http: 'website', push: 'job', tcp: 'service' } as const
 
@@ -151,10 +167,7 @@ export function mountSetupRoutes(app: Hono, deps: Deps): void {
   }
 
   /** The setup session for this browser, or null. */
-  const session = async (c: Context, state: SetupState) => {
-    if (!state.sessionKey) return null
-    return unsign<{ exp: number; csrf: string }>(getCookie(c, SETUP_COOKIE), state.sessionKey, nowSeconds())
-  }
+  const session = async (c: Context, state: SetupState) => readSetupSession(c, state)
 
   /** Loads a pending setup and its session; anything else ends the request. */
   const pending = async (c: Context) => {
@@ -329,6 +342,8 @@ export function mountSetupRoutes(app: Hono, deps: Deps): void {
       return html(c, claimPage({ usesEnvToken, error: 'That setup code is not correct.', note: regenerated ? 'After repeated failures a new code was generated. Check the logs again.' : undefined }), 401)
     }
     await deps.db.run(`UPDATE setup_state SET failed_attempts = 0 WHERE id = 1`)
+    // Older versions scoped this cookie to /setup; a stale copy there would shadow the new one.
+    deleteCookie(c, SETUP_COOKIE, { path: '/setup' })
     setCookie(c, SETUP_COOKIE, await sign({ exp: nowSeconds() + SETUP_SESSION_SECONDS, csrf: randomToken(32) }, loaded.state.sessionKey), {
       httpOnly: true, secure: secure(c), sameSite: 'Lax', path: '/', maxAge: SETUP_SESSION_SECONDS,
     })
@@ -508,7 +523,7 @@ export function mountSetupAuthRoutes(app: Hono, deps: Deps): void {
   const claimed = async (c: Context) => {
     const state = await loadSetupState(deps.db)
     if (!state || state.status !== 'pending' || !state.sessionKey) return null
-    return (await unsign<{ exp: number; csrf: string }>(getCookie(c, SETUP_COOKIE), state.sessionKey, nowSeconds())) ? state : null
+    return (await readSetupSession(c, state)) ? state : null
   }
 
   app.get('/auth/setup-verify', async (c, next) => {
