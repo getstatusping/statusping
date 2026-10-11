@@ -50,7 +50,8 @@ export const SETUP_STYLES = `
 .setup-card .hint + .howto { margin-top: 8px; }
 .setup-card .setup-form .actions, .connect-step .setup-form .actions { margin-top: 0; }
 .actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }
-.actions a { color: var(--muted-foreground); font-size: 14px; }
+/* Plain text links in a button row are muted; links styled as buttons keep the button look. */
+.actions a:not(.btn-primary):not(.btn-outline) { color: var(--muted-foreground); font-size: 14px; }
 .alert { margin: 0 0 16px; padding: 10px 12px; border: 1px solid var(--border); border-radius: calc(var(--radius) - 2px); font-size: 14px; }
 .alert.warning { border-color: color-mix(in oklab, var(--warning) 55%, var(--border)); background: color-mix(in oklab, var(--warning) 8%, var(--card)); }
 .choices { display: grid; gap: 12px; }
@@ -310,7 +311,7 @@ export function setupDonePage(opts: { pingUrl: string; monitorName: string }): s
 <p class="secret">${escape(opts.pingUrl)}</p>
 <p>For example, at the end of the job:</p><pre>curl -fsS ${escape(opts.pingUrl)}</pre>
 <p class="hint">To report a failure instead, call <code>${escape(opts.pingUrl)}/fail</code>; to track run time, call <code>${escape(opts.pingUrl)}/start</code> when the job begins.</p>
-<div class="actions"><a class="btn-primary" href="/admin">Go to the admin</a></div>`)
+<div class="actions"><a class="btn-primary" href="/admin">Open Settings</a></div>`)
 }
 
 export function resetPage(opts: { error?: string }): string {
