@@ -144,9 +144,14 @@ Settings → Access → **Change sign-in method** switches between email and pas
 
 With the browser admin enabled, StatusPing is also a remote [MCP](https://modelcontextprotocol.io) server at `https://<your-site>/mcp`. Create a token in **Settings → MCP** and choose what it can do:
 
-- **Read status**: `get_status`, `get_monitor`, `list_incidents`.
-- **Post incidents**: `create_incident`, `update_incident` (these may notify subscribers and alert channels).
-- **Manage monitors**: `add_monitor`, `update_monitor`, `delete_monitor`.
+- **Read status**: `get_status`, `get_monitor`, `list_incidents`, `list_status_pages`, `list_maintenance`.
+- **Post incidents**: `create_incident`, `update_incident`, `acknowledge_alert` (incidents may notify subscribers and alert channels).
+- **Manage monitors**: `add_monitor`, `update_monitor`, `delete_monitor`, `rotate_ping_url`, `add_maintenance`, `delete_maintenance`.
+- **Manage status pages**: `add_status_page`, `update_status_page`, `delete_status_page`, `set_home_page`.
+- **Manage alert channels**: `list_channels`, `add_channel`, `update_channel`, `delete_channel`, `test_channel` (credentials are write-only).
+- **Manage settings**: `get_settings`, `update_settings`, `set_administrators`, `check_for_updates`, `get_configuration`, `import_configuration` (previews unless `apply: true`), `get_activity`.
+
+Resetting the site, changing the sign-in method and creating MCP tokens stay in the browser.
 
 The token is shown once and only its hash is stored; revoke it in the same place. For Claude Code:
 

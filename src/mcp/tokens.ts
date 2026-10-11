@@ -5,7 +5,10 @@ import { randomToken, sha256Hex } from '../util/crypto.ts'
 export const MCP_SCOPES = {
   read: { label: 'Read status', help: 'Current status, monitors, recent checks, uptime and incidents.' },
   incidents: { label: 'Post incidents', help: 'Post, update and resolve incident announcements, which may notify subscribers and alert channels.' },
-  monitors: { label: 'Manage monitors', help: 'Add, change and delete monitors.' },
+  monitors: { label: 'Manage monitors', help: 'Add, change and delete monitors and maintenance windows, and replace ping URLs.' },
+  pages: { label: 'Manage status pages', help: 'Add, change and delete status pages, and choose the home page.' },
+  channels: { label: 'Manage alert channels', help: 'Add, change, test and delete alert channels, including their credentials.' },
+  settings: { label: 'Manage settings', help: 'Site details, administrators, update checks, the whole configuration (export and import), and the activity log.' },
 } as const
 export type McpScope = keyof typeof MCP_SCOPES
 export const isMcpScope = (value: unknown): value is McpScope => typeof value === 'string' && Object.hasOwn(MCP_SCOPES, value)

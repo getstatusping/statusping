@@ -5,7 +5,7 @@
 import type { Context, Hono } from 'hono'
 import { createAnnouncement, listAnnouncements, parseAnnouncementCreate, parseAnnouncementPatch, patchAnnouncement } from '../announcements.ts'
 import type { MonitorInput } from '../config.ts'
-import { type Deps, refreshAdminConfig } from '../deps.ts'
+import { type Deps, refreshAdminConfig, storedEnvKey } from '../deps.ts'
 import { type Form, FormError, findMonitor, monitorFromForm, monitorRows, putMonitor, removeMonitor } from '../admin/forms.ts'
 import { loadAdminConfig, rotatePingToken, saveAdminConfig } from '../admin/service.ts'
 import { type AdminConfig, validateAdminConfig } from '../admin/security.ts'
@@ -15,25 +15,12 @@ import { syncConfig } from '../sync.ts'
 import { nowSeconds } from '../util/time.ts'
 import { APP_VERSION } from '../version.ts'
 import { loadMonitorDetail, loadStatusData } from '../web/data.ts'
-import { type ApiToken, authenticateApiToken, type McpScope } from './tokens.ts'
+import { type ApiToken, authenticateApiToken } from './tokens.ts'
+import { adminTools } from './admin-tools.ts'
+import { at, iso, type Json, str, type Tool, ToolError } from './tool.ts'
 
 const PROTOCOL_VERSIONS = ['2025-06-18', '2025-03-26', '2024-11-05']
 
-type Json = Record<string, unknown>
-interface Tool {
-  name: string
-  scope: McpScope
-  description: string
-  inputSchema: Json
-  annotations: Json
-  run: (args: Json, ctx: { token: ApiToken; c: Context }) => Promise<unknown>
-}
-
-class ToolError extends Error {}
-
-const str = { type: 'string' }
-const iso = (seconds: number | null | undefined) => (seconds == null ? null : new Date(seconds * 1000).toISOString())
-const at = (value: unknown) => (typeof value === 'string' ? value : typeof value === 'number' ? String(value) : '')
 
 const MONITOR_FIELDS: Json = {
   name: { ...str, description: 'Display name.' },
@@ -64,10 +51,20 @@ export function mountMcp(app: Hono, deps: Deps): void {
   const storedConfig = async (): Promise<AdminConfig> => (await loadAdminConfig(deps.db))?.config ?? deps.configInput
   const actor = (token: ApiToken) => `mcp:${token.name}`
 
-  const save = async (token: ApiToken, next: AdminConfig) => {
-    try { validateAdminConfig({ ...next, admin: true }, deps.getEnv) } catch (error) { throw new ToolError((error as Error).message) }
+  const save = async (token: ApiToken, next: AdminConfig, secrets: Array<{ name: string; value: string }> = []) => {
+    // Credentials are checked against the values about to be stored, then stored before the config that names them.
+    const pending = new Map(secrets.map((s) => [s.name, s.value]))
+    const getEnv = (name: string) => pending.get(name) ?? deps.getEnv(name)
+    try { validateAdminConfig({ ...next, admin: true }, getEnv) } catch (error) { throw new ToolError((error as Error).message) }
     const now = nowSeconds()
-    await saveAdminConfig(deps.db, { ...next, admin: true }, actor(token), now, deps.getEnv)
+    if (secrets.length) {
+      await deps.db.batch([
+        ...secrets.map(({ name, value }) => ({ sql: `INSERT INTO instance_secrets (name, value, created_at) VALUES (?, ?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value, created_at = excluded.created_at`, params: [storedEnvKey(name), value, now] })),
+        ...secrets.map(({ name }) => ({ sql: `INSERT INTO audit_log (actor, action, target, before_json, after_json, at) VALUES (?, 'setting.store', ?, NULL, NULL, ?)`, params: [actor(token), name, now] })),
+      ])
+      await refreshAdminConfig(deps, now)
+    }
+    await saveAdminConfig(deps.db, { ...next, admin: true }, actor(token), now, getEnv)
     await refreshAdminConfig(deps, now)
   }
 
@@ -228,6 +225,7 @@ export function mountMcp(app: Hono, deps: Deps): void {
         return { deleted: id }
       },
     },
+    ...adminTools({ deps, storedConfig, save, actor }),
   ]
 
   const rpc = (id: unknown, result: unknown) => ({ jsonrpc: '2.0', id, result })

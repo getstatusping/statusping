@@ -62,7 +62,7 @@ describe('MCP server', () => {
     expect((await s.mcp('spm_' + 'x'.repeat(40), 'tools/list')).status).toBe(401)
     const init = await s.mcp(reader, 'initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '1' } })
     expect(init.json.result).toMatchObject({ protocolVersion: '2025-06-18', capabilities: { tools: {} }, serverInfo: { name: 'statusping' } })
-    expect((await s.mcp(reader, 'tools/list')).json.result.tools.map((t: { name: string }) => t.name)).toEqual(['get_status', 'get_monitor', 'list_incidents'])
+    expect((await s.mcp(reader, 'tools/list')).json.result.tools.map((t: { name: string }) => t.name)).toEqual(['get_status', 'get_monitor', 'list_incidents', 'list_status_pages', 'list_maintenance'])
     const status = await s.call(reader!, 'get_status')
     expect(status.result.structuredContent.monitors.length).toBeGreaterThan(0)
     expect((await s.call(reader!, 'create_incident', { title: 'x' })).error.message).toContain('not allowed')
@@ -97,6 +97,65 @@ describe('MCP server', () => {
     await s.send('/admin/mcp')
     expect((await s.post(`/admin/mcp/${row!.id}/revoke`, [])).res.headers.get('location')).toBe('/admin/mcp?notice=mcp-token-revoked')
     expect((await s.mcp(token, 'tools/list')).status).toBe(401)
+  })
+
+  it('manages pages, channels, maintenance, settings and configuration with the matching scopes', async () => {
+    const s = await setup()
+    const token = (await s.createToken('Admin bot', ['read', 'incidents', 'monitors', 'pages', 'channels', 'settings']))!
+    const names = (await s.mcp(token, 'tools/list')).json.result.tools.map((t: { name: string }) => t.name)
+    for (const name of ['list_status_pages', 'add_status_page', 'add_channel', 'test_channel', 'add_maintenance', 'acknowledge_alert', 'update_settings', 'import_configuration', 'get_activity']) expect(names).toContain(name)
+    const ok = async (name: string, args: Record<string, unknown> = {}) => {
+      const r = (await s.call(token, name, args)).result
+      expect(r.isError, `${name}: ${r.content?.[0]?.text}`).toBeUndefined()
+      return r.structuredContent
+    }
+    const err = async (name: string, args: Record<string, unknown>) => (await s.call(token, name, args)).result.content[0].text as string
+
+    // Status pages.
+    const monitorId = (await ok('get_status')).monitors[0].id
+    expect((await ok('add_status_page', { title: 'Ops', visibility: 'private', emails: ['ops@example.test'], monitors: [monitorId] })).added).toMatchObject({ slug: 'ops', visibility: 'private', emails: ['ops@example.test'], monitors: [monitorId] })
+    expect((await ok('update_status_page', { slug: 'ops', description: 'Internal' })).updated).toMatchObject({ description: 'Internal', visibility: 'private', monitors: [monitorId] })
+    await ok('set_home_page', { slug: 'ops' })
+    expect((await ok('list_status_pages')).pages.find((p: { slug: string }) => p.slug === 'ops').home).toBe(true)
+    expect(await err('add_status_page', { title: 'Bad', visibility: 'private' })).toContain('at least one email')
+    await ok('delete_status_page', { slug: 'ops' })
+
+    // Alert channels: credentials are stored write-only and never returned.
+    const added = (await ok('add_channel', { name: 'team', type: 'slack', settings: { webhookUrl: 'https://hooks.slack.test/secret-path' } })).added
+    expect(added).toEqual({ name: 'team', type: 'slack', webhookUrl: 'set' })
+    expect(JSON.stringify(await ok('list_channels'))).not.toContain('secret-path')
+    await ok('add_channel', { name: 'mail', type: 'email', settings: { to: ['ops@example.test'], via: 'smtp', from: 'alerts@example.test', smtpHost: 'smtp.example.test', smtpPort: 587, smtpUsername: 'u', password: 'smtp-pw' } })
+    expect((await ok('update_channel', { name: 'mail', settings: { smtpPort: 465, smtpSecurity: 'tls' } })).updated.via).toMatchObject({ provider: 'smtp', host: 'smtp.example.test', port: 465, security: 'tls', password: 'set' })
+    expect(await err('add_channel', { name: 'team', type: 'slack', settings: { webhookUrl: 'https://x.test' } })).toContain('already exists')
+    await ok('test_channel', { name: 'team' })
+    await ok('delete_channel', { name: 'team' })
+    expect(await s.db.first(`SELECT name FROM instance_secrets WHERE name LIKE 'env:SINK_TEAM%'`)).toBeNull()
+
+    // Maintenance windows.
+    await ok('add_maintenance', { title: 'DB upgrade', monitors: '*', start: '2026-11-01T02:00:00Z', end: '2026-11-01T03:00:00Z' })
+    const windows = (await ok('list_maintenance')).maintenance
+    expect(windows).toEqual([expect.objectContaining({ index: 0, title: 'DB upgrade' })])
+    expect(await err('delete_maintenance', { index: 0, title: 'Other' })).toContain('No maintenance window')
+    await ok('delete_maintenance', { index: 0, title: 'DB upgrade' })
+
+    // Settings, administrators and the configuration.
+    expect(await ok('update_settings', { title: 'Renamed', timezone: 'Europe/London', updateChecks: false })).toMatchObject({ title: 'Renamed', timezone: 'Europe/London', updateChecks: false })
+    expect(await err('set_administrators', { emails: [] })).toContain('at least one administrator')
+    await ok('set_administrators', { emails: ['admin@example.test', 'second@example.test'] })
+    expect((await ok('get_settings')).administrators).toEqual(['admin@example.test', 'second@example.test'])
+    const yaml = (await ok('get_configuration')).yaml as string
+    const preview = await ok('import_configuration', { yaml: yaml.replace('title: Renamed', 'title: Imported') })
+    expect(preview).toMatchObject({ preview: true })
+    expect((await ok('get_settings')).title).toBe('Renamed')
+    await ok('import_configuration', { yaml: yaml.replace('title: Renamed', 'title: Imported'), apply: true })
+    expect((await ok('get_settings')).title).toBe('Imported')
+    expect((await ok('get_activity', { limit: 5 })).activity[0]).toMatchObject({ actor: 'mcp:Admin bot' })
+
+    expect(await err('acknowledge_alert', { incidentId: 999 })).toContain('No open outage')
+
+    // A read-only token sees none of this.
+    const reader = (await s.createToken('Reader', ['read']))!
+    expect((await s.call(reader, 'add_channel', { name: 'x', type: 'slack', settings: {} })).error.message).toContain('not allowed')
   })
 
   it('answers notifications with 202, rejects other origins, and refuses GET', async () => {
