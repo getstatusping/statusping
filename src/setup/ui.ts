@@ -61,8 +61,12 @@ export const SETUP_STYLES = `
 .setup-form input[type="radio"], .setup-form input[type="checkbox"] { flex: none; align-self: flex-start; margin: 3px 0 0; accent-color: var(--primary); }
 .alert.success { border-color: color-mix(in oklab, var(--success) 55%, var(--border)); background: color-mix(in oklab, var(--success) 8%, var(--card)); }
 .setup-card h2 { margin: 24px 0 8px; font-size: 16px; font-weight: 600; }
+.connect-step { margin-top: 24px; padding-top: 20px; border-top: 1px solid var(--border); }
+.connect-step h2 { display: flex; align-items: center; gap: 10px; margin: 0 0 12px; }
+.step-no { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; border-radius: 999px; background: var(--muted); font-size: 12px; font-weight: 600; }
+.connect-step .actions { margin-top: 12px; }
 .steps-list { margin: 0 0 16px; padding-left: 20px; } .steps-list li { margin: 8px 0; } .steps-list ul { margin: 6px 0; }
-.envlist { margin: 0 0 12px; padding: 0; list-style: none; } .envlist li { margin: 4px 0; }
+.setup-card .envlist { margin: 0 0 12px; padding: 0; list-style: none; } .envlist li { margin: 4px 0; }
 .envlist .set span { color: var(--success); } .envlist .missing span { color: var(--destructive); }
 .howto { margin: 0 0 16px; font-size: 14px; } .howto summary { cursor: pointer; color: var(--muted-foreground); } .howto ul { margin: 8px 0; }
 .btn-primary[aria-disabled="true"] { opacity: .5; cursor: not-allowed; }
@@ -141,27 +145,33 @@ function verifiedBlock(csrf: string, email: string, method: string): string {
 <form method="post" action="/setup/connected">${hidden(csrf)}<div class="actions"><button class="btn-primary" type="submit">Continue</button><a class="btn-outline" href="/setup?step=method">Choose a different method</a></div></form>`
 }
 
+/** A numbered section of a connect page. */
+const section = (n: number, title: string, body: string) => `<section class="connect-step"><h2><span class="step-no">${n}</span>${title}</h2>${body}</section>`
+
+/** The Verify section: the action stays disabled until everything it needs is in place. */
+function verifySection(n: number, opts: { ready: boolean; verified: boolean; href: string; label: string; intro: string; blocked: string }): string {
+  if (opts.verified) return ''
+  const action = opts.ready ? `<a class="btn-primary" href="${opts.href}">${opts.label}</a>` : `<span class="btn-primary" aria-disabled="true">${opts.label}</span>`
+  return section(n, 'Verify', `<p>${opts.intro}</p>${opts.ready ? '' : `<p class="hint">${opts.blocked}</p>`}<div class="actions">${action}<a class="btn-outline" href="/setup?step=method">Back</a></div>`)
+}
+
 export function accessPage(opts: { csrf: string; completed: ReadonlySet<SetupStep>; host: string; teamDomain?: string; audSet: boolean; verifiedEmail?: string; error?: string }): string {
   const ready = Boolean(opts.teamDomain && opts.audSet)
   return shell('Cloudflare Access', 'account', opts.completed, `<h1>Connect Cloudflare Access</h1>
 <p class="lead">Cloudflare Access signs people in before requests reach StatusPing. StatusPing then checks the signed Access token on every request.</p>${alert(opts.error)}
 ${opts.verifiedEmail ? verifiedBlock(opts.csrf, opts.verifiedEmail, 'Cloudflare Access') : ''}
-<ol class="steps-list">
+${section(1, 'Create the Access application', `<ol class="steps-list">
 <li>Open <strong>Cloudflare Zero Trust → Access → Applications → Add an application → Self-hosted</strong> (<a href="${ACCESS_DOCS_URL}" target="_blank" rel="noopener">Cloudflare guide</a>).</li>
 <li>Application domain: <code>${escape(opts.host)}</code>. Then choose what Access protects:
-<ul><li><strong>The whole site</strong> (leave the path empty): simplest, but your public status page becomes private too.</li>
+<ul><li><strong>The whole site</strong> (leave the path empty): simplest, but your status page becomes private too.</li>
 <li><strong>Only sign-in</strong>: add two paths, <code>/admin</code> and <code>/auth</code>. Status pages stay public.</li></ul></li>
 <li>Add a policy: <strong>Allow</strong> → <em>Emails</em> → your email address. Add more people later in Access, not in StatusPing.</li>
-<li>Save, then copy two values from the application's <strong>Overview</strong>: the <strong>team domain</strong> (enter it below) and the <strong>Application Audience (AUD) Tag</strong> (store it as the secret <code>CF_ACCESS_AUD</code>).</li>
-</ol>
-${envChecklist({ CF_ACCESS_AUD: opts.audSet })}${opts.audSet ? '' : secretHowTo(['CF_ACCESS_AUD'])}
-<form class="setup-form" method="post" action="/setup/access">${hidden(opts.csrf)}
-${field('Team domain', `<input class="input" id="teamDomain" name="teamDomain" type="text" value="${escape(opts.teamDomain ?? '')}" placeholder="yourteam.cloudflareaccess.com" spellcheck="false" required>`)}
-<div class="actions"><button class="btn-outline" type="submit">Save team domain</button></div></form>
-<h2>Verify</h2>
-<p>Open the check below. Access asks you to sign in first, then StatusPing confirms the token is valid for this team domain and audience.</p>
-<div class="actions">${ready && !opts.verifiedEmail ? '<a class="btn-primary" href="/auth/setup-verify">Verify with Cloudflare Access</a>' : `<span class="btn-primary" aria-disabled="true">Verify with Cloudflare Access</span>`}<a class="btn-outline" href="/setup?step=method">Back</a></div>
-${ready ? '' : '<p class="hint">Save the team domain and add <code>CF_ACCESS_AUD</code> first.</p>'}`)
+<li>Save the application and open its <strong>Overview</strong>.</li></ol>`)}
+${section(2, 'Add the audience tag', `<p>Copy the <strong>Application Audience (AUD) Tag</strong> from the Overview and store it as a secret.</p>${envChecklist({ CF_ACCESS_AUD: opts.audSet })}${opts.audSet ? '' : secretHowTo(['CF_ACCESS_AUD'])}`)}
+${section(3, 'Enter the team domain', `<form class="setup-form" method="post" action="/setup/access">${hidden(opts.csrf)}
+${field('Team domain', `<input class="input" id="teamDomain" name="teamDomain" type="text" value="${escape(opts.teamDomain ?? '')}" placeholder="yourteam.cloudflareaccess.com" spellcheck="false" required>`, 'Shown on the application Overview. It is not secret.')}
+<div class="actions"><button class="btn-outline" type="submit">Save team domain</button></div></form>`)}
+${verifySection(4, { ready, verified: Boolean(opts.verifiedEmail), href: '/auth/setup-verify', label: 'Verify with Cloudflare Access', intro: 'Access asks you to sign in, then StatusPing checks the token against your team domain and audience.', blocked: 'Add CF_ACCESS_AUD and save the team domain first.' })}`)
 }
 
 export function oidcPage(opts: { csrf: string; completed: ReadonlySet<SetupStep>; origin: string; preset?: string; issuer?: string; env: Record<string, boolean>; sessionKeyNote: boolean; verifiedEmail?: string; error?: string }): string {
@@ -173,22 +183,14 @@ export function oidcPage(opts: { csrf: string; completed: ReadonlySet<SetupStep>
   return shell('OpenID Connect', 'account', opts.completed, `<h1>Connect OpenID Connect (SSO)</h1>
 <p class="lead">Register StatusPing as a web application with your identity provider, then run a real test sign-in.</p>${alert(opts.error)}
 ${opts.verifiedEmail ? verifiedBlock(opts.csrf, opts.verifiedEmail, preset.label) : ''}
-<form class="setup-form" method="post" action="/setup/oidc">${hidden(opts.csrf)}
-${field('Identity provider', `<select class="input" id="preset" name="preset" onchange="location.href='/setup?step=account&amp;preset='+encodeURIComponent(this.value)">${OIDC_PRESETS.map((p) => `<option value="${p.id}"${p.id === preset.id ? ' selected' : ''}>${p.label}</option>`).join('')}</select>`)}
-<ol class="steps-list">
-<li>Register a web application: ${preset.register} (<a href="${preset.docsUrl}" target="_blank" rel="noopener">${preset.label} guide</a>)</li>
-<li>Set the redirect (callback) URL to exactly <code class="copy">${escape(callback)}</code>${workersDev ? '<p class="alert warning">This is a <code>workers.dev</code> address. If you add a custom domain later, register its callback URL too.</p>' : ''}</li>
-<li>Store the client ID and client secret as the secrets <code>OIDC_CLIENT_ID</code> and <code>OIDC_CLIENT_SECRET</code>.</li>
-<li>Enter the issuer URL below${preset.issuer ? '' : `: ${preset.issuerHint}`}</li>
-</ol>
-${field('Issuer URL', `<input class="input" id="issuer" name="issuer" type="url" value="${escape(opts.issuer ?? preset.issuer ?? '')}" placeholder="https://…" spellcheck="false" required>`, 'StatusPing checks <code>&lt;issuer&gt;/.well-known/openid-configuration</code> when you save.')}
-<div class="actions"><button class="btn-outline" type="submit">Save and check issuer</button></div></form>
-${envChecklist(opts.env)}${missing.length ? secretHowTo(missing) : ''}
-${opts.sessionKeyNote ? '<p class="hint"><code>SESSION_SECRET</code> is optional: without it StatusPing generates and stores a session signing key.</p>' : ''}
-<h2>Verify</h2>
-<p>Sign in with your provider. Setup continues once the callback returns your verified email address.</p>
-<div class="actions">${ready && !opts.verifiedEmail ? '<a class="btn-primary" href="/setup/oidc/start">Test sign-in</a>' : '<span class="btn-primary" aria-disabled="true">Test sign-in</span>'}<a class="btn-outline" href="/setup?step=method">Back</a></div>
-${ready ? '' : '<p class="hint">Save the issuer and add the missing secrets first.</p>'}`)
+<div class="setup-form">${field('Identity provider', `<select class="input" id="preset" name="preset" onchange="location.href='/setup?step=account&amp;preset='+encodeURIComponent(this.value)">${OIDC_PRESETS.map((p) => `<option value="${p.id}"${p.id === preset.id ? ' selected' : ''}>${p.label}</option>`).join('')}</select>`)}</div>
+${section(1, `Register StatusPing with ${preset.label}`, `<p>${preset.register} (<a href="${preset.docsUrl}" target="_blank" rel="noopener">${preset.label} guide</a>)</p>
+<p>Set the redirect (callback) URL to exactly:</p><pre>${escape(callback)}</pre>${workersDev ? '<p class="alert warning">This is a <code>workers.dev</code> address. If you add a custom domain later, register its callback URL too.</p>' : ''}`)}
+${section(2, 'Add the client credentials', `<p>Store the application's client ID and client secret as secrets.</p>${envChecklist(opts.env)}${missing.length ? secretHowTo(missing) : ''}${opts.sessionKeyNote ? '<p class="hint"><code>SESSION_SECRET</code> is optional: without it StatusPing generates and stores a session signing key.</p>' : ''}`)}
+${section(3, 'Enter the issuer', `<form class="setup-form" method="post" action="/setup/oidc">${hidden(opts.csrf)}<input type="hidden" name="preset" value="${preset.id}">
+${field('Issuer URL', `<input class="input" id="issuer" name="issuer" type="url" value="${escape(opts.issuer ?? preset.issuer ?? '')}" placeholder="https://…" spellcheck="false" required>`, preset.issuer ? 'Pre-filled for this provider.' : preset.issuerHint ?? '')}
+<div class="actions"><button class="btn-outline" type="submit">Save and check issuer</button></div></form>`)}
+${verifySection(4, { ready, verified: Boolean(opts.verifiedEmail), href: '/setup/oidc/start', label: 'Test sign-in', intro: 'Sign in with your provider. Setup continues once the callback returns your verified email address.', blocked: missing.length ? `Add ${missing.join(' and ')} and save the issuer first.` : 'Save the issuer first.' })}`)
 }
 
 export function accountPage(opts: { csrf: string; completed: ReadonlySet<SetupStep>; email?: string; error?: string }): string {
