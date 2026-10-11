@@ -27,8 +27,12 @@ import { mountSetupAuthRoutes, mountSetupRoutes, SETUP_AUTH_PATHS } from '../set
 import { consumePingRateLimit } from '../rate-limit.ts'
 import { runHttpCheck } from '../evaluate/http.ts'
 import { runTcpCheck } from '../evaluate/tcp.ts'
+import { PLATFORM_SECRET_ENV, PLATFORM_SIGNATURE_HEADER, verifyPlatformRequest } from '../platform.ts'
+import { exportTenantData } from '../export.ts'
 
 const STALE_TICK_SECONDS = 180
+/** Signed hosted-platform routes; they answer in setup mode too (tick and export handle it). */
+const PLATFORM_PATHS = ['/internal/tick', '/internal/export']
 const PUBLIC_MAX_AGE = 30
 
 type Cacheable = { cacheable: boolean }
@@ -86,7 +90,7 @@ export function createApp(deps: Deps): Hono {
     await refreshAdminConfig(deps, nowSeconds())
     // Setup mode: only the health check and the wizard respond until setup is finished. Page
     // visits (most likely the owner) go straight to the wizard; pings and API calls get a 503.
-    if (deps.setupPending && c.req.path !== '/healthz' && c.req.path !== '/setup' && !c.req.path.startsWith('/setup/') && !SETUP_AUTH_PATHS.includes(c.req.path)) {
+    if (deps.setupPending && c.req.path !== '/healthz' && !PLATFORM_PATHS.includes(c.req.path) && c.req.path !== '/setup' && !c.req.path.startsWith('/setup/') && !SETUP_AUTH_PATHS.includes(c.req.path)) {
       const page = (c.req.method === 'GET' || c.req.method === 'HEAD') && !c.req.path.startsWith('/ping/') && !c.req.path.startsWith('/api/')
       if (page) {
         const res = c.redirect('/setup', 302)
@@ -109,6 +113,8 @@ export function createApp(deps: Deps): Hono {
   const ping = async (c: Context) => {
     const signal = parseSignal(c.req.param('action'))
     if (!signal) return c.text('Unknown signal', 400)
+    // A suspended hosted tenant runs no monitoring, pings included.
+    if (deps.tenant?.suspended) return c.text('Monitoring is suspended', 503, { 'cache-control': 'no-store', 'retry-after': '3600' })
     let body: string | null = null
     if (c.req.method === 'POST' || c.req.method === 'PUT') {
       const text = await c.req.text()
@@ -176,6 +182,29 @@ export function createApp(deps: Deps): Hono {
     const auth = c.req.header('authorization') ?? ''
     if (!timingSafeEqual(auth, `Bearer ${secret}`)) return c.text('Unauthorized', 401)
     return c.json(await tick(deps))
+  })
+
+  // ── Hosted platform (plan 005) ─────────────────────────────────────────────────────────────
+  // The control plane drives hosted tenants with HMAC-signed requests bound to the method, path
+  // and tenant id. Without a tenant policy and platform secret these routes do not exist.
+  const platformAuthorized = async (c: Context): Promise<Response | null> => {
+    const secret = deps.getEnv(PLATFORM_SECRET_ENV)
+    if (!secret || !deps.tenant) return c.text('Not found', 404)
+    const ok = await verifyPlatformRequest(secret, c.req.header(PLATFORM_SIGNATURE_HEADER), c.req.method, c.req.path, deps.tenant.tenantId, nowSeconds())
+    return ok ? null : c.text('Unauthorized', 401, { 'cache-control': 'no-store' })
+  }
+  app.post('/internal/tick', async (c) => {
+    const denied = await platformAuthorized(c)
+    if (denied) return denied
+    // The platform's queue consumer passes the scheduled minute so a redelivery stays idempotent.
+    const scheduled = Number(c.req.query('at'))
+    const nowMs = Number.isInteger(scheduled) && Math.abs(scheduled - Date.now()) < 10 * 60_000 ? scheduled : Date.now()
+    return c.json(await tick(deps, nowMs), 200, { 'cache-control': 'no-store' })
+  })
+  app.get('/internal/export', async (c) => {
+    const denied = await platformAuthorized(c)
+    if (denied) return denied
+    return c.json(await exportTenantData(deps, nowSeconds()), 200, { 'cache-control': 'no-store' })
   })
 
   // A self-hosted Node peer can ask this instance to repeat a configured HTTP

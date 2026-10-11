@@ -29,6 +29,8 @@ export interface Chrome {
   morePages: boolean
   /** The signed-in viewer administers this site: the header links to Settings. */
   settingsLink?: boolean
+  /** Site-wide notice under the header (e.g. a suspended hosted tenant). Same for every visitor. */
+  notice?: string | null
 }
 
 /** Everything a status/monitor page render needs to know about where it is and who is looking. */
@@ -106,6 +108,7 @@ ${opts.description ? html`<meta name="description" content="${opts.description}"
 </head>
 <body>
 ${siteHeader(chrome)}
+${chrome.notice ? html`<div class="wrap"><p class="site-notice" role="status">${chrome.notice}</p></div>` : ''}
 <main class="wrap">${body}</main>
 ${siteFooter(chrome)}
 <script>${raw(LOCAL_TIME_SCRIPT)}</script>

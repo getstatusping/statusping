@@ -32,6 +32,8 @@ export interface TickSummary {
   checks: number
   skippedChecks: string[]
   notifications: number
+  /** Hosted tenant suspended by the platform: no checks or alerts ran. */
+  suspended?: boolean
 }
 
 const HTTP_CONCURRENCY = 5 // Workers allow 6 simultaneous outbound connections.
@@ -108,6 +110,11 @@ export async function tick(deps: Deps, nowMs: number = Date.now()): Promise<Tick
     return summary
   }
   await syncConfig(deps, now)
+  if (deps.tenant?.suspended) {
+    // Plan 005: a suspended tenant keeps its status page but runs no checks and sends no alerts.
+    summary.suspended = true
+    return summary
+  }
 
   const claim = await deps.db.run(
     `INSERT INTO tick_results (tick_at, results_json) VALUES (?, '[]') ON CONFLICT (tick_at) DO NOTHING`,

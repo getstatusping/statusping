@@ -1,6 +1,6 @@
 {
   "name": "@statusping/app",
-  "version": "0.2.18",
+  "version": "0.2.19",
   "statusping": {
     "minimumUpgradeVersion": "0.1.0"
   },
@@ -14,7 +14,8 @@
   "exports": {
     "./config": "./src/config.ts",
     "./updates": "./src/updates.ts",
-    "./upgrade-plan": "./src/upgrade-plan.ts"
+    "./upgrade-plan": "./src/upgrade-plan.ts",
+    "./platform": "./src/platform.ts"
   },
   "scripts": {
     "test": "vitest run",

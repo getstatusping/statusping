@@ -186,6 +186,29 @@ After setup, the configuration lives in the database and is edited as YAML in `/
 PBKDF2-SHA256 (50,000 iterations, which fits the Workers free plan's CPU limit), and password
 sign-in is limited to 10 attempts per minute per address.
 
+## Hosted platform tenants
+
+StatusPing can also run as one tenant of a hosted, multi-tenant platform. Each tenant
+has its own Worker and its own D1 database. Self-hosted instances never set the
+variables below, and none of this applies to them.
+
+- `STATUSPING_TENANT` is a JSON plan policy set by the platform:
+  `{"tenantId","plan","maxMonitors","minIntervalMin","maxPages","historyDays","suspended","suspendedMessage"}`.
+  An admin, setup or MCP save over the plan's limits is rejected. A configuration
+  that is already stored is fitted to the plan instead (extra monitors and pages
+  are dropped, intervals are raised), so a downgrade never takes a site down.
+  Retention keeps at most `historyDays` of history.
+- While `suspended` is true, every page shows a banner, ticks run no checks or
+  alerts, and `/ping` answers 503.
+- `STATUSPING_PLATFORM_SECRET` signs the platform's requests:
+  `POST /internal/tick` (the platform drives ticks) and `GET /internal/export`
+  (a JSON export of the tenant's data; credentials and sign-in state are left
+  out). Each signature is an HMAC bound to the method, path, tenant id and a
+  timestamp that must be within 5 minutes of the tenant's clock. Without a
+  policy and a secret, these routes do not exist.
+- A new tenant that has `STATUSPING_SETUP_TOKEN` set starts in the setup
+  wizard. Its owner claims it with that token.
+
 ## Run on Node and use an independent confirmation peer
 
 Node 22.18+ can run StatusPing outside Cloudflare, which is useful for a watchdog or an independent confirmation location:

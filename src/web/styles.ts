@@ -71,6 +71,7 @@ const APP_STYLES = `
 .incident-body { margin: 6px 0 0 28px; font-size: 15px; line-height: 1.55; color: var(--foreground); overflow-wrap: anywhere; }
 .incident-meta { display: flex; flex-wrap: wrap; gap: 0 8px; margin: 8px 0 0 28px; font-size: 14px; color: var(--muted-foreground); }
 .stale-warning { font-size: 14px; color: var(--destructive); }
+.site-notice { margin: 16px 0 0; padding: 12px 16px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--muted); font-size: 14px; }
 .warning-incidents { border-top: 1px solid color-mix(in oklab, var(--warning) 30%, var(--border)); }
 .warning-incident { background: color-mix(in oklab, var(--warning) 8%, var(--muted)); }
 

@@ -1,5 +1,6 @@
 import type { Deps } from './deps.ts'
 import { DAY } from './util/time.ts'
+import { capRetention } from './platform.ts'
 
 export const RETENTION = {
   tickResults: 7 * DAY,
@@ -29,10 +30,12 @@ export async function maybeRunRetention(deps: Deps, now: number): Promise<boolea
 }
 
 export async function runRetention(deps: Deps, now: number): Promise<void> {
+  // A hosted tenant keeps at most its plan's history.
+  const keep = (seconds: number) => capRetention(seconds, deps.tenant)
   await deps.db.batch([
-    { sql: `DELETE FROM tick_results WHERE tick_at < ?`, params: [now - RETENTION.tickResults] },
-    { sql: `DELETE FROM latency_hourly WHERE hour < ?`, params: [now - RETENTION.latencyHourly] },
-    { sql: `DELETE FROM latency_daily WHERE day < ?`, params: [now - RETENTION.latencyDaily] },
+    { sql: `DELETE FROM tick_results WHERE tick_at < ?`, params: [now - keep(RETENTION.tickResults)] },
+    { sql: `DELETE FROM latency_hourly WHERE hour < ?`, params: [now - keep(RETENTION.latencyHourly)] },
+    { sql: `DELETE FROM latency_daily WHERE day < ?`, params: [now - keep(RETENTION.latencyDaily)] },
     {
       sql: `DELETE FROM pings WHERE id IN (
               SELECT id FROM (
@@ -41,15 +44,15 @@ export async function runRetention(deps: Deps, now: number): Promise<void> {
                 FROM pings
               ) WHERE rn > ? OR (rn > ? AND received_at < ?)
             )`,
-      params: [RETENTION.pingsKeepMax, RETENTION.pingsKeepMin, now - RETENTION.pingsMaxAge],
+      params: [RETENTION.pingsKeepMax, RETENTION.pingsKeepMin, now - keep(RETENTION.pingsMaxAge)],
     },
-    { sql: `DELETE FROM notifications WHERE created_at < ?`, params: [now - RETENTION.notifications] },
-    { sql: `DELETE FROM announcement_notifications WHERE created_at < ?`, params: [now - RETENTION.notifications] },
+    { sql: `DELETE FROM notifications WHERE created_at < ?`, params: [now - keep(RETENTION.notifications)] },
+    { sql: `DELETE FROM announcement_notifications WHERE created_at < ?`, params: [now - keep(RETENTION.notifications)] },
     // Fixed-rate windows are only useful for a few minutes; this bounds cardinality from rotating IPs.
     { sql: `DELETE FROM ping_rate_limits WHERE window_at < ?`, params: [now - 2 * 86_400] },
     {
       sql: `DELETE FROM incidents WHERE resolved_at IS NOT NULL AND resolved_at < ?`,
-      params: [now - RETENTION.incidents],
+      params: [now - keep(RETENTION.incidents)],
     },
   ])
 }

@@ -39,5 +39,12 @@ export async function buildChrome(deps: Deps, o: ChromeOptions): Promise<Chrome>
     currentSlug: o.currentSlug ?? null,
     morePages: !o.viewer && config.pages.length > pages.length,
     settingsLink: deps.adminEnabled && canAdmin(o.viewer, config),
+    notice: suspendedNotice(deps),
   }
+}
+
+/** The banner a suspended hosted tenant shows on every page (plan 005). */
+export function suspendedNotice(deps: Deps): string | null {
+  if (!deps.tenant?.suspended) return null
+  return deps.tenant.suspendedMessage ?? 'This status page is paused: monitoring is suspended, so statuses below may be out of date.'
 }
