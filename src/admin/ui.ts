@@ -115,7 +115,7 @@ ${notice(opts.notice)}${notice(opts.error, 'error')}${opts.body}</div></div></ma
 
 // ── General ─────────────────────────────────────────────────────────────────────────────────
 
-export function generalPage(opts: { viewer: Viewer; csrf: string; title: string; baseUrl: string; timezone: string; updatesEnabled: boolean; installedVersion: string; update: UpdateState; notice?: string; error?: string }): string {
+export function generalPage(opts: { viewer: Viewer; csrf: string; title: string; baseUrl: string; timezone: string; updatesEnabled: boolean; installedVersion: string; update: UpdateState; notice?: string; error?: string; resetError?: string }): string {
   const u = opts.update
   const updateLine = u.result === 'disabled' ? 'Update checks are off.'
     : u.result === 'available' && u.targetVersion ? `Version <strong>v${escape(u.targetVersion)}</strong> is available. <a href="${escape(releaseNotesUrl(u.targetVersion))}">Release notes</a>
@@ -134,7 +134,8 @@ ${field('Timezone', timezoneSelect('timezone', opts.timezone, 'required'), 'Used
 <label class="check"><input type="checkbox" name="updates" value="1"${opts.updatesEnabled ? ' checked' : ''}><span>Check for StatusPing updates (contacts GitHub at most once a day)</span></label>
 <div class="actions"><button class="btn-primary" type="submit">Save</button></div></form></section>
 <section class="card"><h2>Software</h2><p class="lead">Installed version <code>v${escape(opts.installedVersion)}</code>.</p><p style="margin:0">${updateLine}</p>${checked}
-${u.result === 'disabled' ? '' : `<form method="post" action="/admin/updates/check" style="margin-top:12px">${hidden(opts.csrf)}<button class="btn-outline" type="submit">Check for updates</button></form>`}</section>` })
+${u.result === 'disabled' ? '' : `<form method="post" action="/admin/updates/check" style="margin-top:12px">${hidden(opts.csrf)}<button class="btn-outline" type="submit">Check for updates</button></form>`}</section>
+${resetCard(opts.csrf, opts.resetError)}` })
 }
 
 // ── Monitors ────────────────────────────────────────────────────────────────────────────────
@@ -318,4 +319,17 @@ export function exportPage(opts: { viewer: Viewer; yaml: string }): string {
 export function activityPage(opts: { viewer: Viewer; audit: AuditEntry[] }): string {
   const items = opts.audit.map((e) => `<li><time datetime="${new Date(e.at * 1000).toISOString()}">${new Date(e.at * 1000).toISOString().replace('T', ' ').slice(0, 16)} UTC</time><span><strong>${escape(e.actor)}</strong> ${escape(e.action)} <span class="muted">${escape(e.target)}</span></span></li>`).join('')
   return layout({ ...opts, section: 'activity', title: 'Activity', description: 'Recent changes to this site. Secret values are never recorded.', body: `<section class="card">${items ? `<ul class="audit">${items}</ul>` : '<p class="empty">No changes recorded yet.</p>'}</section>` })
+}
+
+/** The danger-zone card at the end of General: return the site to the setup wizard. */
+function resetCard(csrf: string, error?: string): string {
+  return `<section class="card danger" id="reset"><h2>Reset to the setup wizard</h2>
+<p class="lead">Start over with the setup wizard, where you choose the sign-in method and settings again.</p>
+<ul class="changes"><li>Everyone is signed out, and built-in accounts are removed.</li><li>Checks stop and every page sends visitors to setup until it is finished.</li>
+<li>The current configuration and all monitor history are kept. The reset is recorded in Activity.</li></ul>
+<p class="hint" style="margin:0 0 16px">Tip: <a href="/admin/export">export the configuration</a> first, then import it after setup to keep your monitors, pages and alert channels.</p>
+${error ? `<p class="form-error" role="alert">${escape(error)}</p>` : ''}
+<form class="form" method="post" action="/admin/reset">${hidden(csrf)}
+${field('Type <code>reset</code> to confirm', textInput('confirm', '', 'autocomplete="off" required'))}
+<div class="actions"><button class="btn-danger" type="submit">Reset to setup</button></div></form></section>`
 }

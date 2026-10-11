@@ -16,6 +16,8 @@ import {
 import { appendAudit, listAudit, loadAdminConfig, rotatePingToken, saveAdminConfig, sendSinkTest } from './service.ts'
 import { type AdminConfig, authorizeAdminToken, canAdmin, issueCsrfToken, validateAdminConfig, verifyCsrfToken } from './security.ts'
 import { parseAdminYaml, stringifyAdminYaml } from './yaml.ts'
+import { beginSetup } from '../setup/state.ts'
+import { deleteCookie } from 'hono/cookie'
 import { checkForUpdate } from '../updates.ts'
 import { APP_VERSION } from '../version.ts'
 
@@ -133,9 +135,9 @@ export function mountAdminRoutes(app: Hono, deps: Deps): void {
 
   // ── General ───────────────────────────────────────────────────────────────────────────────
 
-  const general = async (c: Context, v: { viewer: Viewer; csrf: string; config: AdminConfig; notice?: string }, error?: string, status: 200 | 400 = 200) => {
+  const general = async (c: Context, v: { viewer: Viewer; csrf: string; config: AdminConfig; notice?: string }, error?: string, status: 200 | 400 = 200, resetError?: string) => {
     const update = await checkForUpdate({ db: deps.db, config: deps.config, fetch: deps.fetch, now: nowSeconds() })
-    return html(c, generalPage({ viewer: v.viewer, csrf: v.csrf, title: v.config.title, baseUrl: v.config.baseUrl, timezone: v.config.timezone ?? 'UTC', updatesEnabled: v.config.updates?.enabled === true, installedVersion: APP_VERSION, update, notice: v.notice, error }), status)
+    return html(c, generalPage({ viewer: v.viewer, csrf: v.csrf, title: v.config.title, baseUrl: v.config.baseUrl, timezone: v.config.timezone ?? 'UTC', updatesEnabled: v.config.updates?.enabled === true, installedVersion: APP_VERSION, update, notice: v.notice, error, resetError }), status)
   }
 
   app.get('/admin', async (c) => {
@@ -477,6 +479,21 @@ export function mountAdminRoutes(app: Hono, deps: Deps): void {
     const v = await view(c)
     if (v instanceof Response) return v
     return html(c, activityPage({ viewer: v.viewer, audit: await listAudit(deps.db, 100) }))
+  })
+
+  // ── Reset to the setup wizard (the danger-zone card on General) ───────────────────────────
+
+  app.post('/admin/reset', async (c) => {
+    const p = await post(c)
+    if (p instanceof Response) return p
+    if (text(p.form, 'confirm').toLowerCase() !== 'reset') return general(c, p, undefined, 400, 'Type reset to confirm.')
+    await beginSetup(deps.db, p.viewer.email, nowSeconds())
+    await refreshAdminConfig(deps, nowSeconds())
+    deleteCookie(c, 'sp_session', { path: '/' })
+    deps.log('info', `Instance reset to setup mode by ${p.viewer.email}. Open ${new URL(c.req.url).origin}/setup to finish setup.`)
+    const res = c.redirect('/setup', 303)
+    res.headers.set('cache-control', 'no-store')
+    return res
   })
 
   // ── JSON API (bearer ADMIN_TOKEN) ─────────────────────────────────────────────────────────

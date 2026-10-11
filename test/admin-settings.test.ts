@@ -144,6 +144,21 @@ describe('admin Settings pages', () => {
     expect((await b.post('/admin/import', { config: 'title: [broken' })).body).toContain('YAML is invalid')
   })
 
+  it('resets to the setup wizard from General, after a typed confirmation', async () => {
+    const { b, db } = await signedIn()
+    const general = await b.get('/admin')
+    expect(general.body).toContain('Reset to the setup wizard')
+    expect(general.body).not.toContain('href="/admin/reset"')
+    expect((await b.post('/admin/reset', { confirm: 'nope' })).body).toContain('Type reset to confirm.')
+    expect(await db.first(`SELECT status FROM setup_state`)).toBeNull()
+    const reset = await b.post('/admin/reset', { confirm: 'reset' })
+    expect(reset.res.headers.get('location')).toBe('/setup')
+    expect(await db.first<{ status: string }>(`SELECT status FROM setup_state`)).toEqual({ status: 'pending' })
+    expect((await db.all<{ action: string; actor: string }>(`SELECT action, actor FROM audit_log WHERE action = 'instance.reset'`))).toEqual([{ action: 'instance.reset', actor: 'admin@example.test' }])
+    // Signed out and sent to setup.
+    expect((await b.get('/admin')).res.headers.get('location')).toBe('/setup')
+  })
+
   it('shows a Settings link in the status page header to administrators only', async () => {
     const { b } = await signedIn()
     expect((await b.get('/')).body).toContain('href="/admin">Settings</a>')
