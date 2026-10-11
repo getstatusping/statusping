@@ -151,6 +151,9 @@ async function main() {
   // repository or a public bundle. An unsigned local artifact remains useful for
   // deployment testing, but the in-app checker will refuse to offer it.
   const signingKey = process.env.STATUSPING_RELEASE_SIGNING_KEY
+  if (process.env.STATUSPING_REQUIRE_RELEASE_SIGNATURE === 'true' && !signingKey) {
+    throw new Error('STATUSPING_RELEASE_SIGNING_KEY is required when STATUSPING_REQUIRE_RELEASE_SIGNATURE=true')
+  }
   if (signingKey) {
     const key = createPrivateKey({ key: Buffer.from(signingKey, 'base64'), format: 'der', type: 'pkcs8' })
     const signature = sign(null, Buffer.from(canonicalJson(updateManifest)), key).toString('base64')
