@@ -6,6 +6,11 @@ export type UpdateCheckResult = 'disabled' | 'available' | 'current' | 'incompat
 export interface StoredUpdateCheck { result: Exclude<UpdateCheckResult, 'disabled'>; targetVersion: string | null; checkedAt: number }
 
 const DAY = 24 * 60 * 60
+
+/** Official stable-channel manifest: the asset attached to the latest non-prerelease GitHub Release. */
+export const OFFICIAL_MANIFEST_URL = 'https://github.com/getstatusping/statusping/releases/latest/download/update-manifest.json'
+/** Base64 raw Ed25519 public key matching the release signing key held by StatusPing release CI. */
+export const OFFICIAL_RELEASE_PUBLIC_KEY = '3xn8vX3YomCYw2coJQIRYWQqwX8vrIblDE2CAcSPuWI='
 const b64 = (value: string) => Uint8Array.from(atob(value), (char) => char.charCodeAt(0))
 
 // Deterministic JSON is deliberately small and dependency-free so the release publisher and
@@ -75,7 +80,9 @@ export async function checkForUpdate(opts: { db: Db; config: NormalizedConfig; f
   try {
     const response = await opts.fetch(updates.manifestUrl, {
       headers: { accept: 'application/json' },
-      redirect: 'error',
+      // GitHub Release downloads always redirect to its asset CDN. The signature,
+      // not the serving host, is what makes the manifest trustworthy.
+      redirect: 'follow',
       signal: AbortSignal.timeout(5_000),
     })
     const length = Number(response.headers.get('content-length') ?? '0')

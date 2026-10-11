@@ -5,9 +5,10 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
 import packageJson from '../package.json' with { type: 'json' }
+import { releaseDir } from './release-paths.ts'
 
 const appRoot = dirname(dirname(fileURLToPath(import.meta.url)))
-const root = dirname(dirname(appRoot)); const releaseRoot = join(root, 'dist', 'releases', packageJson.version)
+const root = dirname(dirname(appRoot)); const releaseRoot = releaseDir(packageJson.version)
 const output = join(root, 'apps', 'statusping-cloudflare-template'); const staging = join(root, '.template-build'); const bundle = `statusping-cloudflare-${packageJson.version}.js`
 const hash = (bytes: Uint8Array) => createHash('sha256').update(bytes).digest('hex')
 function run(command: string, args: string[], cwd: string) { const r = spawnSync(command, args, { cwd, encoding: 'utf8' }); if (r.status !== 0) throw new Error(`${command} failed:\n${r.stdout}\n${r.stderr}`) }

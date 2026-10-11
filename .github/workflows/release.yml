@@ -1,0 +1,47 @@
+name: Release
+
+on:
+  push:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build, sign, and publish
+    # Deploy Button repositories inherit this file; only the canonical
+    # repository holds the signing key and publishes releases.
+    if: github.repository == 'getstatusping/statusping'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Check tag matches package version
+        run: test "${GITHUB_REF_NAME}" = "v$(node -p 'require("./package.json").version')"
+
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: npm test
+      - run: npm run typecheck
+      - run: npm run template:verify
+
+      - run: npm run release:bundle
+        env:
+          STATUSPING_REQUIRE_RELEASE_SIGNATURE: 'true'
+          STATUSPING_RELEASE_SIGNING_KEY: ${{ secrets.STATUSPING_RELEASE_SIGNING_KEY }}
+
+      # Verifies checksums and the signature against the official public key
+      # that installations use.
+      - run: npm run release:verify
+
+      # Instances check releases/latest/download/update-manifest.json, so the
+      # manifest must be attached to a non-prerelease, non-draft release.
+      - name: Publish GitHub Release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${GITHUB_REF_NAME}" dist/releases/*/* --verify-tag --generate-notes --title "StatusPing ${GITHUB_REF_NAME}"

@@ -2,22 +2,17 @@
 import { createHash, createPrivateKey, sign } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { cp, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import packageJson from '../package.json' with { type: 'json' }
 import { MIGRATIONS } from '../src/schema.ts'
 import { canonicalJson } from '../src/updates.ts'
+import { appRoot, releaseDir, wrangler } from './release-paths.ts'
 
-const appRoot = dirname(dirname(fileURLToPath(import.meta.url)))
-const workspaceRoot = dirname(dirname(appRoot))
 const version = packageJson.version
-const outputDir = join(workspaceRoot, 'dist', 'releases', version)
+const outputDir = releaseDir(version)
 const stagingDir = `${outputDir}.tmp`
 const bundleName = `statusping-cloudflare-${version}.js`
-const wrangler = process.platform === 'win32'
-  ? join(workspaceRoot, 'node_modules', '.bin', 'wrangler.cmd')
-  : join(workspaceRoot, 'node_modules', '.bin', 'wrangler')
 
 function sha256(content: Uint8Array): string {
   return createHash('sha256').update(content).digest('hex')
@@ -128,10 +123,9 @@ async function main() {
     version,
     channel: 'stable',
     releasedAt: releasedAt(),
-    // Until cross-version migrations have an explicit compatibility policy,
-    // the updater may only offer a mechanical update from this release.
-    // This conservative value prevents an unsafe automatic suggestion.
-    minimumVersion: version,
+    // The oldest installed release that can move straight to this one. Raise
+    // it in package.json when a release drops an upgrade path.
+    minimumVersion: packageJson.statusping.minimumUpgradeVersion,
     schema: {
       from: 0,
       to: MIGRATIONS.length,

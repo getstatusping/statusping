@@ -58,16 +58,18 @@ the text between these two markers.
 
 `npm run release:bundle` writes a portable Worker bundle and a checksummed `update-manifest.json` under `dist/releases/<version>/`. The manifest is public, reproducible metadata for update tooling: stable channel, conservative minimum compatible version, forward-only schema range, bundle and migration filenames/checksums, template marker, and release-notes URL. It never contains configuration or secret values. Verify the full artifact contract with `npm run release:verify` before publishing a release.
 
-For the opt-in in-app update notice, release CI supplies `STATUSPING_RELEASE_SIGNING_KEY` as a base64 PKCS#8 Ed25519 private key. Configure the matching base64 raw 32-byte public key and immutable HTTPS manifest URL under `updates` in the instance configuration. The Worker refuses unsigned, altered, malformed, incompatible, or stale manifest data; it stores only the result/version/check time, never the manifest body or key.
+Each `vX.Y.Z` tag on `getstatusping/statusping` runs the release workflow, which signs `update-manifest.json` with StatusPing's Ed25519 release key and attaches it, with the bundle, to the GitHub Release. Each release's manifest stays at `https://github.com/getstatusping/statusping/releases/download/vX.Y.Z/update-manifest.json`; the latest stable one is always at `releases/latest/download/update-manifest.json`.
+
+To turn on the in-app update notice, enable checks in your configuration:
 
 ```yaml
 updates:
   enabled: true
-  manifestUrl: https://releases.example.com/statusping/stable.json
-  publicKey: BASE64_RAW_ED25519_PUBLIC_KEY
 ```
 
-This is disabled by default so an installation never contacts an update service without an operator choosing to enable it. The manifest URL must be an HTTPS URL with no credentials, query parameters, or fragment. The admin page offers a cached check (at most once per 24 hours) and a deliberate **Check for updates** action; an available release links only to its public release notes rather than changing the Worker or transmitting installation details.
+That checks the latest official release and verifies it with the StatusPing release public key, `3xn8vX3YomCYw2coJQIRYWQqwX8vrIblDE2CAcSPuWI=`. A mirror can set `manifestUrl` (HTTPS, with no credentials, query parameters, or fragment) and, if it re-signs releases, `publicKey`. The Worker refuses unsigned, altered, malformed, or incompatible manifests, and stores only the result, version, and check time, never the manifest body.
+
+Checks are off by default, so an installation never contacts GitHub unless an operator enables them. The admin page checks at most once every 24 hours and offers a deliberate **Check for updates** action; an available release links to its public release notes and never changes the Worker or sends installation details.
 
 This repository is self-contained: the shared UI is included as a local dependency, so the Deploy Button does not fetch any StatusPing package from npm.
 

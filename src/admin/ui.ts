@@ -14,7 +14,7 @@ export function adminPage(opts: { viewer: Viewer; csrf: string; config: unknown;
   const update = opts.update
   const lastChecked = update.checkedAt === null ? 'Not checked yet.' : `Last checked ${escape(new Date(update.checkedAt * 1000).toISOString())}.`
   const updateDetail = update.result === 'disabled'
-    ? 'Checks are disabled. Add an <code>updates</code> block with an HTTPS manifest URL and public signing key to enable them.'
+    ? 'Checks are disabled. Set <code>updates.enabled: true</code> to check the signed StatusPing release manifest.'
     : update.result === 'available' && update.targetVersion
       ? `Update available: <strong>v${escape(update.targetVersion)}</strong>. <a href="${escape(releaseNotesUrl(update.targetVersion))}">Release notes</a>`
       : update.result === 'incompatible' && update.targetVersion

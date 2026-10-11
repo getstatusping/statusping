@@ -1,6 +1,7 @@
 import { Cron } from 'croner'
 import { parseJsonPath } from './evaluate/json.ts'
 import { isValidTimeZone, parseDuration } from './util/time.ts'
+import { OFFICIAL_MANIFEST_URL, OFFICIAL_RELEASE_PUBLIC_KEY } from './updates.ts'
 
 // ─── Public config types (what users write in statusping.config.ts) ────────────────────────
 
@@ -314,9 +315,9 @@ export interface StatusPingConfig {
   /** Opt-in, signed release-manifest checks shown only to authenticated administrators. */
   updates?: {
     enabled?: boolean
-    /** HTTPS URL of the immutable StatusPing release manifest. */
+    /** HTTPS URL of the signed release manifest. Defaults to the latest official GitHub Release. */
     manifestUrl?: string
-    /** Base64-encoded 32-byte Ed25519 public key used to verify the manifest signature. */
+    /** Base64-encoded 32-byte Ed25519 public key used to verify the manifest signature. Defaults to the official release key. */
     publicKey?: string
   }
 }
@@ -644,10 +645,12 @@ export function normalizeConfig(config: StatusPingConfig): NormalizedConfig {
         try { keyIsValid = Uint8Array.from(atob(publicKey), (char) => char.charCodeAt(0)).byteLength === 32 } catch { /* report below */ }
         if (!keyIsValid) problems.push('updates.publicKey: must be a base64-encoded 32-byte Ed25519 public key')
       }
-      if (enabled === true && typeof manifestUrl !== 'string') problems.push('updates.manifestUrl: is required when update checks are enabled')
-      if (enabled === true && !keyIsValid) problems.push('updates.publicKey: is required when update checks are enabled')
-      if (typeof enabled === 'boolean' && (enabled === false || (typeof manifestUrl === 'string' && keyIsValid))) {
-        updates = { enabled, manifestUrl: typeof manifestUrl === 'string' ? manifestUrl : null, publicKey: typeof publicKey === 'string' ? publicKey : null }
+      // Enabling checks without a source uses the official GitHub Release
+      // manifest and release key; either can be overridden for a mirror.
+      if (typeof enabled === 'boolean' && (publicKey === undefined || keyIsValid)) {
+        updates = enabled
+          ? { enabled, manifestUrl: typeof manifestUrl === 'string' ? manifestUrl : OFFICIAL_MANIFEST_URL, publicKey: typeof publicKey === 'string' ? publicKey : OFFICIAL_RELEASE_PUBLIC_KEY }
+          : { enabled, manifestUrl: typeof manifestUrl === 'string' ? manifestUrl : null, publicKey: typeof publicKey === 'string' ? publicKey : null }
       }
     }
   }

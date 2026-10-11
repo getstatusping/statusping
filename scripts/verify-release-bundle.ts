@@ -1,11 +1,11 @@
 /** Verify the public, checksummed StatusPing release contract. */
 import { createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { join } from 'node:path'
 import packageJson from '../package.json' with { type: 'json' }
 import { MIGRATIONS } from '../src/schema.ts'
-import { canonicalJson } from '../src/updates.ts'
+import { canonicalJson, OFFICIAL_RELEASE_PUBLIC_KEY } from '../src/updates.ts'
+import { releaseDir } from './release-paths.ts'
 
 type FileEntry = { sha256: string; bytes: number }
 type ReleaseManifest = { version: string; files: Record<string, FileEntry> }
@@ -24,9 +24,8 @@ type UpdateManifest = {
   signature?: { algorithm: string; value: string }
 }
 
-const appRoot = dirname(dirname(fileURLToPath(import.meta.url)))
-const workspaceRoot = dirname(dirname(appRoot))
-const root = process.env.STATUSPING_RELEASE_DIR ?? join(workspaceRoot, 'dist', 'releases', packageJson.version)
+const root = releaseDir(packageJson.version)
+const semver = (value: string) => /^(\d+)\.(\d+)\.(\d+)$/.exec(value)?.slice(1).map(Number)
 const bundleName = `statusping-cloudflare-${packageJson.version}.js`
 
 function assertion(condition: unknown, message: string): asserts condition {
@@ -51,7 +50,9 @@ async function main() {
 
   const update = JSON.parse(await readFile(join(root, 'update-manifest.json'), 'utf8')) as UpdateManifest
   assertion(update.format === 'statusping-update-manifest/v1', 'unsupported update manifest format')
-  assertion(update.version === packageJson.version && update.minimumVersion === packageJson.version, 'unsafe version compatibility declaration')
+  const [target, minimum] = [semver(update.version), semver(update.minimumVersion)]
+  assertion(update.version === packageJson.version && update.minimumVersion === packageJson.statusping.minimumUpgradeVersion, 'unsafe version compatibility declaration')
+  assertion(target && minimum && (minimum[0]! - target[0]! || minimum[1]! - target[1]! || minimum[2]! - target[2]!) <= 0, 'minimum upgrade version is newer than the release')
   assertion(update.channel === 'stable', 'release channel must be stable')
   assertion(Number.isFinite(Date.parse(update.releasedAt)), 'releasedAt must be an ISO timestamp')
   assertion(update.schema.from === 0 && update.schema.to === MIGRATIONS.length && update.schema.strategy === 'forward-only', 'invalid schema compatibility')
@@ -65,7 +66,9 @@ async function main() {
   if (update.signature !== undefined) {
     assertion(update.signature.algorithm === 'Ed25519' && /^[A-Za-z0-9+/]+={0,2}$/.test(update.signature.value), 'invalid release signature metadata')
   }
-  const publicKey = process.env.STATUSPING_RELEASE_PUBLIC_KEY
+  // A signed manifest is checked against the official release key unless a
+  // test or mirror supplies its own.
+  const publicKey = process.env.STATUSPING_RELEASE_PUBLIC_KEY ?? (update.signature ? OFFICIAL_RELEASE_PUBLIC_KEY : undefined)
   if (publicKey) {
     assertion(update.signature !== undefined, 'a public key was supplied but the manifest is unsigned')
     let valid = false

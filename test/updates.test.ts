@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { normalizeConfig } from '../src/config.ts'
-import { canonicalJson, checkForUpdate, loadUpdateCheck } from '../src/updates.ts'
+import { canonicalJson, checkForUpdate, loadUpdateCheck, OFFICIAL_MANIFEST_URL, OFFICIAL_RELEASE_PUBLIC_KEY } from '../src/updates.ts'
 import { createTestDb, fakeFetch, testConfig } from './helpers.ts'
 
 const base64 = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes))
@@ -25,6 +25,14 @@ describe('signed admin update checks', () => {
     expect(() => normalizeConfig(testConfig({ updates: { enabled: true, manifestUrl: 'http://example.test/manifest', publicKey: 'abc' } }))).toThrow(/updates\.manifestUrl[\s\S]*updates\.publicKey/)
     expect(() => normalizeConfig(testConfig({ updates: { enabled: true, manifestUrl: 'https://updates.example.test/manifest?access_token=not-a-public-manifest', publicKey: 'abc' } }))).toThrow(/updates\.manifestUrl/)
     expect(() => normalizeConfig(testConfig({ updates: { enabled: true, manifestUrl: 'https://updates.example.test/manifest#credential', publicKey: 'abc' } }))).toThrow(/updates\.manifestUrl/)
+  })
+
+  it('uses the official GitHub Release manifest and key unless a mirror overrides them', () => {
+    expect(normalizeConfig(testConfig({ updates: { enabled: true } })).updates).toEqual({ enabled: true, manifestUrl: OFFICIAL_MANIFEST_URL, publicKey: OFFICIAL_RELEASE_PUBLIC_KEY })
+    expect(normalizeConfig(testConfig({ updates: { enabled: true, manifestUrl: 'https://mirror.example.test/stable.json' } })).updates).toEqual({ enabled: true, manifestUrl: 'https://mirror.example.test/stable.json', publicKey: OFFICIAL_RELEASE_PUBLIC_KEY })
+    expect(normalizeConfig(testConfig({ updates: { enabled: false } })).updates).toEqual({ enabled: false, manifestUrl: null, publicKey: null })
+    expect(OFFICIAL_MANIFEST_URL).toBe('https://github.com/getstatusping/statusping/releases/latest/download/update-manifest.json')
+    expect(atob(OFFICIAL_RELEASE_PUBLIC_KEY)).toHaveLength(32)
   })
 
   it('verifies a signed compatible release, caches it for 24 hours, and never persists the manifest', async () => {
