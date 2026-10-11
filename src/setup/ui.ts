@@ -3,6 +3,7 @@
  * theme as the status pages (Card, Button, Input, Alert) and work without JavaScript.
  */
 import { STYLES } from '../web/styles.ts'
+import { timezoneSelect } from '../util/timezones.ts'
 import { ACCESS_DOCS_URL, OIDC_PRESETS, presetById } from './instructions.ts'
 
 const escape = (value: string) => value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
@@ -254,11 +255,11 @@ export function basicsPage(opts: { csrf: string; completed: ReadonlySet<SetupSte
 ${field('Title', `<input class="input" id="title" name="title" type="text" value="${escape(opts.title)}" maxlength="80" required>`)}
 ${field('Base URL', `<input class="input" id="baseUrl" name="baseUrl" type="url" value="${escape(opts.baseUrl)}" required>`, 'Used in alert links, ping URLs and sign-in callbacks.')}
 ${workersDev ? '<p class="alert warning">This is a <code>workers.dev</code> address. If you add a custom domain later, update the base URL in the YAML admin.</p>' : ''}
-${field('Timezone', `<input class="input" id="timezone" name="timezone" type="text" value="${escape(opts.timezone)}" required>`, 'An IANA name such as <code>Europe/London</code> or <code>America/Los_Angeles</code>.')}
+${field('Timezone', timezoneSelect('timezone', opts.timezone, 'required'), 'Used for times on your status pages and for scheduled jobs.')}
 <label class="check"><input type="checkbox" name="privatePage" value="1"${opts.privatePage ? ' checked' : ''}><span>Make the status page private (only administrators can see it)</span></label>
 <label class="check"><input type="checkbox" name="updates" value="1"${opts.updates ? ' checked' : ''}><span>Check for StatusPing updates (contacts GitHub at most once a day; shown only in the admin)</span></label>
 <div class="actions"><button class="btn-primary" type="submit">Continue</button></div></form>
-<script>(()=>{const t=document.getElementById('timezone');if(t&&t.value==='UTC'){try{t.value=Intl.DateTimeFormat().resolvedOptions().timeZone||'UTC'}catch{}}})()</script>`)
+<script>(()=>{const t=document.getElementById('timezone');if(t&&t.value==='UTC'){try{const z=Intl.DateTimeFormat().resolvedOptions().timeZone;if(z&&[...t.options].some(o=>o.value===z))t.value=z}catch{}}})()</script>`)
 }
 
 export type MonitorKind = 'http' | 'push' | 'tcp'

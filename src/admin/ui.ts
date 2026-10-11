@@ -11,6 +11,7 @@ import { SINK_FIELDS } from './forms.ts'
 import type { StoredUpdateCheck } from '../updates.ts'
 import { releaseNotesUrl } from '../updates.ts'
 import { STYLES } from '../web/styles.ts'
+import { timezoneSelect } from '../util/timezones.ts'
 
 const escape = (value: string) => value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
 
@@ -129,7 +130,7 @@ export function generalPage(opts: { viewer: Viewer; csrf: string; title: string;
 <form class="form" method="post" action="/admin/general">${hidden(opts.csrf)}
 ${field('Site title', textInput('title', opts.title, 'maxlength="80" required'))}
 ${field('Address', textInput('baseUrl', opts.baseUrl, 'type="url" required'), 'The public address of this site, used in alert links, ping URLs and sign-in callbacks.')}
-${field('Timezone', textInput('timezone', opts.timezone, 'required'), 'An IANA name such as <code>Europe/London</code>.')}
+${field('Timezone', timezoneSelect('timezone', opts.timezone, 'required'), 'Used for times on your status pages and for scheduled jobs.')}
 <label class="check"><input type="checkbox" name="updates" value="1"${opts.updatesEnabled ? ' checked' : ''}><span>Check for StatusPing updates (contacts GitHub at most once a day)</span></label>
 <div class="actions"><button class="btn-primary" type="submit">Save</button></div></form></section>
 <section class="card"><h2>Software</h2><p class="lead">Installed version <code>v${escape(opts.installedVersion)}</code>.</p><p style="margin:0">${updateLine}</p>${checked}
@@ -171,7 +172,7 @@ ${field('Failed checks before alerting', textInput('retries', v('retries'), 'typ
     : opts.kind === 'push' ? `
 ${field('How often does it run?', selectInput('period', PERIODS, v('period', '1d')))}
 ${field('Or a cron schedule', textInput('schedule', v('schedule'), 'placeholder="0 3 * * *" spellcheck="false"'), 'Optional. Use this when the job runs at fixed times; it replaces the interval above.')}
-<div class="grid-2">${field('Schedule timezone', textInput('tz', v('tz', opts.timezone)))}${field('Grace period', textInput('grace', v('grace'), 'placeholder="e.g. 15m"'), 'Extra time before a late job alerts.')}</div>
+<div class="grid-2">${field('Schedule timezone', timezoneSelect('tz', v('tz', opts.timezone)))}${field('Grace period', textInput('grace', v('grace'), 'placeholder="e.g. 15m"'), 'Extra time before a late job alerts.')}</div>
 ${field('Maximum run time', textInput('maxRuntime', v('maxRuntime'), 'placeholder="e.g. 2h"'), 'Optional. Alerts when a started job has not finished in time.')}`
       : `
 <p class="hint" style="margin:0">On Cloudflare, port checks cannot reach Cloudflare-proxied hostnames, port 25, or private addresses. Use the server's public IP or an unproxied hostname.</p>
