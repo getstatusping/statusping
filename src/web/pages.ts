@@ -26,6 +26,8 @@ export interface Chrome {
   currentSlug: string | null
   /** Restricted pages exist that an anonymous visitor could see after signing in. */
   morePages: boolean
+  /** The signed-in viewer administers this site: the header links to Settings. */
+  settingsLink?: boolean
 }
 
 /** Everything a status/monitor page render needs to know about where it is and who is looking. */
@@ -66,7 +68,7 @@ function barClass(b: DayBar): string {
 
 function siteHeader(c: Chrome): Html {
   const account = c.viewer
-    ? html`<span class="muted small account-email">${c.viewer.email}</span><a class="btn-outline" href="/auth/logout">Sign out</a>`
+    ? html`${c.settingsLink ? html`<a class="header-link" href="/admin">Settings</a>` : ''}<span class="muted small account-email">${c.viewer.email}</span><a class="btn-outline" href="/auth/logout">Sign out</a>`
     : c.signInLink
       ? html`<a class="btn-outline" href="/auth/login?next=${enc(c.current)}">Sign in</a>`
       : ''

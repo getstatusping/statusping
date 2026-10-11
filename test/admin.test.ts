@@ -84,7 +84,7 @@ describe('admin secure configuration', () => {
     await expect(sendSinkTest('unknown', config, () => undefined, fetch)).rejects.toThrow('unknown sink')
   })
 
-  it('binds one-time CSRF tokens to the signed-in session cookie', async () => {
+  it('binds CSRF tokens to the signed-in session for the whole session', async () => {
     const t = await createTestDb('libsql'); close = t.close
     await adminTables(t.db)
     const app = new Hono()
@@ -92,10 +92,14 @@ describe('admin secure configuration', () => {
     app.post('/check', async (c) => c.text(String(await verifyCsrfToken(t.db, c, await c.req.text(), 101))))
     const issued = await app.request('/issue', { headers: { cookie: 'sp_session=valid-session' } })
     const token = await issued.text()
-    expect(token).toHaveLength(32)
+    expect(token).toMatch(/^[0-9a-f]{64}$/)
+    expect(await (await app.request('/issue', { headers: { cookie: 'sp_session=valid-session' } })).text()).toBe(token)
+    expect(await (await app.request('/issue')).text()).toBe('none')
     expect(await (await app.request('/check', { method: 'POST', headers: { cookie: 'sp_session=other-session' }, body: token })).text()).toBe('false')
     expect(await (await app.request('/check', { method: 'POST', headers: { cookie: 'sp_session=valid-session' }, body: token })).text()).toBe('true')
-    expect(await (await app.request('/check', { method: 'POST', headers: { cookie: 'sp_session=valid-session' }, body: token })).text()).toBe('false')
+    // Still valid after use: forms on earlier pages and other tabs keep working.
+    expect(await (await app.request('/check', { method: 'POST', headers: { cookie: 'sp_session=valid-session' }, body: token })).text()).toBe('true')
+    expect(await (await app.request('/check', { method: 'POST', headers: { cookie: 'sp_session=valid-session' }, body: 'x'.repeat(64) })).text()).toBe('false')
   })
 
   it('mounts no admin surface by default, then protects browser and API management flows', async () => {
@@ -119,14 +123,17 @@ describe('admin secure configuration', () => {
     const page = await app.request('/admin', { headers: { cookie } })
     expect(page.status).toBe(200)
     const pageText = await page.text()
-    expect(pageText).toContain('Administration')
+    expect(pageText).toContain('<h1>General</h1>')
     expect(pageText).toContain('Installed version')
-    expect(pageText).toContain('Checks are disabled')
-    expect(pageText).toContain('Import a YAML file')
-    expect(pageText).toContain('StatusPing YAML configuration')
-    expect(pageText).toContain('Generate / rotate')
-    expect(pageText).toContain('Send test')
-    expect(pageText).not.toContain('https://slack.test')
+    expect(pageText).toContain('Update checks are off.')
+    for (const section of ['/admin/monitors', '/admin/pages', '/admin/channels', '/admin/access', '/admin/import', '/admin/export', '/admin/activity']) {
+      expect(pageText).toContain(`href="${section}"`)
+      expect((await app.request(section, { headers: { cookie } })).status).toBe(200)
+    }
+    const channels = await (await app.request('/admin/channels', { headers: { cookie } })).text()
+    expect(channels).toContain('Send test')
+    expect(channels).not.toContain('https://slack.test')
+    expect(await (await app.request('/admin/monitors/heartbeat', { headers: { cookie } })).text()).toContain('Create a new ping URL')
     expect((await app.request('/api/admin/config')).status).toBe(401)
     const api = await app.request('/api/admin/config', { headers: { authorization: 'Bearer admin-api-token' } })
     expect(api.status).toBe(200)
@@ -134,10 +141,19 @@ describe('admin secure configuration', () => {
     expect(apiBody).toMatchObject({ config: { admin: true, sinks: { slack: { webhookUrl: { $env: 'SLACK_WEBHOOK_URL' } } } } })
     const csrf = pageText.match(/name="csrf" value="([^"]+)"/)?.[1]
     expect(csrf).toBeTruthy()
-    const yamlUpdate = await app.request('/admin/config', {
+    const yaml = stringifyAdminYaml({ ...apiBody.config, title: 'Changed from YAML' })
+    const preview = await app.request('/admin/import', {
       method: 'POST',
       headers: { cookie, origin: 'http://localhost', 'content-type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({ csrf: csrf!, config: stringifyAdminYaml({ ...apiBody.config, title: 'Changed from YAML' }) }).toString(),
+      body: new URLSearchParams({ csrf: csrf!, config: yaml }).toString(),
+    })
+    const previewText = await preview.text()
+    expect(previewText).toContain('Renames the site to &quot;Changed from YAML&quot;')
+    const applyCsrf = previewText.match(/name="csrf" value="([^"]+)"/)?.[1]
+    const yamlUpdate = await app.request('/admin/import/apply', {
+      method: 'POST',
+      headers: { cookie, origin: 'http://localhost', 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ csrf: applyCsrf!, config: yaml }).toString(),
     })
     expect(yamlUpdate.status).toBe(303)
     const yamlSaved = await app.request('/api/admin/config', { headers: { authorization: 'Bearer admin-api-token' } })

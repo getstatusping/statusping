@@ -11,6 +11,7 @@ const APP_STYLES = `
   background: color-mix(in oklab, var(--background) 85%, transparent); backdrop-filter: blur(8px); }
 .site-header-inner { display: flex; align-items: center; gap: 12px; height: 56px; }
 .account { margin-left: auto; display: flex; align-items: center; gap: 12px; }
+.header-link { font-size: 14px; font-weight: 500; color: var(--muted-foreground); } .header-link:hover, .header-link[aria-current="page"] { color: var(--foreground); text-decoration: none; }
 @media (max-width: 480px) { .account-email { display: none; } }
 
 /* ── Page heading + page dropdown ───────────────────────────────────────────── */

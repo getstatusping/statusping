@@ -140,8 +140,8 @@ describe('first-run setup wizard and reset', () => {
     expect(b.jar.has('sp_session')).toBe(true)
     const admin = await b.get('/admin')
     expect(admin.res.status).toBe(200)
-    expect(admin.body).toContain('Signed in as owner@example.test')
-    expect(admin.body).toContain('title: Acme')
+    expect(admin.body).toContain('<span class="muted small account-email">owner@example.test</span>')
+    expect(admin.body).toContain('value="Acme"')
 
     expect((await b.get('/setup')).res.status).toBe(404)
     expect((await b.post('/setup/finish', { csrf })).res.status).toBe(404)

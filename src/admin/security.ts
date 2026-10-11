@@ -154,33 +154,19 @@ function signInBinding(c: Context): string | undefined {
 }
 
 /**
- * Per-session CSRF token. The token is stored hashed, bound to the sign-in credential, and can
- * be safely placed in a form. API bearer-token requests are not cookie-authenticated and do
- * not use this mechanism.
+ * Per-session CSRF token, derived from the sign-in credential. That credential is HttpOnly (or
+ * an Access token a cross-site page cannot read), so the token cannot be forged; and because it
+ * is stable for the session, forms stay valid across pages, tabs, and the Back button. API
+ * bearer-token requests are not cookie-authenticated and do not use this mechanism.
  */
-export async function issueCsrfToken(db: Db, c: Context, now: number): Promise<string | null> {
+export async function issueCsrfToken(_db: Db, c: Context, _now: number): Promise<string | null> {
   const session = signInBinding(c)
-  if (!session) return null
-  const sessionHash = await sha256Hex(session)
-  const token = randomToken(32)
-  await db.run(
-    `INSERT INTO admin_csrf (session_hash, token_hash, expires_at) VALUES (?, ?, ?)
-     ON CONFLICT(session_hash) DO UPDATE SET token_hash = excluded.token_hash, expires_at = excluded.expires_at`,
-    [sessionHash, await sha256Hex(token), now + 3600],
-  )
-  return token
+  return session ? sha256Hex(`statusping-csrf:${session}`) : null
 }
 
 export async function verifyCsrfToken(db: Db, c: Context, token: unknown, now: number): Promise<boolean> {
   if (typeof token !== 'string' || token.length < 32) return false
-  const session = signInBinding(c)
-  if (!session) return false
-  const sessionHash = await sha256Hex(session)
-  const row = await db.first<{ token_hash: string; expires_at: number }>(
-    `SELECT token_hash, expires_at FROM admin_csrf WHERE session_hash = ?`, [sessionHash],
-  )
-  if (!row || row.expires_at < now || !timingSafeEqual(row.token_hash, await sha256Hex(token))) return false
-  await db.run(`DELETE FROM admin_csrf WHERE session_hash = ?`, [sessionHash])
-  return true
+  const expected = await issueCsrfToken(db, c, now)
+  return expected !== null && timingSafeEqual(token, expected)
 }
 

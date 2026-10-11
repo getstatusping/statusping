@@ -97,7 +97,7 @@ export function createDeps(opts: CreateDepsOptions): Deps {
     setupPending: false,
     role: roleEnv,
     // A Worker secret or env var always wins over a value stored by setup.
-    getEnv: (name) => opts.getEnv(name) ?? (STORABLE_ENV.includes(name) ? deps.storedEnv[name] : undefined),
+    getEnv: (name) => opts.getEnv(name) ?? (isStorableEnv(name) ? deps.storedEnv[name] : undefined),
     hasRealEnv: (name) => opts.getEnv(name) !== undefined,
     storedEnv: {},
     pingTokens: parsePingTokens(opts.getEnv('PING_TOKENS')),
@@ -120,6 +120,9 @@ export function createDeps(opts: CreateDepsOptions): Deps {
  * takes precedence and the UI never shows a stored value back.
  */
 export const STORABLE_ENV = ['OIDC_CLIENT_ID', 'OIDC_CLIENT_SECRET', 'CF_ACCESS_AUD']
+/** Alert-channel credentials entered in the admin are stored under SINK_<CHANNEL>_<FIELD>. */
+const SINK_ENV = /^SINK_[A-Z0-9_]{1,100}$/
+export const isStorableEnv = (name: string) => STORABLE_ENV.includes(name) || SINK_ENV.test(name)
 export const storedEnvKey = (name: string) => `env:${name}`
 
 async function loadStoredEnv(deps: Deps): Promise<void> {
@@ -127,7 +130,7 @@ async function loadStoredEnv(deps: Deps): Promise<void> {
   const stored: Record<string, string> = {}
   for (const row of rows) {
     const name = row.name.slice(4)
-    if (STORABLE_ENV.includes(name)) stored[name] = row.value
+    if (isStorableEnv(name)) stored[name] = row.value
   }
   deps.storedEnv = stored
 }

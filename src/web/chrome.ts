@@ -1,5 +1,6 @@
 import { type Viewer, canOpen } from '../auth/viewer.ts'
 import type { Deps } from '../deps.ts'
+import { canAdmin } from '../admin/security.ts'
 import { nowSeconds } from '../util/time.ts'
 import { lastTickAt as loadLastTickAt } from './data.ts'
 import type { Chrome } from './pages.ts'
@@ -37,5 +38,6 @@ export async function buildChrome(deps: Deps, o: ChromeOptions): Promise<Chrome>
     pages,
     currentSlug: o.currentSlug ?? null,
     morePages: !o.viewer && config.pages.length > pages.length,
+    settingsLink: deps.adminEnabled && canAdmin(o.viewer, config),
   }
 }
