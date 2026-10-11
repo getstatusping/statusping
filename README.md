@@ -32,6 +32,25 @@ Every YAML import is parsed as safe plain data, validated by the same StatusPing
 
 When browser admin is enabled, the validated D1-backed configuration becomes the running configuration. The checked-in configuration or `STATUSPING_CONFIG` remains the initial seed and is still the recommended approach for automated or version-controlled deployments.
 
+## Run on Node and use an independent confirmation peer
+
+Node 22.18+ can run StatusPing outside Cloudflare, which is useful for a watchdog or an independent confirmation location:
+
+```sh
+npm install
+PORT=8000 STATUSPING_LOCATION='Portland, US' npm run dev
+```
+
+For a real second vantage point, run a second Node instance on an independently operated network and give both instances the same monitor IDs and target configuration. On each instance set a unique, truthful `STATUSPING_LOCATION`, the same random `STATUSPING_CONFIRMATION_SECRET`, and peer URLs:
+
+```sh
+STATUSPING_LOCATION='Portland, US'
+STATUSPING_CONFIRMATION_SECRET='generate-a-long-random-shared-secret'
+STATUSPING_CONFIRMATION_PEERS='https://watchdog.example/internal/confirm'
+```
+
+Use HTTPS for peer URLs (plain HTTP is accepted only for `localhost` development). When an HTTP or TCP monitor with `confirm: { regions, quorum }` fails, the scheduler asks up to `regions` configured peers to rerun that monitor. A peer receives only the monitor ID and loads its own local monitor configuration, so target URLs, request headers, and credentials never travel between instances. The internal endpoint is hidden until `STATUSPING_CONFIRMATION_SECRET` and `STATUSPING_LOCATION` are both set, and requires the shared bearer secret. Keep the peer endpoint behind normal network controls as well.
+
 ## License
 
 [MIT](LICENSE)

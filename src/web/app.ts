@@ -22,6 +22,8 @@ import { confirmSubscription, consumeSubscribeLimit, dispatchSubscriberOutbox, e
 import { refreshAdminConfig } from '../deps.ts'
 import { mountAdminRoutes } from '../admin/routes.ts'
 import { consumePingRateLimit } from '../rate-limit.ts'
+import { runHttpCheck } from '../evaluate/http.ts'
+import { runTcpCheck } from '../evaluate/tcp.ts'
 
 const STALE_TICK_SECONDS = 180
 const PUBLIC_MAX_AGE = 30
@@ -150,6 +152,29 @@ export function createApp(deps: Deps): Hono {
     const auth = c.req.header('authorization') ?? ''
     if (!timingSafeEqual(auth, `Bearer ${secret}`)) return c.text('Unauthorized', 401)
     return c.json(await tick(deps))
+  })
+
+  // A self-hosted Node peer can ask this instance to repeat a configured HTTP
+  // or TCP check. Requests carry only a monitor id, never the target or its
+  // credentials: this instance resolves both from its own local config.
+  app.post('/internal/confirm', async (c) => {
+    const secret = deps.getEnv('STATUSPING_CONFIRMATION_SECRET')
+    if (!secret || !deps.location) return c.text('Not found', 404)
+    if (!timingSafeEqual(c.req.header('authorization') ?? '', `Bearer ${secret}`)) return c.text('Unauthorized', 401, { 'cache-control': 'no-store' })
+    const length = Number(c.req.header('content-length') ?? 0)
+    if (!Number.isFinite(length) || length > 1024) return c.text('Bad request', 400, { 'cache-control': 'no-store' })
+    let body: unknown
+    try { body = await c.req.json() } catch { return c.text('Bad request', 400, { 'cache-control': 'no-store' }) }
+    const monitorId = body && typeof body === 'object' && !Array.isArray(body) ? (body as Record<string, unknown>).monitorId : undefined
+    if (typeof monitorId !== 'string' || monitorId.length > 120) return c.text('Bad request', 400, { 'cache-control': 'no-store' })
+    const monitor = config.monitors.find((item) => item.id === monitorId)
+    if (!monitor || (monitor.kind !== 'http' && monitor.kind !== 'tcp')) return c.text('Not found', 404, { 'cache-control': 'no-store' })
+    const result = monitor.kind === 'http'
+      ? await runHttpCheck(monitor, deps.fetch)
+      : deps.tcpConnect
+        ? await runTcpCheck(monitor, deps.tcpConnect)
+        : { ok: false, err: 'TCP checks are not configured in this runtime' }
+    return c.json({ location: deps.location, ok: result.ok, err: result.err }, 200, { 'cache-control': 'no-store' })
   })
 
   // ── Management API: manual status announcements ────────────────────────────────────────────

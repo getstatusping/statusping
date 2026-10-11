@@ -13,8 +13,10 @@ import { lookupNodeCertificateExpiry } from './expiry.ts'
 import { nodeTcpConnect } from './tcp.ts'
 import { startNodeServer } from './server.ts'
 import { normalizeClientIp } from '../../src/rate-limit.ts'
+import { nodeConfirmationProbe, nodeConfirmationSettings } from './confirmation.ts'
 
 const env = (name: string) => process.env[name] || undefined
+const confirmation = nodeConfirmationSettings(env)
 
 const deps = createDeps({
   db: new LibsqlDb(
@@ -24,6 +26,8 @@ const deps = createDeps({
   getEnv: env,
   certificateExpiry: lookupNodeCertificateExpiry,
   tcpConnect: nodeTcpConnect,
+  confirmationProbe: confirmation ? nodeConfirmationProbe(confirmation) : undefined,
+  location: env('STATUSPING_LOCATION'),
   // A direct Node listener cannot authenticate a forwarding header. Opt in only
   // when a trusted reverse proxy strips client supplied X-Forwarded-For.
   clientIp: env('STATUSPING_TRUST_PROXY') === 'true'
