@@ -4,8 +4,25 @@ import type { AuditEntry } from './service.ts'
 import { stringifyAdminYaml } from './yaml.ts'
 import type { StoredUpdateCheck } from '../updates.ts'
 import { releaseNotesUrl } from '../updates.ts'
+import { STYLES } from '../web/styles.ts'
 
 const escape = (value: string) => value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+
+/** Admin layout on top of the shared shadcn/ui theme used by the status pages. */
+const ADMIN_STYLES = `
+.admin-brand { font-weight: 500; }
+.admin .card h2 { margin-bottom: 12px; }
+.admin .card p { margin: 0 0 12px; }
+.admin code { padding: 1px 5px; border-radius: 4px; background: var(--muted); font: 12.5px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.admin textarea.input { display: block; width: 100%; height: auto; min-height: 36rem; padding: 12px; font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; resize: vertical; }
+.admin .row { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-top: 12px; }
+.admin form.inline { display: inline; margin-left: 12px; }
+.admin .list { margin: 0; padding: 0; list-style: none; } .admin .list li { display: flex; align-items: center; padding: 8px 0; border-top: 1px solid var(--border); }
+.admin .list li:first-child { border-top: 0; } .admin .list li form.inline { margin-left: auto; }
+.admin .audit { margin: 0; padding-left: 20px; font-size: 13px; } .admin .audit li { margin: 6px 0; } .admin .audit time { color: var(--muted-foreground); }
+.alert { margin: 0 0 16px; padding: 10px 12px; border: 1px solid var(--border); border-radius: calc(var(--radius) - 2px); font-size: 14px; }
+.alert.warning { border-color: color-mix(in oklab, var(--warning) 55%, var(--border)); background: color-mix(in oklab, var(--warning) 8%, var(--card)); }
+`
 
 /** Minimal no-JS management shell; API clients use the same underlying operations. */
 export function adminPage(opts: { viewer: Viewer; csrf: string; config: unknown; configText?: string; audit: AuditEntry[]; monitorIds: string[]; sinkNames: string[]; installedVersion: string; update: StoredUpdateCheck | { result: 'disabled'; targetVersion: null; checkedAt: null }; message?: string }): string {
@@ -22,20 +39,24 @@ export function adminPage(opts: { viewer: Viewer; csrf: string; config: unknown;
         : update.result === 'failed'
           ? 'The signed update manifest could not be checked or verified. No update is being offered.'
           : 'This installation is up to date.'
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>StatusPing administration</title><style>
-body{font:16px system-ui,sans-serif;max-width:980px;margin:3rem auto;padding:0 1rem;color:#18212f;background:#fff;color-scheme:light}textarea{box-sizing:border-box;width:100%;min-height:36rem;font:13px ui-monospace,monospace}button{background:#1769e0;color:white;border:0;border-radius:4px;padding:.65rem 1rem;font-weight:600}code{background:#eef2f7;padding:.1rem .25rem}.note{background:#fff7df;padding:1rem;border-left:4px solid #d89a00}li{margin:.5rem 0}</style></head><body>
-<nav><a href="/">Status page</a> · Signed in as ${escape(opts.viewer.email)} · <a href="/auth/logout">Sign out</a></nav>
-<h1>Administration</h1>${opts.message ? `<p class="note">${escape(opts.message)}</p>` : ''}
-<h2>Updates</h2><p>Installed version <code>v${escape(opts.installedVersion)}</code>. ${updateDetail}</p><p>${lastChecked} ${update.result !== 'disabled' ? `<form style="display:inline" method="post" action="/admin/updates/check"><input type="hidden" name="csrf" value="${escape(opts.csrf)}"><button type="submit">Check for updates</button></form>` : ''}</p>
-<p class="note">Edit or import YAML. Secret values are never stored or shown here; use <code>$env: NAME</code> references. Credential-bearing headers and URLs remain config-as-code only.</p>
-<h2>Monitors, pages, access, and alert channels</h2>
-<form method="post" action="/admin/config"><input type="hidden" name="csrf" value="${escape(opts.csrf)}"><p><label>Import a YAML file <input id="config-file" type="file" accept=".yaml,.yml,text/yaml,application/yaml"></label></p><textarea id="config" name="config" aria-label="StatusPing YAML configuration" spellcheck="false">${escape(config)}</textarea><p><button type="submit">Validate and save configuration</button></p></form>
-<h2>Alert channels</h2><p>Send a single test alert to verify a configured channel.</p>${opts.sinkNames.length ? `<ul>${opts.sinkNames.map((name) => `<li><code>${escape(name)}</code> <form style="display:inline" method="post" action="/admin/sinks/${encodeURIComponent(name)}/test"><input type="hidden" name="csrf" value="${escape(opts.csrf)}"><button type="submit">Send test</button></form></li>`).join('')}</ul>` : '<p>No alert channels are configured.</p>'}
-<h2>Ping tokens</h2><p>Rotating a token invalidates its predecessor. The new token is displayed once and is never placed in the audit log.</p>${opts.monitorIds.length ? `<ul>${opts.monitorIds.map((id) => `<li><code>${escape(id)}</code> <form style="display:inline" method="post" action="/admin/ping-tokens/${encodeURIComponent(id)}/rotate"><input type="hidden" name="csrf" value="${escape(opts.csrf)}"><button type="submit">Generate / rotate</button></form></li>`).join('')}</ul>` : '<p>No push monitors are configured.</p>'}
-<h2>Audit log</h2><ol>${audit}</ol><script>document.getElementById('config-file').addEventListener('change',function(){const f=this.files&&this.files[0];if(!f)return;if(f.size>262144){alert('Configuration files must be 256 KB or smaller.');this.value='';return}const r=new FileReader();r.onload=()=>{document.getElementById('config').value=String(r.result||'')};r.readAsText(f)})</script></body></html>`
+  const csrf = `<input type="hidden" name="csrf" value="${escape(opts.csrf)}">`
+  const inlineButton = (action: string, label: string) => `<form class="inline" method="post" action="${action}">${csrf}<button class="btn-outline" type="submit">${label}</button></form>`
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex"><title>StatusPing administration</title><style>${STYLES}${ADMIN_STYLES}</style></head><body>
+<header class="site-header"><div class="wrap site-header-inner"><a class="admin-brand" href="/">Status page</a><div class="account"><span class="muted small account-email">Signed in as ${escape(opts.viewer.email)}</span><a class="btn-outline" href="/auth/logout">Sign out</a></div></div></header>
+<main class="wrap admin">
+<div class="head"><h1>Administration</h1></div>${opts.message ? `<p class="alert" role="status">${escape(opts.message)}</p>` : ''}
+<section class="card"><h2>Updates</h2><p>Installed version <code>v${escape(opts.installedVersion)}</code>. ${updateDetail}</p><div class="row"><span class="muted">${lastChecked}</span>${update.result !== 'disabled' ? inlineButton('/admin/updates/check', 'Check for updates') : ''}</div></section>
+<section class="card"><h2>Monitors, pages, access, and alert channels</h2>
+<p class="alert warning">Edit or import YAML. Secret values are never stored or shown here; use <code>$env: NAME</code> references. Credential-bearing headers and URLs remain config-as-code only.</p>
+<form method="post" action="/admin/config">${csrf}<p><label class="muted">Import a YAML file <input id="config-file" type="file" accept=".yaml,.yml,text/yaml,application/yaml"></label></p><textarea class="input" id="config" name="config" aria-label="StatusPing YAML configuration" spellcheck="false">${escape(config)}</textarea><div class="row"><button class="btn-primary" type="submit">Validate and save configuration</button></div></form></section>
+<section class="card"><h2>Alert channels</h2><p class="muted">Send a single test alert to verify a configured channel.</p>${opts.sinkNames.length ? `<ul class="list">${opts.sinkNames.map((name) => `<li><code>${escape(name)}</code>${inlineButton(`/admin/sinks/${encodeURIComponent(name)}/test`, 'Send test')}</li>`).join('')}</ul>` : '<p class="muted">No alert channels are configured.</p>'}</section>
+<section class="card"><h2>Ping tokens</h2><p class="muted">Rotating a token invalidates its predecessor. The new token is displayed once and is never placed in the audit log.</p>${opts.monitorIds.length ? `<ul class="list">${opts.monitorIds.map((id) => `<li><code>${escape(id)}</code>${inlineButton(`/admin/ping-tokens/${encodeURIComponent(id)}/rotate`, 'Generate / rotate')}</li>`).join('')}</ul>` : '<p class="muted">No push monitors are configured.</p>'}</section>
+<section class="card"><h2>Audit log</h2><ol class="audit">${audit}</ol></section>
+</main><script>document.getElementById('config-file').addEventListener('change',function(){const f=this.files&&this.files[0];if(!f)return;if(f.size>262144){alert('Configuration files must be 256 KB or smaller.');this.value='';return}const r=new FileReader();r.onload=()=>{document.getElementById('config').value=String(r.result||'')};r.readAsText(f)})</script></body></html>`
 }
 
 export function pingTokenPage(monitorId: string, token: string): string {
-  return `<!doctype html><meta charset="utf-8"><title>New ping token</title><h1>Copy this ping token now</h1><p>This value will not be shown again. Rotating it invalidates the prior token.</p><pre>${escape(token)}</pre><p>Use it as <code>/ping/${escape(token)}</code> for monitor <strong>${escape(monitorId)}</strong>.</p>`
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex"><title>New ping token</title><style>${STYLES}${ADMIN_STYLES}</style></head><body>
+<header class="site-header"><div class="wrap site-header-inner"><a class="admin-brand" href="/admin">← Administration</a></div></header>
+<main class="wrap admin"><section class="card"><h2>Copy this ping token now</h2><p class="alert warning">This value will not be shown again. Rotating it invalidates the prior token.</p><pre>${escape(token)}</pre><p>Use it as <code>/ping/${escape(token)}</code> for monitor <strong>${escape(monitorId)}</strong>.</p></section></main></body></html>`
 }
-
