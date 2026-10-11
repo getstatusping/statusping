@@ -93,11 +93,6 @@ const field = (label: string, input: string, hint = '') => {
   return `<div class="field"><label${id ? ` for="${id}"` : ''}>${label}</label>${input}</div>${hint ? `<p class="hint">${hint}</p>` : ''}`
 }
 
-/** Shown on every public route while the instance is being set up. */
-export function setupModePage(): string {
-  return shell('Being set up', null, new Set(), `<h1>This StatusPing site is being set up</h1><p class="lead">Monitoring starts once the owner finishes setup.</p><div class="actions"><a class="btn-primary" href="/setup">Continue setup</a></div>`)
-}
-
 export function claimPage(opts: { usesEnvToken: boolean; error?: string; note?: string }): string {
   const where = opts.usesEnvToken
     ? '<p>Enter the value of the <code>STATUSPING_SETUP_TOKEN</code> secret you set for this deployment.</p>'

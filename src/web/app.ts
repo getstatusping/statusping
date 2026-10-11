@@ -22,7 +22,6 @@ import { confirmSubscription, consumeSubscribeLimit, dispatchSubscriberOutbox, e
 import { refreshAdminConfig } from '../deps.ts'
 import { mountAdminRoutes } from '../admin/routes.ts'
 import { mountSetupAuthRoutes, mountSetupRoutes, SETUP_AUTH_PATHS } from '../setup/routes.ts'
-import { setupModePage } from '../setup/ui.ts'
 import { consumePingRateLimit } from '../rate-limit.ts'
 import { runHttpCheck } from '../evaluate/http.ts'
 import { runTcpCheck } from '../evaluate/tcp.ts'
@@ -83,9 +82,16 @@ export function createApp(deps: Deps): Hono {
   app.use('*', async (c, next) => {
     await ensureSchema(deps.db)
     await refreshAdminConfig(deps, nowSeconds())
-    // Setup mode: only the health check and the wizard respond until setup is finished.
+    // Setup mode: only the health check and the wizard respond until setup is finished. Page
+    // visits (most likely the owner) go straight to the wizard; pings and API calls get a 503.
     if (deps.setupPending && c.req.path !== '/healthz' && c.req.path !== '/setup' && !c.req.path.startsWith('/setup/') && !SETUP_AUTH_PATHS.includes(c.req.path)) {
-      return c.html(setupModePage(), 503, { 'cache-control': 'no-store', 'x-robots-tag': 'noindex', 'retry-after': '60' })
+      const page = (c.req.method === 'GET' || c.req.method === 'HEAD') && !c.req.path.startsWith('/ping/') && !c.req.path.startsWith('/api/')
+      if (page) {
+        const res = c.redirect('/setup', 302)
+        res.headers.set('cache-control', 'no-store')
+        return res
+      }
+      return c.text('This StatusPing site is being set up.', 503, { 'cache-control': 'no-store', 'x-robots-tag': 'noindex', 'retry-after': '60' })
     }
     config = deps.config
     hasRestricted = config.pages.some((p) => p.access !== 'public') || Boolean(config.access?.admins)

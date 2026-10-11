@@ -68,9 +68,11 @@ describe('first-run setup wizard and reset', () => {
 
     // Setup mode: public routes show the setup page, /healthz stays 200, ticks run no checks.
     const home = await b.get('/')
-    expect(home.res.status).toBe(503)
-    expect(home.body).toContain('This StatusPing site is being set up')
+    expect(home.res.status).toBe(302)
+    expect(home.res.headers.get('location')).toBe('/setup')
+    expect((await b.get('/admin')).res.headers.get('location')).toBe('/setup')
     expect((await b.get(`/ping/${TEST_TOKENS.heartbeat}`)).res.status).toBe(503)
+    expect((await b.post('/auth/login', { email: 'x@example.test', password: 'x' })).res.status).toBe(503)
     expect(await (await app.request(`${ORIGIN}/healthz`)).json()).toMatchObject({ ok: true, setup: 'required' })
     const summary = await tick(deps, Date.parse('2026-10-11T00:00:00Z'))
     expect(summary.checks).toBe(0)
@@ -189,7 +191,7 @@ describe('first-run setup wizard and reset', () => {
     expect(status.body).not.toContain('Monitoring may be stalled')
 
     await browser(app).post('/setup/reset', { token: RESET_TOKEN, confirm: 'reset' })
-    expect((await b.get('/admin')).res.status).toBe(503)
+    expect((await b.get('/admin')).res.headers.get('location')).toBe('/setup')
     const row = await db.first<{ previous_config_json: string }>(`SELECT previous_config_json FROM setup_state WHERE id = 1`)
     expect(JSON.parse(row!.previous_config_json)).toMatchObject({ title: 'First' })
     expect(await db.first(`SELECT * FROM local_users`)).toBeNull()
