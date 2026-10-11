@@ -126,7 +126,7 @@ describe('admin secure configuration', () => {
     expect(pageText).toContain('<h1>General</h1>')
     expect(pageText).toContain('Installed version')
     expect(pageText).toContain('Update checks are off.')
-    for (const section of ['/admin/monitors', '/admin/pages', '/admin/channels', '/admin/access', '/admin/import', '/admin/export', '/admin/activity']) {
+    for (const section of ['/admin/monitors', '/admin/pages', '/admin/channels', '/admin/access', '/admin/configuration', '/admin/activity']) {
       expect(pageText).toContain(`href="${section}"`)
       expect((await app.request(section, { headers: { cookie } })).status).toBe(200)
     }

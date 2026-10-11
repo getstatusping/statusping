@@ -1,3 +1,4 @@
+import { APP_VERSION } from '../version.ts'
 import { html, raw } from 'hono/html'
 import type { Viewer } from '../auth/viewer.ts'
 import type { DetailField, Monitor, NormalizedPage } from '../config.ts'
@@ -86,7 +87,7 @@ function siteHeader(c: Chrome): Html {
 function siteFooter(c: Chrome): Html {
   return html`<footer class="wrap foot">
   <div class="foot-info">${timesNote(c.timezone, c.lastTickAt, c.now)}</div>
-  <div class="foot-brand">Powered by <a href="https://statusp.ing">StatusPing</a></div>
+  <div class="foot-brand">Powered by <a href="https://statusp.ing">StatusPing</a> <a class="muted" href="https://github.com/getstatusping/statusping/releases/tag/v${APP_VERSION}">v${APP_VERSION}</a></div>
 </footer>`
 }
 

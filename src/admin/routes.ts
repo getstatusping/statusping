@@ -10,7 +10,7 @@ import {
   removeMonitor, removePage, removeSink, SINK_FIELDS, sinkEnvName, sinkFromForm, type SinkType, text,
 } from './forms.ts'
 import {
-  accessPage, activityPage, channelForm, channelsPage, exportPage, generalPage, importPage, importPreview, monitorForm, monitorsPage,
+  accessPage, activityPage, channelForm, channelsPage, generalPage, configurationPage, importPreview, monitorForm, monitorsPage,
   pageForm, pagesPage, pingUrlPage, type SecretSource,
 } from './ui.ts'
 import { appendAudit, listAudit, loadAdminConfig, rotatePingToken, saveAdminConfig, sendSinkTest } from './service.ts'
@@ -40,6 +40,8 @@ const NOTICES: Record<string, string> = {
   'test-sent': 'Test alert sent.',
   'admins-saved': 'Administrators saved.',
   imported: 'Configuration imported.',
+  'updates-saved': 'Update checks saved.',
+  'home-saved': 'Home page changed.',
   'update-available': 'A new version is available.',
   'update-current': 'This installation is up to date.',
   'update-incompatible': 'A newer version is available but cannot be applied directly.',
@@ -155,13 +157,21 @@ export function mountAdminRoutes(app: Hono, deps: Deps): void {
     try { const url = new URL(baseUrl); if (!['https:', 'http:'].includes(url.protocol)) error = 'The address must start with https://.' } catch { error = 'Enter the site address, such as https://status.example.com.' }
     if (!title) error = 'Enter a site title.'
     else if (!isValidTimeZone(timezone)) error = `"${timezone}" is not a recognised timezone.`
-    const updates = text(p.form, 'updates') === '1'
     const next: AdminConfig = { ...p.config, title, baseUrl, timezone }
-    if (updates) next.updates = { ...(p.config.updates ?? {}), enabled: true }
-    else delete next.updates
     error ??= (await save(p.viewer, next)) ?? undefined
     if (error) return general(c, { ...p, config: next }, error, 400)
     return done(c, '/admin', 'general-saved')
+  })
+
+  app.post('/admin/updates', async (c) => {
+    const p = await post(c)
+    if (p instanceof Response) return p
+    const next: AdminConfig = { ...p.config }
+    if (text(p.form, 'updates') === '1') next.updates = { ...(p.config.updates ?? {}), enabled: true }
+    else delete next.updates
+    const error = await save(p.viewer, next)
+    if (error) return general(c, p, error, 400)
+    return done(c, '/admin', 'updates-saved')
   })
 
   app.post('/admin/updates/check', async (c) => {
@@ -254,13 +264,13 @@ export function mountAdminRoutes(app: Hono, deps: Deps): void {
   app.get('/admin/pages', async (c) => {
     const v = await view(c)
     if (v instanceof Response) return v
-    return html(c, pagesPage({ viewer: v.viewer, pages: pageList(v.config), home: v.config.home ?? pageList(v.config)[0]?.slug, notice: v.notice }))
+    return html(c, pagesPage({ viewer: v.viewer, csrf: v.csrf, pages: pageList(v.config), home: v.config.home ?? pageList(v.config)[0]?.slug, notice: v.notice }))
   })
 
   app.get('/admin/pages/new', async (c) => {
     const v = await view(c)
     if (v instanceof Response) return v
-    return html(c, pageForm({ viewer: v.viewer, csrf: v.csrf, isHome: false, monitors: monitorChoices(v.config) }))
+    return html(c, pageForm({ viewer: v.viewer, csrf: v.csrf, monitors: monitorChoices(v.config) }))
   })
 
   const savePage = async (c: Context, existing: PageInput | undefined) => {
@@ -270,13 +280,11 @@ export function mountAdminRoutes(app: Hono, deps: Deps): void {
     try {
       const page = pageFromForm(p.form, existing, new Set(pageList(p.config).map((x) => x.slug)))
       const next = putPage(p.config, page)
-      if (text(p.form, 'home') === '1') next.home = page.slug
       const result = await save(p.viewer, next)
       if (!result) return done(c, '/admin/pages', existing ? 'page-saved' : 'page-added')
       error = result
     } catch (e) { if (!(e instanceof FormError)) throw e; error = e.message }
-    const home = (p.config.home ?? pageList(p.config)[0]?.slug) === existing?.slug
-    return html(c, pageForm({ viewer: p.viewer, csrf: p.csrf, page: existing, isHome: home, monitors: monitorChoices(p.config), values: formValues(p.form), error }), 400)
+    return html(c, pageForm({ viewer: p.viewer, csrf: p.csrf, page: existing, monitors: monitorChoices(p.config), values: formValues(p.form), error }), 400)
   }
 
   app.post('/admin/pages/new', (c) => savePage(c, undefined))
@@ -286,7 +294,7 @@ export function mountAdminRoutes(app: Hono, deps: Deps): void {
     if (v instanceof Response) return v
     const page = pageList(v.config).find((x) => x.slug === c.req.param('slug'))
     if (!page) return notFound(c)
-    return html(c, pageForm({ viewer: v.viewer, csrf: v.csrf, page, isHome: (v.config.home ?? pageList(v.config)[0]?.slug) === page.slug, monitors: monitorChoices(v.config) }))
+    return html(c, pageForm({ viewer: v.viewer, csrf: v.csrf, page, monitors: monitorChoices(v.config) }))
   })
 
   app.post('/admin/pages/:slug', async (c) => {
@@ -294,12 +302,22 @@ export function mountAdminRoutes(app: Hono, deps: Deps): void {
     return page ? savePage(c, page) : notFound(c)
   })
 
+  app.post('/admin/pages/:slug/home', async (c) => {
+    const p = await post(c)
+    if (p instanceof Response) return p
+    const slug = c.req.param('slug')
+    if (!pageList(p.config).some((x) => x.slug === slug)) return notFound(c)
+    const error = await save(p.viewer, { ...p.config, home: slug })
+    if (error) return html(c, pagesPage({ viewer: p.viewer, csrf: p.csrf, pages: pageList(p.config), home: p.config.home, error }), 400)
+    return done(c, '/admin/pages', 'home-saved')
+  })
+
   app.post('/admin/pages/:slug/delete', async (c) => {
     const p = await post(c)
     if (p instanceof Response) return p
     let error: string | null
     try { error = await save(p.viewer, removePage(p.config, c.req.param('slug'))) } catch (e) { if (!(e instanceof FormError)) throw e; error = e.message }
-    if (error) return html(c, pagesPage({ viewer: p.viewer, pages: pageList(p.config), home: p.config.home, error }), 400)
+    if (error) return html(c, pagesPage({ viewer: p.viewer, csrf: p.csrf, pages: pageList(p.config), home: p.config.home, error }), 400)
     return done(c, '/admin/pages', 'page-deleted')
   })
 
@@ -429,11 +447,16 @@ export function mountAdminRoutes(app: Hono, deps: Deps): void {
     return next
   }
 
-  app.get('/admin/import', async (c) => {
+  const configuration = (c: Context, v: { viewer: Viewer; csrf: string; config: AdminConfig; notice?: string }, importYaml?: string, error?: string) =>
+    html(c, configurationPage({ viewer: v.viewer, csrf: v.csrf, yaml: stringifyAdminYaml(v.config), importYaml, error, notice: v.notice }), error ? 400 : 200)
+
+  app.get('/admin/configuration', async (c) => {
     const v = await view(c)
-    if (v instanceof Response) return v
-    return html(c, importPage({ viewer: v.viewer, csrf: v.csrf }))
+    return v instanceof Response ? v : configuration(c, v)
   })
+  // Import and Export were separate pages before v0.2.15.
+  app.get('/admin/import', (c) => c.redirect('/admin/configuration#import', 302))
+  app.get('/admin/export', (c) => c.redirect('/admin/configuration', 302))
 
   app.post('/admin/import', async (c) => {
     const p = await post(c)
@@ -449,7 +472,7 @@ export function mountAdminRoutes(app: Hono, deps: Deps): void {
       }
       return html(c, importPreview({ viewer: p.viewer, csrf: p.csrf, yaml, changes }))
     } catch (error) {
-      return html(c, importPage({ viewer: p.viewer, csrf: p.csrf, yaml, error: (error as Error).message }), 400)
+      return configuration(c, p, yaml, (error as Error).message)
     }
   })
 
@@ -459,14 +482,8 @@ export function mountAdminRoutes(app: Hono, deps: Deps): void {
     const yaml = text(p.form, 'config')
     let error: string | null
     try { error = await save(p.viewer, parseImport(yaml, p.config)) } catch (e) { error = (e as Error).message }
-    if (error) return html(c, importPage({ viewer: p.viewer, csrf: p.csrf, yaml, error }), 400)
-    return done(c, '/admin', 'imported')
-  })
-
-  app.get('/admin/export', async (c) => {
-    const v = await view(c)
-    if (v instanceof Response) return v
-    return html(c, exportPage({ viewer: v.viewer, yaml: stringifyAdminYaml(v.config) }))
+    if (error) return configuration(c, p, yaml, error)
+    return done(c, '/admin/configuration', 'imported')
   })
 
   app.get('/admin/export/statusping.yaml', async (c) => {

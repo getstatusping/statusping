@@ -4,6 +4,7 @@ import { loadAdminConfig } from '../src/admin/service.ts'
 import { parseAdminYaml, stringifyAdminYaml } from '../src/admin/yaml.ts'
 import { createApp } from '../src/web/app.ts'
 import { tick } from '../src/tick.ts'
+import { APP_VERSION } from '../src/version.ts'
 import { createTestDb, type FetchCall, fakeFetch, makeDeps, testConfig } from './helpers.ts'
 
 const ORIGIN = 'https://status.test'
@@ -86,11 +87,13 @@ describe('admin Settings pages', () => {
     const { b, db } = await signedIn()
     await b.get('/admin/pages/new')
     expect((await b.post('/admin/pages/new', { title: 'Ops', visibility: 'private', emails: '', show: 'all' })).body).toContain('List at least one email')
-    await b.post('/admin/pages/new', { title: 'Ops', visibility: 'private', emails: 'ops@example.test\n*@example.test', show: 'all', home: '1' })
+    await b.post('/admin/pages/new', { title: 'Ops', visibility: 'private', emails: 'ops@example.test\n*@example.test', show: 'all' })
+    expect((await b.get('/admin/pages')).body).toContain('action="/admin/pages/ops/home"')
+    expect((await b.post('/admin/pages/ops/home', {})).res.headers.get('location')).toBe('/admin/pages?notice=home-saved')
     const config = await stored(db)
     expect(config.pages!.find((p) => p.slug === 'ops')).toEqual({ slug: 'ops', title: 'Ops', access: { emails: ['ops@example.test', '*@example.test'] }, monitors: ['*'] })
     expect(config.home).toBe('ops')
-    expect((await b.get('/admin/pages')).body).toContain('/ops · home page')
+    expect((await b.get('/admin/pages')).body).toContain('/ops · home page (/)')
   })
 
   it('saves channel credentials write-only, uses them for tests, and erases them on delete', async () => {
@@ -123,12 +126,13 @@ describe('admin Settings pages', () => {
     expect((await b.post('/admin/access', { admins: 'admin@example.test' })).res.headers.get('location')).toBe('/admin/access?notice=admins-saved')
   })
 
-  it('imports with a preview, keeps the sign-in method, and exports YAML', async () => {
+  it('imports with a preview, keeps the sign-in method, and exports YAML from Configuration', async () => {
     const { b, db } = await signedIn()
     const exported = await b.get('/admin/export/statusping.yaml')
     expect(exported.res.headers.get('content-disposition')).toBe('attachment; filename="statusping.yaml"')
     expect(exported.body).toContain('title: Test Status')
-    await b.get('/admin/import')
+    expect((await b.get('/admin/import')).res.headers.get('location')).toBe('/admin/configuration#import')
+    await b.get('/admin/configuration')
     const edited = parseAdminYaml(exported.body) as Record<string, any>
     edited.title = 'Imported'
     edited.access.provider = { type: 'cloudflare-access', teamDomain: 'evil.cloudflareaccess.com', audience: { $env: 'EVIL_AUD' } }
@@ -159,9 +163,24 @@ describe('admin Settings pages', () => {
     expect((await b.get('/admin')).res.headers.get('location')).toBe('/setup')
   })
 
+  it('keeps the update-check switch under Software updates, separate from the site form', async () => {
+    const { b, db } = await signedIn()
+    const general = (await b.get('/admin')).body
+    expect(general.indexOf('name="updates"')).toBeGreaterThan(general.indexOf('<h2>Software updates</h2>'))
+    await b.post('/admin/updates', { updates: '1' })
+    expect((await stored(db)).updates).toEqual({ enabled: true })
+    // Saving the site details leaves update checks alone.
+    await b.post('/admin/general', { title: 'Renamed', baseUrl: ORIGIN, timezone: 'UTC' })
+    expect((await stored(db)).updates).toEqual({ enabled: true })
+    await b.post('/admin/updates', {})
+    expect((await stored(db)).updates).toBeUndefined()
+  })
+
   it('shows a Settings link in the status page header to administrators only', async () => {
     const { b } = await signedIn()
-    expect((await b.get('/')).body).toContain('href="/admin">Settings</a>')
+    const home = (await b.get('/')).body
+    expect(home).toContain('href="/admin">Settings</a>')
+    expect(home).toContain(`StatusPing</a> <a class="muted" href="https://github.com/getstatusping/statusping/releases/tag/v${APP_VERSION}">v${APP_VERSION}</a>`)
     const t = await createTestDb('libsql')
     const anon = createApp(makeDeps(t.db, { config: { ...testConfig(), admin: true } }))
     expect(await (await anon.request('/')).text()).not.toContain('>Settings</a>')
