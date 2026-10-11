@@ -56,7 +56,7 @@ describe('setup wizard: alerts, import, unattended setup, and recovery', () => {
     await b.post('/setup/method', { csrf, method: 'basic' })
     const password = 'owner-password-0123'
     await b.post('/setup/account', { csrf, email: 'owner@example.test', password, confirm: password })
-    await b.post('/setup/basics', { csrf, title: 'Acme', baseUrl: ORIGIN, timezone: 'UTC' })
+    await b.post('/setup/basics', { csrf, title: 'Acme', description: 'Service health for Acme', baseUrl: ORIGIN, timezone: 'UTC' })
     return { b, csrf, password }
   }
 
@@ -83,9 +83,12 @@ describe('setup wizard: alerts, import, unattended setup, and recovery', () => {
     await b.post('/setup/channel/done', { csrf })
     const review = await b.get('/setup')
     expect(review.body).toContain('<dt>Alerts</dt><dd>Slack (slack)</dd>')
+    expect(review.body).toContain('<dt>Description</dt><dd>Service health for Acme</dd>')
     expect((await b.post('/setup/finish', { csrf })).res.status).toBe(303)
     const config = (await loadAdminConfig(db))!.config
     expect(config.sinks).toEqual({ slack: { type: 'slack', webhookUrl: { $env: 'SINK_SLACK_WEBHOOKURL' } } })
+    expect(config.pages![0]).toMatchObject({ slug: 'status', description: 'Service health for Acme' })
+    expect((await b.get('/')).body).toContain('Service health for Acme')
     expect((await b.get('/admin/channels/slack')).body).toContain('✓ Saved. Leave blank to keep it.')
   })
 

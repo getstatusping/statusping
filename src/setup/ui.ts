@@ -256,12 +256,13 @@ ${field('Confirm password', '<input class="input" id="confirm" name="confirm" ty
 <div class="actions"><button class="btn-primary" type="submit">Create account</button><a class="btn-outline" href="/setup?step=method">Back</a></div></form>`)
 }
 
-export function basicsPage(opts: { csrf: string; completed: ReadonlySet<SetupStep>; title: string; baseUrl: string; timezone: string; privatePage: boolean; updates: boolean; error?: string }): string {
+export function basicsPage(opts: { csrf: string; completed: ReadonlySet<SetupStep>; title: string; description?: string; baseUrl: string; timezone: string; privatePage: boolean; updates: boolean; error?: string }): string {
   const workersDev = /\.workers\.dev$/i.test((() => { try { return new URL(opts.baseUrl).hostname } catch { return '' } })())
   return shell('Site basics', 'basics', opts.completed, `<h1>Describe your site</h1>
 <p class="lead">You can change any of this later in the admin.</p>${alert(opts.error)}
 <form class="setup-form" method="post" action="/setup/basics">${hidden(opts.csrf)}
 ${field('Title', `<input class="input" id="title" name="title" type="text" value="${escape(opts.title)}" maxlength="80" required>`)}
+${field('Description (optional)', `<input class="input" id="description" name="description" type="text" value="${escape(opts.description ?? '')}" maxlength="300">`, 'Shown under the title on your status page.')}
 ${field('Base URL', `<input class="input" id="baseUrl" name="baseUrl" type="url" value="${escape(opts.baseUrl)}" required>`, 'Used in alert links, ping URLs and sign-in callbacks.')}
 ${workersDev ? '<p class="alert warning">This is a <code>workers.dev</code> address. If you add a custom domain later, update the base URL in the YAML admin.</p>' : ''}
 ${field('Timezone', timezoneSelect('timezone', opts.timezone, 'required'), 'Used for times on your status pages and for scheduled jobs.')}

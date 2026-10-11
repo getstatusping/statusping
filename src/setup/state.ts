@@ -27,6 +27,7 @@ export interface SetupDraft {
   /** Accept emails the provider has not verified (self-hosted providers only). */
   trustUnverifiedEmail?: boolean
   title?: string
+  description?: string
   baseUrl?: string
   timezone?: string
   privatePage?: boolean

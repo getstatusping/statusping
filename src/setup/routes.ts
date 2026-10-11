@@ -120,6 +120,7 @@ export function draftSummary(draft: SetupDraft): Array<[string, string]> {
   return [
     ...(imported ? [['Imported configuration', importSummary(imported)] as [string, string]] : []),
     ['Site title', draft.title ?? ''],
+    ...(draft.description ? [['Description', draft.description] as [string, string]] : []),
     ['Address', draft.baseUrl ?? ''],
     ['Timezone', draft.timezone ?? ''],
     ['Administrator', draft.email ?? ''],
@@ -151,6 +152,7 @@ export function draftConfig(draft: SetupDraft): AdminConfig {
       ...imported,
       admin: true,
       title: draft.title!,
+      ...(draft.description ? { description: draft.description } : {}),
       baseUrl: draft.baseUrl!,
       timezone: draft.timezone!,
       access: { ...(imported.access ?? {}), provider: draftProvider(draft), admins: { ...(admins ?? {}), emails: [...new Set([email, ...(admins?.emails ?? [])])] } },
@@ -161,11 +163,12 @@ export function draftConfig(draft: SetupDraft): AdminConfig {
   return {
     admin: true,
     title: draft.title!,
+    ...(draft.description ? { description: draft.description } : {}),
     baseUrl: draft.baseUrl!,
     timezone: draft.timezone!,
     access: { provider: draftProvider(draft), admins: { emails: [email] } },
     groups: monitors.length ? [{ name: 'Services', monitors }] : [],
-    pages: [{ slug: 'status', title: draft.title!, access: draft.privatePage ? { emails: [email] } : 'public', monitors: monitors.map((m) => m.id) }],
+    pages: [{ slug: 'status', title: draft.title!, ...(draft.description ? { description: draft.description } : {}), access: draft.privatePage ? { emails: [email] } : 'public', monitors: monitors.map((m) => m.id) }],
     home: 'status',
     ...(draft.channel ? { sinks: { [draft.channel.name]: draft.channel.sink } } : {}),
     ...(draft.updates ? { updates: { enabled: true } } : {}),
@@ -289,7 +292,7 @@ export function mountSetupRoutes(app: Hono, deps: Deps): void {
     switch (step) {
       case 'method': return html(c, methodPage({ csrf, completed, current: draft.method }))
       case 'account': return html(c, accountPage({ csrf, completed, email: draft.email }))
-      case 'basics': return html(c, basicsPage({ csrf, completed, title: draft.title ?? 'Status', baseUrl: draft.baseUrl ?? origin, timezone: draft.timezone ?? 'UTC', privatePage: draft.privatePage ?? true, updates: draft.updates ?? true }))
+      case 'basics': return html(c, basicsPage({ csrf, completed, title: draft.title ?? 'Status', description: draft.description, baseUrl: draft.baseUrl ?? origin, timezone: draft.timezone ?? 'UTC', privatePage: draft.privatePage ?? true, updates: draft.updates ?? true }))
       case 'monitor': {
         const saved = draft.monitor ?? undefined
         const kind = (['http', 'push', 'tcp'] as const).find((k) => k === c.req.query('kind')) ?? saved?.kind ?? 'http'
@@ -474,6 +477,7 @@ export function mountSetupRoutes(app: Hono, deps: Deps): void {
     if ('response' in r) return r.response
     if (!r.state.draft.verified) return c.redirect('/setup', 303)
     const title = field(r.form, 'title').slice(0, 80)
+    const description = field(r.form, 'description').slice(0, 300)
     const baseUrl = field(r.form, 'baseUrl').replace(/\/+$/, '')
     const timezone = field(r.form, 'timezone')
     const privatePage = field(r.form, 'privatePage') === '1'
@@ -487,8 +491,8 @@ export function mountSetupRoutes(app: Hono, deps: Deps): void {
     } catch { error = 'Enter the site address, such as https://status.example.com.' }
     if (!title) error = 'Enter a title.'
     else if (!isValidTimeZone(timezone)) error = `"${timezone}" is not a recognised timezone.`
-    if (error) return html(c, basicsPage({ csrf: r.csrf, completed: new Set(['claim', 'method', 'account']), title, baseUrl, timezone, privatePage, updates, error }), 400)
-    await saveDraft(deps.db, { ...r.state.draft, title, baseUrl, timezone, privatePage, updates }, nowSeconds())
+    if (error) return html(c, basicsPage({ csrf: r.csrf, completed: new Set(['claim', 'method', 'account']), title, description, baseUrl, timezone, privatePage, updates, error }), 400)
+    await saveDraft(deps.db, { ...r.state.draft, title, description: description || undefined, baseUrl, timezone, privatePage, updates }, nowSeconds())
     return c.redirect('/setup', 303)
   })
 
