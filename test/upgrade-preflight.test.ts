@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import marker from '../statusping.release.json' with { type: 'json' }
+import releaseMarker from '../statusping.release.json' with { type: 'json' }
 import { calculateUpgradePreflight, preserveMarkedRegion, TemplateMarkerError, validateTemplateMarker } from '../src/upgrade-preflight.ts'
 
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T
+// The real ownership contract, pinned to fixed versions so releases don't break these tests.
+const marker = { ...clone(releaseMarker), release: '0.1.0', template: '0.1.0' }
 const newerMarker = () => {
   const value = clone(marker)
   value.release = '0.2.0'
