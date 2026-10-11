@@ -120,6 +120,8 @@ describe('admin secure configuration', () => {
     expect(page.status).toBe(200)
     const pageText = await page.text()
     expect(pageText).toContain('Administration')
+    expect(pageText).toContain('Installed version')
+    expect(pageText).toContain('Checks are disabled')
     expect(pageText).toContain('Import a YAML file')
     expect(pageText).toContain('StatusPing YAML configuration')
     expect(pageText).toContain('Generate / rotate')
@@ -140,6 +142,14 @@ describe('admin secure configuration', () => {
     expect(yamlUpdate.status).toBe(303)
     const yamlSaved = await app.request('/api/admin/config', { headers: { authorization: 'Bearer admin-api-token' } })
     expect((await yamlSaved.json() as { config: { title: string } }).config.title).toBe('Changed from YAML')
+    const updatePage = await app.request('/admin', { headers: { cookie } })
+    const updateCsrf = (await updatePage.text()).match(/name="csrf" value="([^"]+)"/)?.[1]
+    const updateCheck = await app.request('/admin/updates/check', {
+      method: 'POST',
+      headers: { cookie, origin: 'http://localhost', 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ csrf: updateCsrf! }).toString(),
+    })
+    expect(updateCheck.status).toBe(303)
     // A management client can safely round-trip a config: it sees env names, never values.
     const unchanged = await app.request('/api/admin/config', { method: 'PUT', headers: { authorization: 'Bearer admin-api-token', 'content-type': 'application/json' }, body: JSON.stringify(apiBody.config) })
     expect(unchanged.status).toBe(200)

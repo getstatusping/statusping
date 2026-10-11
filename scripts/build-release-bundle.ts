@@ -1,5 +1,5 @@
 /** Build a checksummed, config-only Cloudflare Worker release artifact. */
-import { createHash } from 'node:crypto'
+import { createHash, createPrivateKey, sign } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { cp, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
 import packageJson from '../package.json' with { type: 'json' }
 import { MIGRATIONS } from '../src/schema.ts'
+import { canonicalJson } from '../src/updates.ts'
 
 const appRoot = dirname(dirname(fileURLToPath(import.meta.url)))
 const workspaceRoot = dirname(dirname(appRoot))
@@ -47,7 +48,7 @@ function releasedAt(): string {
  */
 function assertNoBuildSecrets(files: Record<string, Uint8Array>) {
   const candidates = Object.entries(process.env).filter(([name, value]) =>
-    /(?:secret|token|password|api[_-]?key|credential|private[_-]?key)/i.test(name) && (value?.length ?? 0) >= 8,
+    /(?:secret|token|password|api[_-]?key|credential|private[_-]?key|signing[_-]?key)/i.test(name) && (value?.length ?? 0) >= 8,
   ) as [string, string][]
   for (const [name, value] of candidates) {
     for (const [file, bytes] of Object.entries(files)) {
@@ -122,7 +123,7 @@ async function main() {
     const bytes = artifactContents[name]!
     return { sha256: sha256(bytes), bytes: bytes.byteLength }
   }
-  const updateManifest = {
+  const updateManifest: Record<string, unknown> = {
     format: 'statusping-update-manifest/v1',
     version,
     channel: 'stable',
@@ -144,6 +145,16 @@ async function main() {
     },
     notesUrl: `https://github.com/getstatusping/statusping/releases/tag/v${version}`,
     breaking: false,
+  }
+  // Signing is deliberately release-job-only. The public key is configured by an
+  // operator on instances that opt into update checks; no private key enters this
+  // repository or a public bundle. An unsigned local artifact remains useful for
+  // deployment testing, but the in-app checker will refuse to offer it.
+  const signingKey = process.env.STATUSPING_RELEASE_SIGNING_KEY
+  if (signingKey) {
+    const key = createPrivateKey({ key: Buffer.from(signingKey, 'base64'), format: 'der', type: 'pkcs8' })
+    const signature = sign(null, Buffer.from(canonicalJson(updateManifest)), key).toString('base64')
+    updateManifest.signature = { algorithm: 'Ed25519', value: signature }
   }
   artifactContents['update-manifest.json'] = Buffer.from(`${JSON.stringify(updateManifest, null, 2)}\n`)
   await writeFile(join(stagingDir, 'update-manifest.json'), artifactContents['update-manifest.json']!)

@@ -311,6 +311,14 @@ export interface StatusPingConfig {
   }
   /** Enable the database-backed browser admin. Off by default: config-as-code remains authoritative. */
   admin?: boolean
+  /** Opt-in, signed release-manifest checks shown only to authenticated administrators. */
+  updates?: {
+    enabled?: boolean
+    /** HTTPS URL of the immutable StatusPing release manifest. */
+    manifestUrl?: string
+    /** Base64-encoded 32-byte Ed25519 public key used to verify the manifest signature. */
+    publicKey?: string
+  }
 }
 
 export function defineConfig(config: StatusPingConfig): StatusPingConfig {
@@ -478,6 +486,7 @@ export interface NormalizedConfig {
   pages: NormalizedPage[]
   home: string | null
   maintenance: NormalizedMaintenance[]
+  updates: { enabled: boolean; manifestUrl: string | null; publicKey: string | null }
 }
 
 export class ConfigError extends Error {
@@ -607,6 +616,36 @@ export function normalizeConfig(config: StatusPingConfig): NormalizedConfig {
     new URL(config.baseUrl)
   } catch {
     problems.push(`baseUrl: "${config.baseUrl}" is not a valid URL`)
+  }
+  let updates: NormalizedConfig['updates'] = { enabled: false, manifestUrl: null, publicKey: null }
+  if (config.updates !== undefined) {
+    const input = config.updates
+    if (!input || typeof input !== 'object' || Array.isArray(input)) {
+      problems.push('updates: must be an object')
+    } else {
+      const enabled = input.enabled ?? false
+      if (typeof enabled !== 'boolean') problems.push('updates.enabled: must be a boolean')
+      const manifestUrl = input.manifestUrl
+      const publicKey = input.publicKey
+      if (manifestUrl !== undefined && typeof manifestUrl !== 'string') problems.push('updates.manifestUrl: must be a string')
+      if (publicKey !== undefined && typeof publicKey !== 'string') problems.push('updates.publicKey: must be a base64 Ed25519 public key')
+      if (typeof manifestUrl === 'string') {
+        try {
+          const url = new URL(manifestUrl)
+          if (url.protocol !== 'https:' || url.username || url.password) problems.push('updates.manifestUrl: must be an HTTPS URL without credentials')
+        } catch { problems.push('updates.manifestUrl: must be a valid HTTPS URL') }
+      }
+      let keyIsValid = false
+      if (typeof publicKey === 'string') {
+        try { keyIsValid = Uint8Array.from(atob(publicKey), (char) => char.charCodeAt(0)).byteLength === 32 } catch { /* report below */ }
+        if (!keyIsValid) problems.push('updates.publicKey: must be a base64-encoded 32-byte Ed25519 public key')
+      }
+      if (enabled === true && typeof manifestUrl !== 'string') problems.push('updates.manifestUrl: is required when update checks are enabled')
+      if (enabled === true && !keyIsValid) problems.push('updates.publicKey: is required when update checks are enabled')
+      if (typeof enabled === 'boolean' && (enabled === false || (typeof manifestUrl === 'string' && keyIsValid))) {
+        updates = { enabled, manifestUrl: typeof manifestUrl === 'string' ? manifestUrl : null, publicKey: typeof publicKey === 'string' ? publicKey : null }
+      }
+    }
   }
   for (const [name, sink] of Object.entries(sinks)) {
     if (!['pushover', 'ntfy', 'telegram', 'webhook', 'discord', 'slack', 'email'].includes(sink.type)) {
@@ -921,6 +960,7 @@ export function normalizeConfig(config: StatusPingConfig): NormalizedConfig {
     pages,
     home,
     maintenance,
+    updates,
   }
 }
 

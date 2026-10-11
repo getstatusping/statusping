@@ -228,6 +228,16 @@ export const MIGRATIONS: string[][] = [
     )`,
     `CREATE INDEX IF NOT EXISTS announcement_notifications_pending ON announcement_notifications(ok, created_at)`,
   ],
+  [
+    // The update checker intentionally retains no manifest body, URL, credentials, or error
+    // details—only its safe, compact outcome for the administrator UI.
+    `CREATE TABLE IF NOT EXISTS update_checks (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      result TEXT NOT NULL CHECK (result IN ('available', 'current', 'incompatible', 'failed')),
+      target_version TEXT,
+      checked_at INTEGER NOT NULL
+    )`,
+  ],
 ]
 
 export const SCHEMA_VERSION = MIGRATIONS.length

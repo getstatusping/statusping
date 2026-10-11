@@ -50,6 +50,17 @@ the text between these two markers.
 
 `npm run release:bundle` writes a portable Worker bundle and a checksummed `update-manifest.json` under `dist/releases/<version>/`. The manifest is public, reproducible metadata for update tooling: stable channel, conservative minimum compatible version, forward-only schema range, bundle and migration filenames/checksums, template marker, and release-notes URL. It never contains configuration or secret values. Verify the full artifact contract with `npm run release:verify` before publishing a release.
 
+For the opt-in in-app update notice, release CI supplies `STATUSPING_RELEASE_SIGNING_KEY` as a base64 PKCS#8 Ed25519 private key. Configure the matching base64 raw 32-byte public key and immutable HTTPS manifest URL under `updates` in the instance configuration. The Worker refuses unsigned, altered, malformed, incompatible, or stale manifest data; it stores only the result/version/check time, never the manifest body or key.
+
+```yaml
+updates:
+  enabled: true
+  manifestUrl: https://releases.example.com/statusping/stable.json
+  publicKey: BASE64_RAW_ED25519_PUBLIC_KEY
+```
+
+This is disabled by default so an installation never contacts an update service without an operator choosing to enable it. The admin page offers a cached check (at most once per 24 hours) and a deliberate **Check for updates** action; an available release opens a review link rather than changing the Worker.
+
 This repository is self-contained: the shared UI is included as a local dependency, so the Deploy Button does not fetch any StatusPing package from npm.
 
 ## Manage configuration in the app

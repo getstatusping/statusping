@@ -5,6 +5,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import packageJson from '../package.json' with { type: 'json' }
 import { MIGRATIONS } from '../src/schema.ts'
+import { canonicalJson } from '../src/updates.ts'
 
 type FileEntry = { sha256: string; bytes: number }
 type ReleaseManifest = { version: string; files: Record<string, FileEntry> }
@@ -20,6 +21,7 @@ type UpdateManifest = {
   template: { version: string; marker: string }
   notesUrl: string
   breaking: boolean
+  signature?: { algorithm: string; value: string }
 }
 
 const appRoot = dirname(dirname(fileURLToPath(import.meta.url)))
@@ -60,6 +62,21 @@ async function main() {
   assertion(update.template.version === packageJson.version && update.template.marker === 'STATUSPING_TEMPLATE_VERSION', 'invalid template marker')
   assertion(update.notesUrl === `https://github.com/getstatusping/statusping/releases/tag/v${packageJson.version}`, 'invalid release notes URL')
   assertion(update.breaking === false, 'breaking releases require an explicit updater policy')
+  if (update.signature !== undefined) {
+    assertion(update.signature.algorithm === 'Ed25519' && /^[A-Za-z0-9+/]+={0,2}$/.test(update.signature.value), 'invalid release signature metadata')
+  }
+  const publicKey = process.env.STATUSPING_RELEASE_PUBLIC_KEY
+  if (publicKey) {
+    assertion(update.signature !== undefined, 'a public key was supplied but the manifest is unsigned')
+    let valid = false
+    try {
+      const unsigned = { ...update } as Record<string, unknown>
+      delete unsigned.signature
+      const key = await crypto.subtle.importKey('raw', Uint8Array.from(atob(publicKey), (char) => char.charCodeAt(0)), { name: 'Ed25519' }, false, ['verify'])
+      valid = await crypto.subtle.verify('Ed25519', key, Uint8Array.from(atob(update.signature.value), (char) => char.charCodeAt(0)), new TextEncoder().encode(canonicalJson(unsigned)))
+    } catch { /* the assertion below gives a safe, non-secret diagnostic */ }
+    assertion(valid, 'update manifest signature does not match STATUSPING_RELEASE_PUBLIC_KEY')
+  }
   process.stdout.write(`Verified release bundle at ${root}\n`)
 }
 
