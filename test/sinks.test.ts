@@ -14,6 +14,20 @@ const vars: Record<string, string> = { PO_TOKEN: 'po_app_token_123', PO_USER: 'p
 const getEnv = (n: string) => vars[n]
 
 describe('sinks', () => {
+  it('reads only the start of a failing channel\'s error page', async () => {
+    let pulled = 0
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (pulled >= 64 * 1024 * 1024) return controller.close()
+        pulled += 64 * 1024
+        controller.enqueue(new TextEncoder().encode('e'.repeat(64 * 1024)))
+      },
+    })
+    const f = fakeFetch(() => new Response(body, { status: 500 }))
+    await expect(createSink('ntfy', { type: 'ntfy', topic: 'alerts' }, getEnv).send(down, f.fn)).rejects.toThrow(/HTTP 500 e+…/)
+    expect(pulled).toBeLessThanOrEqual(3 * 64 * 1024)
+  })
+
   it('pushover: form fields, priority mapping, emergency mode', async () => {
     const f = fakeFetch(() => new Response('{"status":1}'))
     await createSink('po', { type: 'pushover', appToken: env('PO_TOKEN'), userKey: env('PO_USER') }, getEnv).send(down, f.fn)

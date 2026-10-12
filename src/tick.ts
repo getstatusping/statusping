@@ -208,13 +208,14 @@ export async function tick(deps: Deps, nowMs: number = Date.now()): Promise<Tick
     now,
   )
 
-  await runExpiryChecks(deps, now)
-
   await pingPeer(deps)
   summary.notifications = await dispatchNotifications(deps, now)
   summary.notifications += await dispatchAnnouncementNotifications(deps, now)
   await enqueueIncidentSubscribers(deps, now)
   await dispatchSubscriberOutbox(deps, now)
+  // Expiry lookups call third parties (crt.sh, RDAP) that can be slow, so they run only after this
+  // tick's alerts are out. A new expiry warning is notified by the next tick's dispatch.
+  await runExpiryChecks(deps, now)
   await maybeRunRetention(deps, now)
   return summary
 }

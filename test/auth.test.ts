@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { b64urlEncode, clearJwksCache, verifyJwt } from '../src/auth/jwt.ts'
-import { hashPassword, safeNext } from '../src/auth/providers.ts'
+import { discover, hashPassword, safeNext } from '../src/auth/providers.ts'
 import type { AuthProviderInput, StatusPingConfig } from '../src/config.ts'
 import { tick } from '../src/tick.ts'
 import { createApp } from '../src/web/app.ts'
@@ -67,6 +67,17 @@ describe('JWT verification', () => {
     await expect(verifyJwt(await k.signJwt({ ...claims, aud: 'other' }), opts)).rejects.toThrow('wrong audience')
     await expect(verifyJwt(await k.signJwt({ ...claims, exp: now() - 3600 }), opts)).rejects.toThrow('expired')
     await expect(verifyJwt(await k.signJwt({ ...claims, iss: 'https://evil.test' }), opts)).rejects.toThrow('wrong issuer')
+  })
+})
+
+describe('OIDC responses are size-capped', () => {
+  it('rejects an oversized JWKS or discovery document without buffering it whole', async () => {
+    const big = JSON.stringify({ keys: [], pad: 'x'.repeat(300 * 1024) })
+    const f = fakeFetch(() => new Response(big))
+    const k = await keyPair('RS256', 'k1')
+    const token = await k.signJwt({ iss: 'https://big.test', aud: 'app', exp: now() + 300, email: 'a@b.test' })
+    await expect(verifyJwt(token, { jwksUrl: 'https://big.test/jwks', issuer: 'https://big.test', audience: 'app', fetch: f.fn, now: now() })).rejects.toThrow(/larger than/)
+    await expect(discover('https://big-discovery.test', { fetch: f.fn })).rejects.toThrow(/larger than/)
   })
 })
 

@@ -1,8 +1,10 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { lookupCertificateExpiry } from '../src/expiry/ct.ts'
 import { lookupDomainExpiry } from '../src/expiry/rdap.ts'
 import { fakeFetch } from './helpers.ts'
-import { createTestDb, makeDeps, testConfig } from './helpers.ts'
+import { TEST_TOKENS, at, createTestDb, makeDeps, sec, testConfig } from './helpers.ts'
+import { handlePing, parseSignal } from '../src/ping.ts'
+import { tick } from '../src/tick.ts'
 import { runExpiryChecks } from '../src/expiry/run.ts'
 import { syncConfig } from '../src/sync.ts'
 import { PRIVATE_TARGET_ERROR, privateTargetGuard } from '../src/util/private-targets.ts'
@@ -23,7 +25,7 @@ describe('certificate-transparency expiry provider', () => {
       status: 'expiration',
       expiresAt: Math.floor(Date.parse('2026-12-31T00:00:00Z') / 1000),
     })
-    expect(f.calls[0]!.url).toBe('https://crt.sh/?q=status.test&output=json')
+    expect(f.calls[0]!.url).toBe('https://crt.sh/?q=status.test&output=json&exclude=expired')
     expect(f.calls[0]!.headers.accept).toBe('application/json')
   })
 
@@ -129,6 +131,50 @@ describe('daily expiry runner', () => {
       answers['intranet.test'] = ['203.0.113.7']
       expect(await runExpiryChecks(deps, now + 86400)).toBe(1)
       expect(probed).toEqual([{ host: 'intranet.test', port: 8443, address: '203.0.113.7' }])
+    } finally {
+      await close()
+    }
+  })
+})
+
+describe('expiry lookups stay bounded', () => {
+  it('passes a timeout signal and treats an oversized answer as unknown', async () => {
+    const signals: Array<AbortSignal | null | undefined> = []
+    const huge = `[${'{"not_after":"2027-01-01T00:00:00Z"},'.repeat(80_000)}{}]`
+    const fetchHuge = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      signals.push(init?.signal)
+      return new Response(huge)
+    }) as typeof fetch
+    const result = await lookupCertificateExpiry('status.test', { fetch: fetchHuge, now: () => NOW })
+    expect(result).toMatchObject({ status: 'unknown' })
+    expect((result as { error: string }).error).toContain('larger than')
+    const domain = await lookupDomainExpiry('example.com', { fetch: fetchHuge })
+    expect(domain).toMatchObject({ status: 'unknown' })
+    expect(signals.length).toBe(2)
+    expect(signals.every((signal) => signal instanceof AbortSignal)).toBe(true)
+  })
+
+  it('a slow crt.sh does not delay outage alerts in the tick', async () => {
+    const { db, close } = await createTestDb('libsql')
+    try {
+      let release: (() => void) | undefined
+      const crtShAnswered = new Promise<void>((resolve) => { release = resolve })
+      const f = fakeFetch(async (call) => {
+        if (call.url.startsWith('https://crt.sh/')) {
+          await crtShAnswered
+          return Response.json([])
+        }
+        return new Response(call.url.startsWith('https://site.test') ? 'ok' : '{}')
+      })
+      const deps = makeDeps(db, { fetch: f.fn })
+      await syncConfig(deps, sec('2026-10-10T23:49:00Z'))
+      expect(await handlePing(deps, TEST_TOKENS.heartbeat, parseSignal(undefined)!, { body: null, ip: null, userAgent: null }, sec('2026-10-10T23:50:00Z'))).toMatchObject({ status: 200 })
+      // The heartbeat (every 5m, 2m grace) is overdue at 23:59; that minute is past every expiry slot.
+      const running = tick(deps, at('2026-10-10T23:59:00Z'))
+      await vi.waitFor(() => expect(f.calls.some((call) => call.url === 'https://ntfy.sh/')).toBe(true), { timeout: 5_000 })
+      release!()
+      await running
+      expect(f.calls.some((call) => call.url.startsWith('https://crt.sh/'))).toBe(true)
     } finally {
       await close()
     }

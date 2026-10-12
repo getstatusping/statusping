@@ -1,3 +1,4 @@
+import { isEmailAddress } from './util/email.ts'
 import type { Announcement } from './announcements.ts'
 import { type EnvGetter, type SubscriberConfigInput, resolveSecret } from './config.ts'
 import type { Db } from './db/types.ts'
@@ -7,7 +8,6 @@ import { randomToken, sha256Hex, timingSafeEqual } from './util/crypto.ts'
 const ATTEMPTS = 3
 const RETRY_AFTER = 50
 const HOUR = 3600
-const EMAIL = /^[^@\s]+@[^@\s]+\.[^@\s]+$/
 type Subscriber = { id: number; page_slug: string; email: string; confirmed_at: number | null; confirm_token_hash: string; unsubscribe_token_hash: string }
 
 function escapeHtml(s: string) { return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') }
@@ -44,7 +44,7 @@ export async function startSubscription(deps: Deps, pageSlug: string, emailInput
   const cfg = deps.config.subscribers
   const email = emailInput.trim().toLowerCase()
   if (!cfg) return 'disabled'
-  if (!EMAIL.test(email) || email.length > 254) return 'invalid'
+  if (!isEmailAddress(email)) return 'invalid'
   let row = await deps.db.first<Subscriber>('SELECT id, page_slug, email, confirmed_at, confirm_token_hash, unsubscribe_token_hash FROM subscribers WHERE page_slug = ? AND email = ?', [pageSlug, email])
   if (row?.confirmed_at) return 'confirmed'
   const confirm = randomToken(32)

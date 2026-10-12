@@ -1,4 +1,5 @@
 import { type EnvGetter, type SinkInput, resolveSecret } from '../config.ts'
+import { readTruncatedText } from '../util/capped-body.ts'
 import { type SmtpConnector, sendSmtp } from './smtp.ts'
 
 export interface AlertMessage {
@@ -34,13 +35,16 @@ export interface SinkRuntime {
   smtpConnect?: SmtpConnector
 }
 
+const ERROR_TEXT_MAX_BYTES = 4096
+
 const clip = (s: string, max: number) => (s.length > max ? `${s.slice(0, max - 1)}…` : s)
 
 const escapeHtml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 
 async function ensureOk(res: Response, sink: string): Promise<void> {
   if (res.ok) return
-  const text = await res.text().catch(() => '')
+  // Only the start is shown; never buffer an arbitrarily large error page.
+  const text = await readTruncatedText(res, ERROR_TEXT_MAX_BYTES)
   throw new Error(`${sink}: HTTP ${res.status} ${clip(text, 200)}`)
 }
 

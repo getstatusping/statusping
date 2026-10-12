@@ -1,6 +1,7 @@
 import { Cron } from 'croner'
 import { parseJsonPath } from './evaluate/json.ts'
 import { normalizeSchedule, recurringScheduleProblem } from './maintenance.ts'
+import { hasControlChars, isEmailAddress } from './util/email.ts'
 import { isValidTimeZone, parseDuration } from './util/time.ts'
 import { OFFICIAL_MANIFEST_URL, OFFICIAL_RELEASE_PUBLIC_KEY } from './updates.ts'
 
@@ -589,14 +590,13 @@ function isJsonValue(value: unknown): value is JsonValue {
   return !!value && typeof value === 'object' && Object.getPrototypeOf(value) === Object.prototype && Object.values(value).every(isJsonValue)
 }
 
-function isEmail(value: unknown): value is string {
-  return typeof value === 'string' && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(value)
-}
+const isEmail = isEmailAddress
 
+/** An address, or `Display Name <address>`. No control characters anywhere: it becomes a header. */
 function isMailbox(value: unknown): value is string {
-  if (typeof value !== 'string') return false
-  const match = value.match(/^.*<([^<>]+)>$/)
-  return isEmail(match ? match[1] : value)
+  if (typeof value !== 'string' || hasControlChars(value) || value.length > 320) return false
+  const match = value.match(/^([^<>]*)<([^<>]+)>$/)
+  return isEmail(match ? match[2] : value)
 }
 
 function normalizeJsonAssertions(input: unknown, fail: (message: string) => void): NormalizedJsonAssertion[] {

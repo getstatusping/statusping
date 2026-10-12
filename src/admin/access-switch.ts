@@ -3,6 +3,7 @@
  * it works with a real sign-in, and only then switches. Until then the current method stays in
  * force: new credentials wait under `pending:` names and the draft lives in instance_secrets.
  */
+import { OIDC_MAX_RESPONSE_BYTES, readCappedJson } from '../util/capped-body.ts'
 import type { Context, Hono } from 'hono'
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie'
 import { currentViewer, discover, hashUserPassword, setSession } from '../auth/providers.ts'
@@ -414,7 +415,7 @@ export function mountAccessSwitchAuthRoutes(app: Hono, deps: Deps): void {
         headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/json' },
         body: new URLSearchParams({ grant_type: 'authorization_code', code, redirect_uri: `${origin(c, deps)}/auth/callback`, client_id: clientId, client_secret: creds.OIDC_CLIENT_SECRET.value, code_verifier: login.verifier }),
       })
-      const idToken = res.ok ? ((await res.json()) as { id_token?: string }).id_token : undefined
+      const idToken = res.ok ? ((await readCappedJson(res, OIDC_MAX_RESPONSE_BYTES)) as { id_token?: string }).id_token : undefined
       if (!idToken) return back(c, 'oidc-token')
       claims = await verifyJwt(idToken, { jwksUrl: d.jwks_uri, issuer: d.issuer, audience: clientId, fetch: targetFetch(deps), now: nowSeconds() })
     } catch { return back(c, 'oidc-token') }

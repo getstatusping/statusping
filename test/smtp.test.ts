@@ -3,6 +3,7 @@ import { buildMessage, sendSmtp, type SmtpConnector, type SmtpSocket } from '../
 import { createSink } from '../src/notify/sinks.ts'
 import { normalizeConfig } from '../src/config.ts'
 import { testConfig } from './helpers.ts'
+import { isEmailAddress } from '../src/util/email.ts'
 
 const enc = new TextEncoder()
 const dec = new TextDecoder()
@@ -98,5 +99,30 @@ describe('SMTP email', () => {
     expect(() => normalizeConfig(sink({ port: 25 }))).toThrow(/port 25 is blocked/)
     expect(() => normalizeConfig(sink({ security: 'none' }))).toThrow(/security/)
     expect(() => normalizeConfig(sink({ username: 'me' }))).toThrow(/password: required/)
+  })
+
+  it('refuses addresses that could inject SMTP commands or header lines', async () => {
+    const mail = (to: string[], from: string) => testConfig({ sinks: { mail: { type: 'email', to, via: { provider: 'smtp', host: 'smtp.test', port: 587, security: 'starttls', from } as never } } })
+    expect(() => normalizeConfig(mail(['ops@example.test'], 'StatusPing <alerts@example.test>'))).not.toThrow()
+    for (const to of ['ops@example.test\r\nRCPT TO:<evil@example.test>', 'ops@example.test\nBcc: evil@example.test', 'ops@exa\u0000mple.test', 'ops@example.test>', 'a,b@example.test']) {
+      expect(() => normalizeConfig(mail([to], 'alerts@example.test')), JSON.stringify(to)).toThrow(/sinks\.mail\.to/)
+    }
+    for (const from of ['alerts@example.test\r\nDATA', 'Ops\r\nBcc: evil@example.test <alerts@example.test>', 'Ops <alerts@example.test\n>', 'Ops\u0007 <alerts@example.test>']) {
+      expect(() => normalizeConfig(mail(['ops@example.test'], from)), JSON.stringify(from)).toThrow(/via\.from/)
+    }
+    expect(() => normalizeConfig(testConfig({ subscribers: { provider: 'resend', apiKey: 're_test_key', from: 'Status\r\nBcc: x@example.test <status@example.com>' } }))).toThrow(/subscribers\.from/)
+
+    // The client refuses them too, before it connects, whatever path the address came by.
+    const server = fakeServer()
+    const settings = { host: 'smtp.test', port: 465, security: 'tls' as const }
+    const message = { subject: 'Hi', text: 'x', html: 'x' }
+    await expect(sendSmtp(server.connect, settings, { ...message, from: 'a@example.test', to: ['b@example.test\r\nRSET'] })).rejects.toThrow('recipient is not a valid')
+    await expect(sendSmtp(server.connect, settings, { ...message, from: 'X\r\nBcc: y@example.test <a@example.test>', to: ['b@example.test'] })).rejects.toThrow('sender is not a valid')
+    expect(server.log).toEqual([])
+  })
+
+  it('accepts ordinary addresses and refuses delimiters and control characters (also for public subscriptions)', () => {
+    for (const ok of ['ops@example.test', 'first.last+tag@sub.example.co.uk', "o'brien@example.test"]) expect(isEmailAddress(ok), ok).toBe(true)
+    for (const bad of ['ops@example', 'ops example@example.test', 'a<b@example.test', 'a@example.test\r\n', 'a\u007f@example.test', '"a"@example.test', 'a;b@example.test', `${'a'.repeat(250)}@example.test`]) expect(isEmailAddress(bad), JSON.stringify(bad)).toBe(false)
   })
 })

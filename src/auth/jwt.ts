@@ -1,4 +1,5 @@
 /** Minimal JWT (RS256 / ES256) verification against a JWKS, using WebCrypto only. */
+import { OIDC_MAX_RESPONSE_BYTES, readCappedJson } from '../util/capped-body.ts'
 
 const encoder = new TextEncoder()
 
@@ -33,7 +34,7 @@ async function getJwks(url: string, fetchFn: typeof fetch, force: boolean): Prom
   if (cached && !force && cached.expires > Date.now()) return cached.keys
   const res = await fetchFn(url, { headers: { accept: 'application/json' } })
   if (!res.ok) throw new JwtError(`JWKS fetch failed: HTTP ${res.status}`)
-  const body = (await res.json()) as { keys?: Jwk[] }
+  const body = (await readCappedJson(res, OIDC_MAX_RESPONSE_BYTES)) as { keys?: Jwk[] }
   const keys = body.keys ?? []
   jwksCache.set(url, { keys, expires: Date.now() + JWKS_TTL_MS })
   return keys

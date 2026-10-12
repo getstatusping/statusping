@@ -43,3 +43,7 @@ export function toUnixSeconds(value: unknown): number | null {
 export function errorMessage(error: unknown): string {
   return error instanceof Error && error.message ? error.message : String(error)
 }
+
+/** Expiry lookups are advisory: a slow or oversized answer is treated as unknown, never waited out. */
+export const EXPIRY_LOOKUP_TIMEOUT_MS = 10_000
+export const EXPIRY_LOOKUP_MAX_BYTES = 2 * 1024 * 1024

@@ -1,4 +1,5 @@
-import { errorMessage, normalizeHostname, toUnixSeconds, type ExpiryLookup, type ExpiryProviderOptions } from './types.ts'
+import { readCappedJson } from '../util/capped-body.ts'
+import { EXPIRY_LOOKUP_MAX_BYTES, EXPIRY_LOOKUP_TIMEOUT_MS, errorMessage, normalizeHostname, toUnixSeconds, type ExpiryLookup, type ExpiryProviderOptions } from './types.ts'
 
 const CRT_SH_URL = 'https://crt.sh/'
 
@@ -20,8 +21,10 @@ export async function lookupCertificateExpiry(hostname: string, options: ExpiryP
 
   let response: Response
   try {
-    response = await options.fetch(`${CRT_SH_URL}?q=${encodeURIComponent(host)}&output=json`, {
+    // exclude=expired keeps the answer small for hosts with a long certificate history.
+    response = await options.fetch(`${CRT_SH_URL}?q=${encodeURIComponent(host)}&output=json&exclude=expired`, {
       headers: { accept: 'application/json' },
+      signal: AbortSignal.timeout(EXPIRY_LOOKUP_TIMEOUT_MS),
     })
   } catch (error) {
     return { status: 'unknown', error: `crt.sh request failed: ${errorMessage(error)}` }
@@ -30,7 +33,7 @@ export async function lookupCertificateExpiry(hostname: string, options: ExpiryP
 
   let records: unknown
   try {
-    records = await response.json()
+    records = await readCappedJson(response, EXPIRY_LOOKUP_MAX_BYTES)
   } catch (error) {
     return { status: 'unknown', error: `crt.sh returned invalid JSON: ${errorMessage(error)}` }
   }

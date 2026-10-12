@@ -3,6 +3,7 @@
  * (port 587), AUTH PLAIN or LOGIN, one message per connection. Plaintext delivery is not
  * supported, so credentials never cross the network unencrypted.
  */
+import { hasControlChars, isEmailAddress } from '../util/email.ts'
 
 /** A connected byte stream. Runtime adapters (Workers sockets, Node net/tls) implement it. */
 export interface SmtpSocket {
@@ -129,6 +130,10 @@ class Conversation {
 
 /** Sends one message. Errors never include the password. */
 export async function sendSmtp(connect: SmtpConnector, settings: SmtpSettings, msg: SmtpMessage): Promise<void> {
+  // Configuration validation already refuses these; this keeps a bad address from ever reaching
+  // an SMTP command line or a header, whatever path it arrived by.
+  if (hasControlChars(msg.from) || !isEmailAddress(mailboxAddress(msg.from))) throw new SmtpError('smtp: the sender is not a valid email address')
+  for (const to of msg.to) if (!isEmailAddress(mailboxAddress(to))) throw new SmtpError('smtp: a recipient is not a valid email address')
   let socket: SmtpSocket | undefined
   let timer: ReturnType<typeof setTimeout> | undefined
   const session = async () => {

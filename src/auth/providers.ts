@@ -1,4 +1,5 @@
 import type { Context, Hono } from 'hono'
+import { OIDC_MAX_RESPONSE_BYTES, readCappedJson } from '../util/capped-body.ts'
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie'
 import { type AuthProviderInput, resolveSecret } from '../config.ts'
 import type { Deps } from '../deps.ts'
@@ -203,7 +204,7 @@ export async function discover(issuer: string, deps: Pick<Deps, 'fetch' | 'targe
   await checkOidcUrl(issuer, 'issuer', deps)
   const res = await targetFetch(deps)(`${issuer.replace(/\/+$/, '')}/.well-known/openid-configuration`)
   if (!res.ok) throw new Error(`OIDC discovery failed: HTTP ${res.status}`)
-  const doc = (await res.json()) as Discovery
+  const doc = (await readCappedJson(res, OIDC_MAX_RESPONSE_BYTES)) as Discovery
   if (!doc || typeof doc !== 'object') throw new Error('OIDC discovery returned no configuration')
   await checkOidcUrl(doc.token_endpoint, 'token_endpoint', deps)
   await checkOidcUrl(doc.jwks_uri, 'jwks_uri', deps)
@@ -340,7 +341,7 @@ function oidcHandlers(deps: Deps, p: Oidc) {
       deps.log('warn', 'OIDC token exchange failed', { status: res.status })
       return c.text('Sign-in failed (token exchange).', 502)
     }
-    const { id_token } = (await res.json()) as { id_token?: string }
+    const { id_token } = (await readCappedJson(res, OIDC_MAX_RESPONSE_BYTES)) as { id_token?: string }
     if (!id_token) return c.text('Sign-in failed (no ID token).', 502)
     let claims: Record<string, unknown>
     try {

@@ -1,4 +1,5 @@
-import { errorMessage, normalizeHostname, toUnixSeconds, type ExpiryLookup, type ExpiryProviderOptions } from './types.ts'
+import { readCappedJson } from '../util/capped-body.ts'
+import { EXPIRY_LOOKUP_MAX_BYTES, EXPIRY_LOOKUP_TIMEOUT_MS, errorMessage, normalizeHostname, toUnixSeconds, type ExpiryLookup, type ExpiryProviderOptions } from './types.ts'
 
 const IANA_DNS_BOOTSTRAP_URL = 'https://data.iana.org/rdap/dns.json'
 
@@ -57,7 +58,7 @@ export async function lookupDomainExpiry(hostname: string, options: ExpiryProvid
 
   let bootstrapResponse: Response
   try {
-    bootstrapResponse = await options.fetch(IANA_DNS_BOOTSTRAP_URL, { headers: { accept: 'application/rdap+json, application/json' } })
+    bootstrapResponse = await options.fetch(IANA_DNS_BOOTSTRAP_URL, { headers: { accept: 'application/rdap+json, application/json' }, signal: AbortSignal.timeout(EXPIRY_LOOKUP_TIMEOUT_MS) })
   } catch (error) {
     return { status: 'unknown', error: `IANA RDAP bootstrap request failed: ${errorMessage(error)}` }
   }
@@ -65,7 +66,7 @@ export async function lookupDomainExpiry(hostname: string, options: ExpiryProvid
 
   let bootstrap: DnsBootstrap
   try {
-    bootstrap = (await bootstrapResponse.json()) as DnsBootstrap
+    bootstrap = (await readCappedJson(bootstrapResponse, EXPIRY_LOOKUP_MAX_BYTES)) as DnsBootstrap
   } catch (error) {
     return { status: 'unknown', error: `IANA RDAP bootstrap returned invalid JSON: ${errorMessage(error)}` }
   }
@@ -76,6 +77,7 @@ export async function lookupDomainExpiry(hostname: string, options: ExpiryProvid
   try {
     response = await options.fetch(`${registry.replace(/\/$/, '')}/domain/${encodeURIComponent(domain)}`, {
       headers: { accept: 'application/rdap+json, application/json' },
+      signal: AbortSignal.timeout(EXPIRY_LOOKUP_TIMEOUT_MS),
     })
   } catch (error) {
     return { status: 'unknown', error: `RDAP registry request failed: ${errorMessage(error)}` }
@@ -87,7 +89,7 @@ export async function lookupDomainExpiry(hostname: string, options: ExpiryProvid
 
   let domainRecord: RdapDomain
   try {
-    domainRecord = (await response.json()) as RdapDomain
+    domainRecord = (await readCappedJson(response, EXPIRY_LOOKUP_MAX_BYTES)) as RdapDomain
   } catch (error) {
     return { status: 'unknown', error: `RDAP registry returned invalid JSON: ${errorMessage(error)}` }
   }

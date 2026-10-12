@@ -5,6 +5,7 @@
  * that binds the browser to a short-lived signed cookie carrying a CSRF value that every later
  * form must echo. Finishing writes the whole configuration in one DB batch.
  */
+import { OIDC_MAX_RESPONSE_BYTES, readCappedJson } from '../util/capped-body.ts'
 import type { Context, Hono } from 'hono'
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie'
 import { hashUserPassword, fromThisSite, setSession } from '../auth/providers.ts'
@@ -797,7 +798,7 @@ export function mountSetupAuthRoutes(app: Hono, deps: Deps): void {
         }),
       })
       if (!res.ok) return back(c, 'oidc-token')
-      const idToken = ((await res.json()) as { id_token?: string }).id_token
+      const idToken = ((await readCappedJson(res, OIDC_MAX_RESPONSE_BYTES)) as { id_token?: string }).id_token
       if (!idToken) return back(c, 'oidc-token')
       try {
         claims = await verifyJwt(idToken, { jwksUrl: d.jwks_uri, issuer: d.issuer, audience: clientId, fetch: targetFetch(deps), now: nowSeconds() })
