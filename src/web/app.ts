@@ -1,5 +1,6 @@
 import { Hono } from 'hono'
-import { readCappedText } from '../util/capped-body.ts'
+import { readCappedText, readTruncatedText } from '../util/capped-body.ts'
+import { bodyLimit } from './body-limit.ts'
 import type { Context } from 'hono'
 import { currentViewer, hasCredentials, mountAuthRoutes, fromThisSite, signInResponse } from '../auth/providers.ts'
 import { type Viewer, canAcknowledge, canOpen } from '../auth/viewer.ts'
@@ -8,7 +9,7 @@ import type { NormalizedPage } from '../config.ts'
 import type { Deps } from '../deps.ts'
 import { dispatchNotifications } from '../notify/dispatch.ts'
 import { dispatchAnnouncementNotifications, enqueueAnnouncementNotifications } from '../notify/announcements.ts'
-import { MAX_PING_BODY, handlePing, parseSignal } from '../ping.ts'
+import { MAX_PING_BODY_BYTES, handlePing, parseSignal } from '../ping.ts'
 import { ensureSchema } from '../schema.ts'
 import { tick } from '../tick.ts'
 import { timingSafeEqual } from '../util/crypto.ts'
@@ -26,7 +27,7 @@ import { mountMcp } from '../mcp/server.ts'
 import { mountAccessSwitchAuthRoutes } from '../admin/access-switch.ts'
 import { mountSetupAuthRoutes, mountSetupRoutes, SETUP_AUTH_PATHS } from '../setup/routes.ts'
 import { mountRecoveryRoutes } from '../setup/recovery.ts'
-import { consumePingRateLimit } from '../rate-limit.ts'
+import { attemptBucket, consumePingRateLimit } from '../rate-limit.ts'
 import { HTTPException } from 'hono/http-exception'
 import { runHttpCheck } from '../evaluate/http.ts'
 import { runTcpCheck } from '../evaluate/tcp.ts'
@@ -84,10 +85,19 @@ function runAfterResponse(c: Context, deps: Deps, p: Promise<unknown>) {
 }
 
 const CONFIRM_BODY_LIMIT = 1024
+/**
+ * Pings from clients whose address the adapter cannot tell (Node without STATUSPING_TRUST_PROXY)
+ * share one bucket. It is generous so a fleet of cron jobs behind it is never throttled in
+ * practice, yet it still bounds the work an anonymous flood can cause.
+ */
+const UNKNOWN_IP_PING_LIMIT = 600
 
 export function createApp(deps: Deps): Hono {
   const app = new Hono()
   let config = deps.config
+
+  // Cap every request body before anything parses it (see body-limit.ts); /ping caps its own.
+  app.use('*', bodyLimit())
   // An admins list also needs a sign-in affordance on otherwise-public monitor pages.
   let hasRestricted = config.pages.some((p) => p.access !== 'public') || Boolean(config.access?.admins)
 
@@ -123,22 +133,24 @@ export function createApp(deps: Deps): Hono {
     if (!signal) return c.text('Unknown signal', 400)
     // A suspended hosted tenant runs no monitoring, pings included.
     if (deps.tenant?.suspended) return c.text('Monitoring is suspended', 503, { 'cache-control': 'no-store', 'retry-after': '3600' })
-    let body: string | null = null
-    if (c.req.method === 'POST' || c.req.method === 'PUT') {
-      const text = await c.req.text()
-      body = text ? text.slice(0, MAX_PING_BODY) : null
-    }
     const now = nowSeconds()
     const ip = deps.clientIp(c.req.raw)
-    if (ip && !(await consumePingRateLimit(deps.db, ip, now, config.limits.pingPerIpPerMinute))) {
+    const bucket = ip ? { key: ip, limit: config.limits.pingPerIpPerMinute } : attemptBucket('ping', null, 0, Math.max(UNKNOWN_IP_PING_LIMIT, config.limits.pingPerIpPerMinute))
+    if (!(await consumePingRateLimit(deps.db, bucket.key, now, bucket.limit))) {
       return c.text('Too many requests', 429, { 'cache-control': 'no-store', 'retry-after': String(60 - (now % 60)) })
     }
+    // The body is read only once the token matches a push monitor, and only its first
+    // MAX_PING_BODY_BYTES: a longer body is truncated, not refused, because pings are stored
+    // truncated anyway and a cron job piping a long log must still record its signal.
+    const readBody = c.req.method === 'POST' || c.req.method === 'PUT'
+      ? async () => (await readTruncatedText(c.req.raw, MAX_PING_BODY_BYTES)) || null
+      : null
     const outcome = await handlePing(
       deps,
       c.req.param('token') ?? '',
       signal,
       {
-        body,
+        body: readBody,
         ip,
         userAgent: c.req.header('user-agent') ?? null,
       },

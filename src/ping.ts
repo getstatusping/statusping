@@ -3,7 +3,10 @@ import { activeMaintenance } from './maintenance.ts'
 import { type MonitorStateRow, type Status, type Transition, applyTransition, truncate } from './state.ts'
 import { sha256Hex } from './util/crypto.ts'
 
+/** Characters of a ping body that are stored. */
 export const MAX_PING_BODY = 10_000
+/** Bytes of a ping body that are read: MAX_PING_BODY characters of up to four UTF-8 bytes each. */
+export const MAX_PING_BODY_BYTES = MAX_PING_BODY * 4
 
 export type PingSignal =
   | { kind: 'success'; exitCode: number | null }
@@ -26,7 +29,8 @@ export function parseSignal(action: string | undefined): PingSignal | null {
 }
 
 export interface PingMeta {
-  body: string | null
+  /** The body, or a reader for it that runs only once the token matches an active push monitor. */
+  body: string | null | (() => Promise<string | null>)
   ip: string | null
   userAgent: string | null
 }
@@ -53,7 +57,8 @@ export async function handlePing(
 ): Promise<PingOutcome> {
   if (token.length < 16 || token.length > 128) return { status: 404 }
   const tokenHash = await sha256Hex(token)
-  const body = meta.body ? meta.body.slice(0, MAX_PING_BODY) : null
+  let source = meta.body
+  let body: string | null = null
 
   for (let attempt = 0; attempt < 5; attempt++) {
     const row = await deps.db.first<Row>(
@@ -63,6 +68,8 @@ export async function handlePing(
       [tokenHash],
     )
     if (!row || row.kind !== 'push' || row.paused) return { status: 404 }
+    if (typeof source === 'function') source = await source()
+    body = source ? source.slice(0, MAX_PING_BODY) : null
 
     const durationMs =
       signal.kind === 'success' || signal.kind === 'fail'
