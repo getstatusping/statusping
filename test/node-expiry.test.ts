@@ -30,4 +30,13 @@ describe('Node TLS certificate expiry provider', () => {
     await expect(lookup).resolves.toMatchObject({ status: 'unknown', error: 'TLS request failed: certificate verify failed' })
     expect(socket.destroyed).toBe(true)
   })
+
+  it('connects to a vetted address but keeps the hostname for SNI', async () => {
+    const socket = new FakeSocket({ valid_to: '2027-03-04T05:06:07Z' })
+    const connect = vi.fn(() => socket)
+    const lookup = lookupNodeCertificateExpiry('status.test', 443, { connect, address: '203.0.113.7' })
+    socket.emit('secureConnect')
+    await lookup
+    expect(connect).toHaveBeenCalledWith(expect.objectContaining({ host: '203.0.113.7', servername: 'status.test' }))
+  })
 })

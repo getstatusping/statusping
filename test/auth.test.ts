@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { b64urlEncode, clearJwksCache, verifyJwt } from '../src/auth/jwt.ts'
-import { hashPassword } from '../src/auth/providers.ts'
+import { hashPassword, safeNext } from '../src/auth/providers.ts'
 import type { AuthProviderInput, StatusPingConfig } from '../src/config.ts'
 import { tick } from '../src/tick.ts'
 import { createApp } from '../src/web/app.ts'
@@ -67,6 +67,37 @@ describe('JWT verification', () => {
     await expect(verifyJwt(await k.signJwt({ ...claims, aud: 'other' }), opts)).rejects.toThrow('wrong audience')
     await expect(verifyJwt(await k.signJwt({ ...claims, exp: now() - 3600 }), opts)).rejects.toThrow('expired')
     await expect(verifyJwt(await k.signJwt({ ...claims, iss: 'https://evil.test' }), opts)).rejects.toThrow('wrong issuer')
+  })
+})
+
+describe('safeNext', () => {
+  it('keeps same-site paths, query strings and fragments', () => {
+    expect(safeNext('/pages/status')).toBe('/pages/status')
+    expect(safeNext('/pages/status?tab=errors&x=1')).toBe('/pages/status?tab=errors&x=1')
+    expect(safeNext('/admin#monitors')).toBe('/admin#monitors')
+    expect(safeNext('/')).toBe('/')
+  })
+
+  it('refuses anything that could leave the site', () => {
+    for (const next of [
+      undefined, '', 'pages', 'https://evil.example', 'http://evil.example/x', 'javascript:alert(1)', 'mailto:x@evil.example',
+      '//evil.example', '///evil.example', '/\\evil.example', '/\\/evil.example', '\\\\evil.example',
+      '/\t/evil.example', '/\n/evil.example', '/\r/evil.example', '/\t\t/evil.example', '/\x00/evil.example', '/\x7f/evil.example',
+      '/ /evil.example', '\t//evil.example', '/pages\n', '/a/..//evil.example', '/./\\evil.example',
+    ]) {
+      const out = safeNext(next)
+      expect(out, JSON.stringify(next)).toBe('/')
+    }
+  })
+
+  it('never yields a protocol-relative or absolute URL, even when encoded', () => {
+    for (const next of ['/%09/evil.example', '/%0a/evil.example', '/%2F/evil.example', '/%5C/evil.example', '/%5c%5cevil.example']) {
+      const out = safeNext(next)
+      expect(out.startsWith('/')).toBe(true)
+      expect(out.startsWith('//') || out.startsWith('/\\')).toBe(false)
+      expect(new URL(out, 'https://status.test').origin).toBe('https://status.test')
+    }
+    expect(safeNext('/%09/evil.example')).toBe('/%09/evil.example')
   })
 })
 
@@ -156,6 +187,14 @@ describe('Basic auth (email allowlist)', () => {
     const badBody = await bad.text()
     expect(badBody).toContain('Incorrect email or password.')
     expect(badBody).toContain('value="alice@statusping.test"')
+
+    // The next field cannot send the browser to another site, with or without stripped characters.
+    for (const next of ['/\t/evil.test', '/\n/evil.test', '/\r/evil.test', '//evil.test', '/\\evil.test', 'https://evil.test']) {
+      const res = await post({ email: 'alice@statusping.test', password: 'alice-password-123456', next })
+      expect(res.headers.get('location'), JSON.stringify(next)).toBe('/')
+    }
+    const tabForm = await s.app.request(`/auth/login?next=${encodeURIComponent('/\t/evil.test')}`)
+    expect(await tabForm.text()).toContain('name="next" value="/"')
 
     // Cross-site form posts are refused.
     const csrf = await post({ email: 'alice@statusping.test', password: 'alice-password-123456' }, { origin: 'https://evil.test' })
@@ -255,7 +294,7 @@ describe('SSO / OIDC (groups or emails)', () => {
       },
     )
     close = s.close
-    const safe = (next: string) => (next.startsWith('/') && !next.startsWith('//') ? next : '/')
+    const safe = safeNext
     /** Runs the browser side of the login flow; returns the session cookie. */
     const login = async (claims: Record<string, unknown>, next = '/pages/finance') => {
       // First a page that says where the visitor is going, then the hand-over to the provider.
@@ -334,5 +373,10 @@ describe('SSO / OIDC (groups or emails)', () => {
     const s = await oidcSetup()
     const { cb } = await s.login({ email: 'erin@statusping.test', email_verified: true }, '//evil.test/phish')
     expect(cb.headers.get('location')).toBe('/')
+    // The URL parser drops tabs and newlines: "/\t/evil.test" would become "//evil.test".
+    const tab = await s.login({ email: 'erin@statusping.test', email_verified: true }, '/\t/evil.test/phish')
+    expect(tab.cb.headers.get('location')).toBe('/')
+    const kept = await s.login({ email: 'erin@statusping.test', email_verified: true }, '/pages/finance?tab=2#top')
+    expect(kept.cb.headers.get('location')).toBe('/pages/finance?tab=2#top')
   })
 })

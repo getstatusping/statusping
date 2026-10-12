@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { confirmSubscription, consumeSubscribeLimit, startSubscription, unsubscribe } from '../src/subscribers.ts'
+import { confirmSubscription, consumeSubscribeLimit, enqueueIncidentSubscribers, startSubscription, unsubscribe } from '../src/subscribers.ts'
 import { createApp } from '../src/web/app.ts'
 import { DB_KINDS, createTestDb, fakeFetch, makeDeps, sec, testConfig } from './helpers.ts'
 
@@ -44,5 +44,37 @@ describe('subscribe rate limit (security review finding 2)', () => {
     expect(statuses.filter((s) => s === 429).length).toBeGreaterThan(0)
     expect(fetch.calls.length).toBeLessThanOrEqual(5)
     await close()
+  })
+})
+
+describe('incident emails follow the page\'s errors visibility', () => {
+  it('includes failure detail only for pages that show errors', async () => {
+    const { db, close } = await createTestDb('libsql')
+    try {
+      const deps = makeDeps(db, {
+        env: { SUBSCRIBER_TOKEN_SECRET: 'subscriber-token-secret' },
+        config: testConfig({
+          subscribers: { provider: 'resend', apiKey: 're_test_key', from: 'Status <status@example.com>' },
+          pages: [
+            { slug: 'quiet', title: 'Quiet', show: ['uptime'], monitors: ['heartbeat'] },
+            { slug: 'loud', title: 'Loud', show: ['uptime', 'errors'], monitors: ['heartbeat'] },
+          ],
+        }),
+      })
+      const now = sec('2026-10-10T12:00:00Z')
+      for (const slug of ['quiet', 'loud']) {
+        await db.run(`INSERT INTO subscribers (page_slug, email, confirmed_at, confirm_token_hash, unsubscribe_token_hash, created_at) VALUES (?, ?, ?, ?, ?, ?)`, [slug, `${slug}@example.com`, now, `c-${slug}`, `u-${slug}`, now])
+      }
+      await db.run(`INSERT INTO incidents (monitor_id, reason, detail, started_at) VALUES ('heartbeat', 'missed', 'ping body: visit https://phish.example', ?)`, [now])
+      await enqueueIncidentSubscribers(deps, now)
+      const rows = await db.all<{ email: string; text_body: string; html_body: string }>(`SELECT s.email, o.text_body, o.html_body FROM subscriber_outbox o JOIN subscribers s ON s.id = o.subscriber_id ORDER BY s.email`)
+      expect(rows).toHaveLength(2)
+      const [loud, quiet] = rows
+      expect(loud!.text_body).toContain('phish.example')
+      expect(quiet!.text_body).toBe('An incident has started.')
+      expect(quiet!.html_body).not.toContain('phish.example')
+    } finally {
+      await close()
+    }
   })
 })

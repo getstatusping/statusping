@@ -292,8 +292,13 @@ status.example.com {
 
 Point an `A`/`AAAA` record for `status.example.com` at that machine. Set
 `STATUSPING_TRUST_PROXY=true` so ping and sign-in rate limits see visitors' real IPs from
-`X-Forwarded-For`. Only set it when the proxy is the sole way in, since a
-direct client could otherwise spoof the header.
+`X-Forwarded-For`. StatusPing uses the **last** entry of that header, the address your proxy
+saw: proxies such as Caddy and nginx (`$proxy_add_x_forwarded_for`) add it at the end, and anything
+before it was sent by the client. This assumes exactly one proxy in front of StatusPing; behind
+a chain (a CDN, then your proxy), have the outer proxy's address replaced with the client's
+by the inner one (for example nginx `real_ip_header`/`set_real_ip_from`), or every visitor
+shares the CDN's address. Only set it when the proxy is the sole way in, since a direct
+client could otherwise spoof the header.
 
 #### Monitoring private addresses
 

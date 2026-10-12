@@ -171,6 +171,11 @@ export interface SaveOptions {
   entered?: readonly string[]
   /** Whether a name is a real Worker secret / environment variable (unbound), not a stored value. */
   hasRealEnv?: (name: string) => boolean
+  /**
+   * SINK_ credentials typed in with this save. They are checked as if stored and written in the
+   * same batch as the configuration, so a refused or failed save stores nothing.
+   */
+  secrets?: ReadonlyArray<{ name: string; value: string }>
 }
 
 /** Atomically validates, records, and stores an admin-managed config as a new revision. */
@@ -182,12 +187,17 @@ export async function saveAdminConfig(
   getEnv: (name: string) => string | undefined,
   opts: SaveOptions = {},
 ): Promise<StoredAdminConfig & { revision: number }> {
-  const { config } = validateAdminConfig(value, getEnv)
+  const secrets = opts.secrets ?? []
+  const pending = new Map(secrets.map((s) => [s.name, s.value]))
+  const env = pending.size
+    ? (name: string) => (opts.hasRealEnv?.(name) ? getEnv(name) : pending.get(name) ?? getEnv(name))
+    : getEnv
+  const { config } = validateAdminConfig(value, env)
   if (config.admin !== true) throw new Error('admin: cannot disable admin mode through the admin API')
   const before = await loadAdminConfig(db)
   const nameProblems = channelNameProblems(config, before?.config)
   if (nameProblems.length) throw new ChannelCredentialError(nameProblems)
-  const bindings = await channelBindingStatements(db, config, before?.config, { getEnv, hasRealEnv: opts.hasRealEnv, entered: opts.entered, now })
+  const bindings = await channelBindingStatements(db, config, before?.config, { getEnv: env, hasRealEnv: opts.hasRealEnv, entered: opts.entered, pending, now })
   if (opts.base !== undefined) {
     const current = await currentRevision(db)
     if (current !== opts.base) throw new RevisionConflict(current)
@@ -195,6 +205,14 @@ export async function saveAdminConfig(
   const action = opts.action ?? 'config.save'
   try {
     await db.batch([
+      ...secrets.map(({ name, value }) => ({
+        sql: `INSERT INTO instance_secrets (name, value, created_at) VALUES (?, ?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value, created_at = excluded.created_at`,
+        params: [`env:${name}`, value, now],
+      })),
+      ...secrets.map(({ name }) => ({
+        sql: `INSERT INTO audit_log (actor, action, target, before_json, after_json, at) VALUES (?, 'setting.store', ?, NULL, NULL, ?)`,
+        params: [actor, name, now],
+      })),
       ...revisionStatements(config, actor, now, { action, yaml: matchingYaml(opts.yaml, config), base: opts.base }),
       {
         sql: `INSERT INTO admin_config (id, config_json, updated_at, updated_by) VALUES (1, ?, ?, ?)

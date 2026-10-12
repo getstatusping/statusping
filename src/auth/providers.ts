@@ -19,10 +19,23 @@ const LOGIN_COOKIE = 'sp_oidc'
 type Oidc = Extract<AuthProviderInput, { type: 'oidc' }>
 type CfAccess = Extract<AuthProviderInput, { type: 'cloudflare-access' }>
 
-/** Only allow same-site relative redirects. */
+const NEXT_BASE = 'https://statusping.invalid'
+
+/**
+ * Only allow same-site relative redirects. Rejects control and whitespace characters (the URL
+ * parser strips tabs and newlines, so `/\t/evil.example` would otherwise become
+ * `//evil.example`), then resolves the path and returns it only if it stays on this origin.
+ */
 export function safeNext(next: string | undefined): string {
   if (!next || !next.startsWith('/') || next.startsWith('//') || next.startsWith('/\\')) return '/'
-  return next
+  if (/[\x00-\x20\x7f]/.test(next)) return '/'
+  let u: URL
+  try { u = new URL(next, NEXT_BASE) } catch { return '/' }
+  if (u.origin !== NEXT_BASE) return '/'
+  const out = u.pathname + u.search + u.hash
+  // A canonical path that starts `//` or `/\` would be read as protocol-relative by browsers.
+  if (out.startsWith('//') || out.startsWith('/\\')) return '/'
+  return out
 }
 
 // ── Basic ─────────────────────────────────────────────────────────────────────────────────────

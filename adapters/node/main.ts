@@ -14,7 +14,7 @@ import { nodeTcpConnect } from './tcp.ts'
 import { nodeResolveHost } from './dns.ts'
 import { nodeSmtpConnect } from './smtp.ts'
 import { startNodeServer } from './server.ts'
-import { normalizeClientIp } from '../../src/rate-limit.ts'
+import { forwardedClientIp } from './client-ip.ts'
 import { nodeConfirmationProbe, nodeConfirmationSettings } from './confirmation.ts'
 
 /**
@@ -42,10 +42,10 @@ const deps = createDeps({
   smtpConnect: nodeSmtpConnect,
   confirmationProbe: confirmation ? nodeConfirmationProbe(confirmation) : undefined,
   location: env('STATUSPING_LOCATION'),
-  // A direct Node listener cannot authenticate a forwarding header. Opt in only
-  // when a trusted reverse proxy strips client supplied X-Forwarded-For.
+  // A direct Node listener cannot authenticate a forwarding header. Opt in only when a
+  // trusted reverse proxy is the sole way in; its own (last) X-Forwarded-For entry is used.
   clientIp: env('STATUSPING_TRUST_PROXY') === 'true'
-    ? (request) => normalizeClientIp(request.headers.get('x-forwarded-for')?.split(',')[0] ?? null)
+    ? (request) => forwardedClientIp(request.headers.get('x-forwarded-for'))
     : undefined,
 })
 

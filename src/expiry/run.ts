@@ -3,7 +3,7 @@ import type { Deps } from '../deps.ts'
 import { truncate } from '../state.ts'
 import { lookupCertificateExpiry } from './ct.ts'
 import { lookupDomainExpiry } from './rdap.ts'
-import type { ExpiryLookup } from './types.ts'
+import type { CertificateExpiryProvider, ExpiryLookup } from './types.ts'
 
 type Kind = 'ssl' | 'domain'
 interface CheckRow { monitor_id: string; kind: Kind; checked_at: number; error: string | null }
@@ -59,6 +59,19 @@ async function saveResult(deps: Deps, monitor: HttpMonitor, kind: Kind, lookup: 
   }
 }
 
+/**
+ * Connects to the monitored host itself (Node), so the private-target guard applies: a refused
+ * host is never probed, and the connection goes to the address the guard checked.
+ */
+async function probeCertificate(deps: Deps, provider: CertificateExpiryProvider, host: string, port: number): Promise<ExpiryLookup> {
+  if (!deps.targetGuard) return provider(host, port)
+  let address: string | undefined
+  try { [address] = await deps.targetGuard(host) } catch (error) {
+    return { status: 'unknown', error: `Certificate not checked: ${(error as Error).message}` }
+  }
+  return provider(host, port, address ? { address } : undefined)
+}
+
 /** Performs at most one due expiry lookup each tick, preserving Worker subrequest headroom. */
 export async function runExpiryChecks(deps: Deps, now: number): Promise<number> {
   const minute = Math.floor(now / 60) % 1440
@@ -75,7 +88,7 @@ export async function runExpiryChecks(deps: Deps, now: number): Promise<number> 
       const target = new URL(monitor.url)
       const host = target.hostname
       const lookup = kind === 'ssl'
-        ? await (deps.certificateExpiry?.(host, Number(target.port) || 443) ?? lookupCertificateExpiry(host, { fetch: deps.fetch }))
+        ? await (deps.certificateExpiry ? probeCertificate(deps, deps.certificateExpiry, host, Number(target.port) || 443) : lookupCertificateExpiry(host, { fetch: deps.fetch }))
         : await lookupDomainExpiry(host, { fetch: deps.fetch })
       await saveResult(deps, monitor, kind, lookup, now)
       return 1

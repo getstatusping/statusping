@@ -94,7 +94,10 @@ export async function enqueueIncidentSubscribers(deps: Deps, now: number) {
     // Do not surprise people who subscribed after an incident began: recovery is only
     // meaningful when this subscriber received the corresponding start message.
     const subject = `${recovered ? 'Resolved' : 'Incident'}: ${deps.config.title}`
-    const body = incident.detail ?? (recovered ? 'The incident has been resolved.' : 'An incident has started.')
+    // Failure text is shown only on pages that show errors, as on the page itself (for a push
+    // monitor it can be text chosen by whoever holds the ping URL).
+    const detail = page.show.includes('errors') ? incident.detail : null
+    const body = detail ?? (recovered ? 'The incident has been resolved.' : 'An incident has started.')
     await enqueue(deps, page.slug, `incident:${incident.id}:${event}`, subject, body, `<p>${escapeHtml(body)}</p><p><a href="${deps.config.baseUrl}/pages/${encodeURIComponent(page.slug)}">View status</a></p>`, now, recovered ? `incident:${incident.id}:started` : undefined)
   }
 }

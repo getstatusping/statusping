@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { createDeps, type Deps } from '../src/deps.ts'
-import { loadSetupState } from '../src/setup/state.ts'
+import { beginSetup, loadSetupState } from '../src/setup/state.ts'
 import { tick } from '../src/tick.ts'
 import { createApp } from '../src/web/app.ts'
 import { createTestDb, fakeFetch, TEST_TOKENS, testConfig } from './helpers.ts'
@@ -255,5 +255,21 @@ describe('first-run setup wizard and reset', () => {
     expect(JSON.parse(row!.previous_config_json)).toMatchObject({ title: 'First' })
     expect(await db.first(`SELECT * FROM local_users`)).toBeNull()
     expect(await db.first(`SELECT * FROM admin_config`)).toBeNull()
+  })
+})
+
+describe('reset clears stored sign-in and channel state', () => {
+  it('removes stored settings, credential bindings and an unfinished sign-in method change', async () => {
+    const t = await createTestDb('libsql')
+    try {
+      const keep = ['legacy_kept', 'environment']
+      const gone = ['session_key', 'access_switch', 'env:SINK_ALERTS_TOKEN', 'bind:SINK_ALERTS_TOKEN', 'pending:OIDC_CLIENT_SECRET']
+      for (const name of [...keep, ...gone]) await t.db.run(`INSERT INTO instance_secrets (name, value, created_at) VALUES (?, 'v', 1)`, [name])
+      await beginSetup(t.db, 'test', 100)
+      const left = (await t.db.all<{ name: string }>(`SELECT name FROM instance_secrets ORDER BY name`)).map((r) => r.name)
+      expect(left).toEqual([...keep].sort())
+    } finally {
+      await t.close()
+    }
   })
 })

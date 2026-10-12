@@ -5,7 +5,7 @@
 import type { Context, Hono } from 'hono'
 import { createAnnouncement, listAnnouncements, parseAnnouncementCreate, parseAnnouncementPatch, patchAnnouncement } from '../announcements.ts'
 import type { MonitorInput } from '../config.ts'
-import { type Deps, refreshAdminConfig, storedEnvKey } from '../deps.ts'
+import { type Deps, refreshAdminConfig } from '../deps.ts'
 import { type Form, FormError, findMonitor, monitorFromForm, monitorRows, putMonitor, removeMonitor } from '../admin/forms.ts'
 import { currentRevision, loadAdminConfig, RevisionConflict, rotatePingToken, saveAdminConfig, type SaveOptions } from '../admin/service.ts'
 import { locateProblems } from '../admin/yaml.ts'
@@ -54,21 +54,14 @@ export function mountMcp(app: Hono, deps: Deps): void {
   const actor = (token: ApiToken) => `mcp:${token.name}`
 
   const save = async (token: ApiToken, next: AdminConfig, secrets: Array<{ name: string; value: string }> = [], opts: SaveOptions = {}) => {
-    // Credentials are checked against the values about to be stored, then stored before the config that names them.
+    // Credentials are checked against the values about to be stored, and stored in the same batch as the config.
     const pending = new Map(secrets.map((s) => [s.name, s.value]))
     const getEnv = (name: string) => pending.get(name) ?? deps.getEnv(name)
     try { validateAdminConfig({ ...next, admin: true }, getEnv) } catch (error) { throw new ToolError(opts.yaml ? locateProblems(opts.yaml, (error as Error).message) : (error as Error).message) }
     const now = nowSeconds()
     if (opts.base !== undefined && opts.base !== await currentRevision(deps.db)) throw new ToolError(`The configuration changed after revision ${opts.base}. Call get_configuration again and retry.`)
-    if (secrets.length) {
-      await deps.db.batch([
-        ...secrets.map(({ name, value }) => ({ sql: `INSERT INTO instance_secrets (name, value, created_at) VALUES (?, ?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value, created_at = excluded.created_at`, params: [storedEnvKey(name), value, now] })),
-        ...secrets.map(({ name }) => ({ sql: `INSERT INTO audit_log (actor, action, target, before_json, after_json, at) VALUES (?, 'setting.store', ?, NULL, NULL, ?)`, params: [actor(token), name, now] })),
-      ])
-      await refreshAdminConfig(deps, now)
-    }
     try {
-      await saveAdminConfig(deps.db, { ...next, admin: true }, actor(token), now, getEnv, { action: 'config.mcp', ...opts, entered: secrets.map((s) => s.name), hasRealEnv: deps.hasRealEnv })
+      await saveAdminConfig(deps.db, { ...next, admin: true }, actor(token), now, deps.getEnv, { action: 'config.mcp', ...opts, secrets, hasRealEnv: deps.hasRealEnv })
     } catch (error) {
       if (error instanceof RevisionConflict) throw new ToolError(`The configuration changed after revision ${opts.base}. Call get_configuration again and retry.`)
       if (error instanceof ChannelCredentialError) throw new ToolError(opts.yaml ? locateProblems(opts.yaml, error.message) : error.message)

@@ -106,9 +106,9 @@ export async function channelBindingStatements(
   db: Db,
   next: AdminConfig,
   before: AdminConfig | undefined,
-  opts: { getEnv: (name: string) => string | undefined; hasRealEnv?: (name: string) => boolean; entered?: readonly string[]; now: number },
+  opts: { getEnv: (name: string) => string | undefined; hasRealEnv?: (name: string) => boolean; entered?: readonly string[]; now: number; pending?: ReadonlyMap<string, string> },
 ): Promise<Statement[]> {
-  const entered = opts.entered ?? []
+  const entered = [...(opts.entered ?? []), ...(opts.pending?.keys() ?? [])]
   const uses = new Map<string, Array<{ sink: string; destination: string }>>()
   for (const [sink, value] of Object.entries(next.sinks ?? {})) {
     for (const env of channelCredentialRefs(value)) uses.set(env, [...(uses.get(env) ?? []), { sink, destination: channelDestination(value) }])
@@ -124,7 +124,9 @@ export async function channelBindingStatements(
   const statements: Statement[] = []
   const reenter = (sink: string, env: string) => problems.push(`sinks.${sink}: the saved credential ${env} was entered for a different server or account. Enter it again for this destination (Settings → Alert channels, or the MCP update_channel tool), or set it as a Worker secret.`)
   for (const [env, list] of uses) {
-    const stored = row(ENV_PREFIX + env)
+    // A credential entered with this save is stored in the same batch as the configuration.
+    const pendingValue = opts.pending?.get(env)
+    const stored = pendingValue !== undefined ? { name: ENV_PREFIX + env, value: pendingValue, created_at: opts.now } : row(ENV_PREFIX + env)
     // Not stored here, or overridden by a Worker secret / environment variable: the operator's own.
     if (!stored || (opts.hasRealEnv ? opts.hasRealEnv(env) : opts.getEnv(env) !== stored.value)) continue
     const destinations = new Set(list.map((use) => use.destination))

@@ -153,4 +153,41 @@ describe('stored channel credentials', () => {
     expect(saved.title).toBe('Renamed')
     expect(saved.access!.provider).toEqual({ type: 'basic' })
   })
+
+  it('stores nothing when a save that enters a credential is refused', async () => {
+    const s = await setup()
+    expect((await s.tool('add_channel', { name: 'alerts', type: 'ntfy', settings: { topic: 'secret-topic', token: 'ntfy-token', server: 'https://ntfy.example.test' } })).error).toBeUndefined()
+    const token = await s.secret('env:SINK_ALERTS_TOKEN')
+    const binding = await s.secret('bind:SINK_ALERTS_TOKEN')
+    expect(token).toBe('ntfy-token')
+    expect(binding).toContain('ntfy https://ntfy.example.test')
+    const intact = async () => {
+      expect(await s.secret('env:SINK_ALERTS_TOKEN')).toBe(token)
+      expect(await s.secret('bind:SINK_ALERTS_TOKEN')).toBe(binding)
+    }
+
+    // MCP: a new server with a new token but not the topic: the stored topic refuses the move.
+    expect((await s.tool('update_channel', { name: 'alerts', settings: { server: 'https://evil.test', token: 'attacker-token' } })).error).toContain('SINK_ALERTS_TOPIC was entered for a different server')
+    await intact()
+    // Settings form: the same refused change.
+    await s.send('/admin/channels/alerts')
+    const moved = await s.post('/admin/channels/alerts', { server: 'https://evil.test', token: 'attacker-token' })
+    expect(moved.res.status).toBe(400)
+    await intact()
+
+    // MCP: a channel whose name collides with "alerts" enters a token for another ntfy server.
+    expect((await s.tool('add_channel', { name: 'ALERTS', type: 'ntfy', settings: { topic: 't', token: 'attacker-token', server: 'https://evil.test' } })).error).toContain('too close to the channel')
+    await intact()
+
+    await s.send('/admin/channels/new?type=ntfy')
+    const form = await s.post('/admin/channels/new', { type: 'ntfy', name: 'Alerts', server: 'https://evil.test', topic: 't', token: 'attacker-token' })
+    expect(form.body).toContain('too close to the channel')
+    await intact()
+    expect((await s.db.first<{ n: number }>(`SELECT COUNT(*) AS n FROM audit_log WHERE action = 'setting.store' AND target = 'SINK_ALERTS_TOKEN'`))!.n).toBe(1)
+
+    // The "alerts" channel still works where it was, and re-entering its token still moves it.
+    expect((await s.tool('update_channel', { name: 'alerts', settings: { server: 'https://other.example.test', topic: 'secret-topic', token: 'new-token' } })).error).toBeUndefined()
+    expect(await s.secret('env:SINK_ALERTS_TOKEN')).toBe('new-token')
+    expect(JSON.parse((await s.secret('bind:SINK_ALERTS_TOKEN'))!)).toMatchObject({ destination: 'ntfy https://other.example.test' })
+  })
 })

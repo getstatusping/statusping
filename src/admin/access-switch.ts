@@ -14,6 +14,7 @@ import { type Deps, refreshAdminConfig, storedEnvKey } from '../deps.ts'
 import { ACCESS_DOCS_URL, OIDC_PRESETS, presetById, TEAM_DOMAIN } from '../setup/instructions.ts'
 import { readRecoverySession, RECOVERY_COOKIE } from '../setup/recovery.ts'
 import { randomToken, timingSafeEqual } from '../util/crypto.ts'
+import { consumeAttempt } from '../rate-limit.ts'
 import { nowSeconds } from '../util/time.ts'
 import type { Form } from './forms.ts'
 import { type AdminConfig, canAdmin, validateAdminConfig } from './security.ts'
@@ -64,6 +65,9 @@ const clearDraft = (deps: Deps) => deps.db.run(`DELETE FROM instance_secrets WHE
 type Source = 'env' | 'pending' | 'current' | false
 /** `envSet`: a Worker secret exists but is not offered, because the draft names a different issuer. */
 type Credential = { value?: string; source: Source; envSet?: boolean }
+
+/** Attempts per minute, per administrator, to confirm a Worker secret by entering its value. */
+const SECRET_CONFIRM_LIMIT = 5
 
 const sameIssuer = (a: string, b: string) => a.trim().replace(/\/+$/, '') === b.trim().replace(/\/+$/, '')
 
@@ -201,7 +205,7 @@ type Post = { viewer: Viewer; csrf: string; config: AdminConfig; form: Form }
 export interface SwitchHelpers {
   view: (c: Context) => Promise<Response | View>
   post: (c: Context) => Promise<Response | Post>
-  html: (c: Context, body: string, status?: 200 | 400) => Response
+  html: (c: Context, body: string, status?: 200 | 400 | 429) => Response
   done: (c: Context, path: string, notice: string) => Response
 }
 
@@ -211,7 +215,7 @@ const currentMethod = (deps: Deps) => deps.config.access?.provider.type as Metho
 
 /** Settings pages for the switch. Called from mountAdminRoutes with its signed-in helpers. */
 export function mountAccessSwitch(app: Hono, deps: Deps, h: SwitchHelpers): void {
-  const configure = async (c: Context, v: View | Post, draft: SwitchDraft, error?: string, status: 200 | 400 = 200) =>
+  const configure = async (c: Context, v: View | Post, draft: SwitchDraft, error?: string, status: 200 | 400 | 429 = 200) =>
     h.html(c, configurePage({ viewer: v.viewer, csrf: v.csrf, origin: origin(c, deps), draft, creds: await credentials(deps, draft), error: error ?? ERRORS[c.req.query('error') ?? ''], notice: 'notice' in v ? v.notice : undefined, preset: c.req.query('preset') }), status)
 
   app.get('/admin/access/method', async (c) => {
@@ -278,6 +282,12 @@ export function mountAccessSwitch(app: Hono, deps: Deps, h: SwitchHelpers): void
       try { if (new URL(issuer).protocol !== 'https:') error = 'The issuer must be an https:// URL.' } catch { error = 'Enter the issuer URL, such as https://accounts.google.com.' }
       if (!error) { try { await discover(issuer, deps) } catch (e) { error = `StatusPing could not read ${issuer}/.well-known/openid-configuration (${(e as Error).message}).` } }
       const newIssuer = !keepsIssuer(deps, updated)
+      // Entering a value to confirm a Worker secret tells the administrator whether it matches;
+      // limit those comparisons so they cannot be used to guess the secret.
+      if (newIssuer && SECRETS.oidc.some((name) => deps.hasRealEnv(name) && text(p.form, name))
+        && !(await consumeAttempt(deps.db, 'access-secret', p.viewer.email.toLowerCase(), now, SECRET_CONFIRM_LIMIT, SECRET_CONFIRM_LIMIT))) {
+        return configure(c, p, updated, 'Too many attempts to confirm a Worker secret. Wait a minute and try again.', 429)
+      }
       await stash('OIDC_CLIENT_ID', newIssuer)
       await stash('OIDC_CLIENT_SECRET', newIssuer)
       if (!error && newIssuer) {

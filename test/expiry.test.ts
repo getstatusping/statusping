@@ -5,6 +5,7 @@ import { fakeFetch } from './helpers.ts'
 import { createTestDb, makeDeps, testConfig } from './helpers.ts'
 import { runExpiryChecks } from '../src/expiry/run.ts'
 import { syncConfig } from '../src/sync.ts'
+import { PRIVATE_TARGET_ERROR, privateTargetGuard } from '../src/util/private-targets.ts'
 
 const NOW = Date.parse('2026-10-10T00:00:00Z')
 
@@ -100,6 +101,34 @@ describe('daily expiry runner', () => {
       expect(await runExpiryChecks(deps, now + 30)).toBe(0)
       expect(await db.first(`SELECT severity, reason FROM incidents WHERE monitor_id = 'site'`)).toEqual({ severity: 'warning', reason: 'ssl_expiring' })
       expect(await db.first<{ status: string }>(`SELECT status FROM monitor_state WHERE monitor_id = 'site'`)).toEqual(expect.objectContaining({ status: 'new' }))
+    } finally {
+      await close()
+    }
+  })
+
+  it('never probes a private host directly when the private-target guard is on', async () => {
+    const { db, close } = await createTestDb('libsql')
+    try {
+      const probed: Array<{ host: string; port: number; address?: string }> = []
+      const config = testConfig({ groups: [{ name: 'Web', monitors: [{ id: 'site', kind: 'http', name: 'Site', url: 'https://intranet.test:8443/health' }] }] })
+      const deps = makeDeps(db, { config })
+      deps.certificateExpiry = async (host, port, options) => {
+        probed.push({ host, port, address: options?.address })
+        return { status: 'expiration', expiresAt: Math.floor(Date.parse('2027-01-01T00:00:00Z') / 1000) }
+      }
+      const answers: Record<string, string[]> = { 'intranet.test': ['10.0.0.5'] }
+      deps.targetGuard = privateTargetGuard(async (host) => answers[host] ?? [])
+      const now = Math.floor(Date.parse('2026-10-10T23:59:00Z') / 1000)
+      await syncConfig(deps, now)
+      expect(await runExpiryChecks(deps, now)).toBe(1)
+      expect(probed).toEqual([])
+      const row = await db.first<{ error: string; expires_at: number | null }>(`SELECT error, expires_at FROM expiry_checks WHERE monitor_id = 'site' AND kind = 'ssl'`)
+      expect(row).toEqual({ error: `Certificate not checked: ${PRIVATE_TARGET_ERROR}`, expires_at: null })
+
+      // A public answer is probed at the checked address, with the hostname kept for SNI.
+      answers['intranet.test'] = ['203.0.113.7']
+      expect(await runExpiryChecks(deps, now + 86400)).toBe(1)
+      expect(probed).toEqual([{ host: 'intranet.test', port: 8443, address: '203.0.113.7' }])
     } finally {
       await close()
     }

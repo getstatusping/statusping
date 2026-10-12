@@ -120,13 +120,13 @@ const notice = (text: string | undefined, kind: 'error' | 'success' = 'success')
   !text ? '' : kind === 'error' ? `<p class="form-error" role="alert">${escape(text)}</p>` : `<p class="alert success" role="status">${escape(text)}</p>`
 
 /** Page shell: the site header with the account menu, then the section menu and content. */
-export function layout(opts: { viewer: Viewer; section: Section; title: string; description?: string; actions?: string; body: string; notice?: string; error?: string }): string {
+export function layout(opts: { viewer: Viewer; section: Section; title: string; /** Plain text; escaped here. */ description?: string; actions?: string; body: string; notice?: string; error?: string }): string {
   const nav = SECTIONS.map(([id, label, href]) => `<li><a href="${href}"${id === opts.section ? ' aria-current="page"' : ''}>${label}</a></li>`).join('')
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex"><title>${escape(opts.title)} · Settings</title><style>${STYLES}${ADMIN_STYLES}</style></head><body>
 <header class="site-header"><div class="wrap site-header-inner" style="max-width:1080px"><nav class="header-nav" aria-label="Site"><a class="header-link" href="/">Home</a><a class="header-link" href="/admin" aria-current="page">Settings</a></nav><div class="account"><span class="muted small account-email">${escape(opts.viewer.email)}</span><a class="btn-outline" href="/auth/logout">Sign out</a></div></div></header>
 <main class="wrap" style="max-width:1080px"><div class="settings">
 <nav class="settings-nav" aria-label="Settings"><ul>${nav}</ul><div class="nav-foot"><a href="/">← View status page</a></div></nav>
-<div><div class="settings-head"><div><h1>${escape(opts.title)}</h1>${opts.description ? `<p>${opts.description}</p>` : ''}</div>${opts.actions ?? ''}</div>
+<div><div class="settings-head"><div><h1>${escape(opts.title)}</h1>${opts.description ? `<p>${escape(opts.description)}</p>` : ''}</div>${opts.actions ?? ''}</div>
 <!--banner-->${notice(opts.notice)}${notice(opts.error, 'error')}${opts.body}</div></div></main>
 <script>${REVEAL_SCRIPT};${COPY_SCRIPT}</script></body></html>`
 }
@@ -229,7 +229,7 @@ ${pingSection}${danger}` })
 }
 
 export function pingUrlPage(opts: { viewer: Viewer; monitorName: string; monitorId: string; pingUrl: string; created?: boolean }): string {
-  return layout({ ...opts, section: 'monitors', title: opts.created ? 'Monitor added' : 'New ping URL', description: escape(opts.monitorName), body: `<section class="card">
+  return layout({ ...opts, section: 'monitors', title: opts.created ? 'Monitor added' : 'New ping URL', description: opts.monitorName, body: `<section class="card">
 <p class="alert warning">${opts.created ? 'This is the job\'s ping URL. It is shown only once: copy it now.' : 'This URL is shown only once. Copy it now; the previous URL no longer works.'}</p><p class="secret" data-copy="ping URL">${escape(opts.pingUrl)}</p>
 <p>Call it when the job finishes, for example:</p><pre>curl -fsS ${escape(opts.pingUrl)}</pre>
 <p class="hint" style="margin:8px 0 16px">Report a failure with <code>/fail</code> on the end; mark the start with <code>/start</code> to track run time.</p>
@@ -436,7 +436,7 @@ export function diffBlock(lines: Array<{ op: ' ' | '+' | '-'; text: string } | n
 export function revisionPage(opts: { viewer: Viewer; csrf: string; revision: { id: number; actor: string; action: string; at: number }; current: number; diff: string; notice?: string; error?: string }): string {
   const r = opts.revision
   const isCurrent = r.id === opts.current
-  return layout({ ...opts, section: 'configuration', title: `Version ${r.id}`, description: `${escape(actionLabel(r.action))} · ${escape(r.actor)} · ${when16(r.at)}`, body: `
+  return layout({ ...opts, section: 'configuration', title: `Version ${r.id}`, description: `${actionLabel(r.action)} · ${r.actor} · ${when16(r.at)}`, body: `
 <section class="card"><h2>${isCurrent ? 'This is the current version' : `Changes from version ${r.id} to the current version (${opts.current})`}</h2>
 <p class="lead">${isCurrent ? 'Compare an earlier version from the history to see what changed since.' : 'Lines marked − are in this version; lines marked + are in the current one.'}</p>
 ${isCurrent ? '' : opts.diff}</section>

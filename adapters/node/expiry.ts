@@ -11,6 +11,8 @@ export interface NodeCertificateExpiryOptions {
   /** Injectable so this Node-only adapter can be tested without a network connection. */
   connect?: (options: ConnectionOptions) => TlsSocketLike
   timeoutMs?: number
+  /** The address to connect to, already checked by the private-target guard; SNI keeps the hostname. */
+  address?: string
 }
 
 /**
@@ -39,7 +41,7 @@ export function lookupNodeCertificateExpiry(
       resolve(result)
     }
     try {
-      socket = connect({ host, port, servername: host, rejectUnauthorized: true })
+      socket = connect({ host: options.address ?? host, port, servername: host, rejectUnauthorized: true })
       socket.once('secureConnect', () => {
         const expiresAt = toUnixSeconds(socket.getPeerCertificate().valid_to)
         finish(expiresAt === null

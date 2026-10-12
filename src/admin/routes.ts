@@ -3,7 +3,7 @@ import { currentViewer, fromThisSite, signInResponse } from '../auth/providers.t
 import type { Viewer } from '../auth/viewer.ts'
 import type { MonitorInput, PageInput, SinkInput } from '../config.ts'
 import type { Deps } from '../deps.ts'
-import { isStorableEnv, refreshAdminConfig, storedEnvKey } from '../deps.ts'
+import { isStorableEnv, refreshAdminConfig } from '../deps.ts'
 import { isValidTimeZone, nowSeconds } from '../util/time.ts'
 import {
   describeChanges, findMonitor, type Form, FormError, monitorFromForm, monitorRows, pageFromForm, pageList, putMonitor, putPage, putSink,
@@ -149,25 +149,14 @@ export function mountAdminRoutes(app: Hono, deps: Deps): void {
     try { normalized = validateAdminConfig({ ...next, admin: true }, deps.getEnv).normalized } catch (error) { return opts.yaml ? locateProblems(opts.yaml, (error as Error).message) : (error as Error).message }
     if (!canAdmin(viewer, normalized)) return 'This change would remove your own access to Settings. Ask another administrator to make it.'
     const now = nowSeconds()
-    // Checked before secrets are stored, so a refused save leaves nothing behind.
     if (p.base !== undefined) {
       const current = await currentRevision(deps.db)
       if (current !== p.base) { formRevision.set(p.c.req.raw, current); return CONFLICT }
     }
-    if (secrets.length) {
-      await deps.db.batch([
-        ...secrets.map(({ name, value }) => ({
-          sql: `INSERT INTO instance_secrets (name, value, created_at) VALUES (?, ?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value, created_at = excluded.created_at`,
-          params: [storedEnvKey(name), value, now],
-        })),
-        ...secrets.map(({ name }) => ({
-          sql: `INSERT INTO audit_log (actor, action, target, before_json, after_json, at) VALUES (?, 'setting.store', ?, NULL, NULL, ?)`,
-          params: [viewer.email, name, now],
-        })),
-      ])
-    }
     try {
-      await saveAdminConfig(deps.db, { ...next, admin: true }, viewer.email, now, deps.getEnv, { ...opts, base: p.base, entered: secrets.map((s) => s.name), hasRealEnv: deps.hasRealEnv })
+      // Entered credentials are stored in the same batch as the configuration, after the name and
+      // binding checks, so a refused save leaves the stored credential and its binding untouched.
+      await saveAdminConfig(deps.db, { ...next, admin: true }, viewer.email, now, deps.getEnv, { ...opts, base: p.base, secrets, hasRealEnv: deps.hasRealEnv })
     } catch (error) {
       if (error instanceof RevisionConflict) { formRevision.set(p.c.req.raw, error.current); return CONFLICT }
       return (error as Error).message
@@ -190,7 +179,7 @@ Alert links, ping URLs and sign-in callbacks use ${esc(configured)}. If the site
   }
 
   /** Every form carries the revision it was rendered from, next to its CSRF value. */
-  const html = (c: Context, body: string, status: 200 | 400 = 200) => {
+  const html = (c: Context, body: string, status: 200 | 400 | 429 = 200) => {
     const revision = formRevision.get(c.req.raw) ?? deps.configRevision
     const page = body.replace(/(<input type="hidden" name="csrf" value="[^"]*">)/g, `$1<input type="hidden" name="revision" value="${revision}">`).replace('<!--banner-->', addressBanner(c))
     return c.html(page, status, noStore)

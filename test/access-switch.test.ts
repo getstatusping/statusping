@@ -225,6 +225,23 @@ describe('changing the sign-in method from Settings', () => {
     expect(evil.tokenCalls.map((form) => form.get('client_secret'))).toEqual(['env-secret'])
   })
 
+  it('limits attempts to confirm a Worker secret by entering its value', async () => {
+    const evil = await provider('evil.test', () => ({ aud: 'env-client', email: 'admin@example.test', email_verified: true }))
+    const s = await signedIn(async (call) => (await evil.handle(call)) ?? new Response('nf', { status: 404 }), { OIDC_CLIENT_ID: 'env-client', OIDC_CLIENT_SECRET: 'env-secret' })
+    await s.get('/admin/access/method')
+    await s.post('/admin/access/method', { method: 'oidc' })
+    await s.get('/admin/access/method')
+    await s.post('/admin/access/method/settings', { preset: 'other', issuer: 'https://evil.test' })
+    const guess = (secret: string) => s.post('/admin/access/method/settings', { preset: 'other', issuer: 'https://evil.test', OIDC_CLIENT_ID: 'env-client', OIDC_CLIENT_SECRET: secret })
+    for (let i = 0; i < 5; i++) expect((await guess(`guess-${i}`)).res.status).toBe(400)
+    // Further comparisons are refused, the right value included, and nothing is stored.
+    const limited = await guess('env-secret')
+    expect(limited.res.status).toBe(429)
+    expect(limited.body).toContain('Too many attempts')
+    expect(limited.body).not.toContain('does not match')
+    expect((await s.get('/admin/access/method/oidc/start')).res.headers.get('location')).toBe('/admin/access/method?notice=method-saved')
+  })
+
   it('treats a missing email_verified claim as unverified in the test sign-in', async () => {
     let nonce = ''
     let trusted = false
