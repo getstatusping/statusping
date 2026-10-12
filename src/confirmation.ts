@@ -1,5 +1,6 @@
 import type { HttpMonitor, TcpMonitor } from './config.ts'
 import type { Db, SqlValue } from './db/types.ts'
+import { MAX_CHECK_ERROR, clipText } from './util/text.ts'
 
 /** A result reported by one remote vantage point. `unavailable` never counts toward quorum. */
 export interface ConfirmationObservation {
@@ -72,7 +73,8 @@ export async function confirmFailure(
     .map((item, index) => ({
       ...item,
       location: cleanLocation(item.location, index === 0 ? 'scheduler' : 'unknown'),
-      err: item.err ?? null,
+      // A remote probe's error is as unbounded as the primary's; store a bounded excerpt.
+      err: typeof item.err === 'string' ? clipText(item.err, MAX_CHECK_ERROR) : null,
     }))
     .filter((item) => {
       const key = item.location.toLowerCase()

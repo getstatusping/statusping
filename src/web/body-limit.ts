@@ -20,18 +20,42 @@ export const BODY_LIMITS = {
 
 /** Paths whose body may hold a whole configuration file. */
 const CONFIG_PATHS = new Set(['/admin/import', '/admin/import/apply', '/api/admin/config', '/setup/import', '/api/setup', '/mcp'])
+/** Setup routes that take a configuration; before sign-in exists they are open while setup is pending. */
+const SETUP_CONFIG_PATHS = new Set(['/setup/import', '/api/setup'])
+
+/** What the cap may depend on besides the route; both default to the cautious answer. */
+export interface BodyLimitContext {
+  /** The request carries credentials: an Authorization header or a session / Access cookie. */
+  credentials?: boolean
+  /** Setup has not finished, so the setup import routes are expected to receive a configuration. */
+  setupPending?: boolean
+}
 
 /**
  * The body cap for a request, or null when the route reads its own body with a cap: /ping reads
  * after its token lookup and truncates at MAX_PING_BODY_BYTES, and /internal/confirm reads at most
  * 1 KiB after checking its bearer secret (see web/app.ts).
+ *
+ * The 1 MiB configuration cap is granted only to requests that could be allowed to send one: those
+ * carrying credentials, or the setup import routes while setup is pending. Anyone else gets the
+ * public cap, so an anonymous client cannot make the server buffer a megabyte per request.
  */
-export function bodyLimitFor(method: string, path: string): number | null {
+export function bodyLimitFor(method: string, path: string, context: BodyLimitContext = {}): number | null {
   if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS') return null
   if (path.startsWith('/ping/') || path === '/internal/confirm') return null
-  if (CONFIG_PATHS.has(path)) return BODY_LIMITS.config
+  if (CONFIG_PATHS.has(path)) {
+    if (context.credentials || (context.setupPending && SETUP_CONFIG_PATHS.has(path))) return BODY_LIMITS.config
+    return BODY_LIMITS.public
+  }
   if (path.startsWith('/admin/') || path.startsWith('/api/admin/')) return BODY_LIMITS.admin
   return BODY_LIMITS.public
+}
+
+/** True when the request carries something that could authenticate it (checked later, not here). */
+export function carriesCredentials(c: Context): boolean {
+  if (c.req.header('authorization')) return true
+  const cookie = c.req.header('cookie') ?? ''
+  return /(?:^|;\s*)(?:sp_session|CF_Authorization)=[^;\s]/.test(cookie) || Boolean(c.req.header('cf-access-jwt-assertion'))
 }
 
 const tooLarge = (c: Context) => c.text('Payload too large', 413, { 'cache-control': 'no-store' })
@@ -42,9 +66,9 @@ const tooLarge = (c: Context) => c.text('Payload too large', 413, { 'cache-contr
  * cap plus one chunk is read. An accepted body is buffered and handed on as a fresh Request, so
  * handlers keep using c.req.parseBody() / json() / text() unchanged.
  */
-export function bodyLimit(limitFor: (method: string, path: string) => number | null = bodyLimitFor): MiddlewareHandler {
+export function bodyLimit(limitFor: (method: string, path: string, c: Context) => number | null = (method, path, c) => bodyLimitFor(method, path, { credentials: carriesCredentials(c) })): MiddlewareHandler {
   return async (c, next) => {
-    const limit = limitFor(c.req.method, c.req.path)
+    const limit = limitFor(c.req.method, c.req.path, c)
     if (limit === null || !c.req.raw.body) return next()
     const declared = c.req.header('content-length')
     if (declared !== undefined) {

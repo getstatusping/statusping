@@ -42,8 +42,16 @@ describe('request body limits', () => {
     }
     for (const path of ['/admin/general', '/admin/monitors/new', '/api/admin/incidents']) expect(bodyLimitFor('POST', path)).toBe(BODY_LIMITS.admin)
     expect(bodyLimitFor('PATCH', '/api/admin/incidents/1')).toBe(BODY_LIMITS.admin)
-    for (const path of ['/admin/import', '/admin/import/apply', '/setup/import', '/api/setup', '/mcp']) expect(bodyLimitFor('POST', path)).toBe(BODY_LIMITS.config)
-    expect(bodyLimitFor('PUT', '/api/admin/config')).toBe(BODY_LIMITS.config)
+    for (const path of ['/admin/import', '/admin/import/apply', '/setup/import', '/api/setup', '/mcp']) {
+      expect(bodyLimitFor('POST', path, { credentials: true })).toBe(BODY_LIMITS.config)
+      // Without credentials the configuration cap is not granted (pre-auth buffering).
+      expect(bodyLimitFor('POST', path)).toBe(BODY_LIMITS.public)
+    }
+    expect(bodyLimitFor('PUT', '/api/admin/config', { credentials: true })).toBe(BODY_LIMITS.config)
+    expect(bodyLimitFor('PUT', '/api/admin/config')).toBe(BODY_LIMITS.public)
+    // While setup is pending, only the setup import routes take a configuration without credentials.
+    for (const path of ['/setup/import', '/api/setup']) expect(bodyLimitFor('POST', path, { setupPending: true })).toBe(BODY_LIMITS.config)
+    for (const path of ['/admin/import', '/api/admin/config', '/mcp']) expect(bodyLimitFor('POST', path, { setupPending: true })).toBe(BODY_LIMITS.public)
   })
 
   it('refuses an oversized body with 413 after reading at most the cap, on every route that reads one', async () => {
@@ -68,7 +76,7 @@ describe('request body limits', () => {
         const res = await app.request(big.request)
         expect(res.status, `${method} ${path}`).toBe(413)
         // At most the cap plus the chunk that crossed it (the stream may pre-pull one more).
-        expect(big.pulled(), `${method} ${path}`).toBeLessThanOrEqual(bodyLimitFor(method, path)! + 2 * CHUNK)
+        expect(big.pulled(), `${method} ${path}`).toBeLessThanOrEqual(bodyLimitFor(method, path, { credentials: 'authorization' in headers })! + 2 * CHUNK)
       }
     } finally {
       await close()

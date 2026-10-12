@@ -1,15 +1,15 @@
 import { Hono } from 'hono'
 import { readCappedText, readTruncatedText } from '../util/capped-body.ts'
-import { bodyLimit } from './body-limit.ts'
+import { bodyLimit, bodyLimitFor, carriesCredentials } from './body-limit.ts'
 import type { Context } from 'hono'
 import { currentViewer, hasCredentials, mountAuthRoutes, fromThisSite, signInResponse } from '../auth/providers.ts'
 import { type Viewer, canAcknowledge, canOpen } from '../auth/viewer.ts'
-import { acknowledgeIncident, verifyAcknowledgeToken } from '../acknowledgements.ts'
+import { acknowledgeIncident, acknowledgeSecret, verifyAcknowledgeToken } from '../acknowledgements.ts'
 import type { NormalizedPage } from '../config.ts'
 import type { Deps } from '../deps.ts'
 import { dispatchNotifications } from '../notify/dispatch.ts'
 import { dispatchAnnouncementNotifications, enqueueAnnouncementNotifications } from '../notify/announcements.ts'
-import { MAX_PING_BODY_BYTES, handlePing, parseSignal } from '../ping.ts'
+import { MAX_PING_BODY_BYTES, handlePing, parseSignal, pushMonitorForToken } from '../ping.ts'
 import { ensureSchema } from '../schema.ts'
 import { tick } from '../tick.ts'
 import { timingSafeEqual } from '../util/crypto.ts'
@@ -91,13 +91,13 @@ const CONFIRM_BODY_LIMIT = 1024
  * practice, yet it still bounds the work an anonymous flood can cause.
  */
 const UNKNOWN_IP_PING_LIMIT = 600
+/** Pings a known push monitor may still record per minute once the shared bucket is used up. */
+export const PER_MONITOR_PING_LIMIT = 60
 
 export function createApp(deps: Deps): Hono {
   const app = new Hono()
   let config = deps.config
 
-  // Cap every request body before anything parses it (see body-limit.ts); /ping caps its own.
-  app.use('*', bodyLimit())
   // An admins list also needs a sign-in affordance on otherwise-public monitor pages.
   let hasRestricted = config.pages.some((p) => p.access !== 'public') || Boolean(config.access?.admins)
 
@@ -120,6 +120,11 @@ export function createApp(deps: Deps): Hono {
     await next()
   })
 
+  // Cap every request body before anything parses it (see body-limit.ts); /ping caps its own.
+  // It runs after the setup check above (which reads no body) so the cap knows whether setup is
+  // pending: only then may an anonymous client send a whole configuration to the setup routes.
+  app.use('*', bodyLimit((method, path, c) => bodyLimitFor(method, path, { credentials: carriesCredentials(c), setupPending: deps.setupPending })))
+
   app.onError((err, c) => {
     // A deliberate response from deep inside a handler, such as the 429 for a rate-limited Basic header.
     if (err instanceof HTTPException) return err.getResponse()
@@ -136,7 +141,15 @@ export function createApp(deps: Deps): Hono {
     const now = nowSeconds()
     const ip = deps.clientIp(c.req.raw)
     const bucket = ip ? { key: ip, limit: config.limits.pingPerIpPerMinute } : attemptBucket('ping', null, 0, Math.max(UNKNOWN_IP_PING_LIMIT, config.limits.pingPerIpPerMinute))
-    if (!(await consumePingRateLimit(deps.db, bucket.key, now, bucket.limit))) {
+    let allowed = await consumePingRateLimit(deps.db, bucket.key, now, bucket.limit)
+    if (!allowed && !ip) {
+      // The shared unknown-address bucket is used up, possibly by a flood of made-up tokens. A
+      // ping whose token belongs to a push monitor still counts against that monitor's own
+      // allowance, so anonymous traffic cannot starve real pings; unknown tokens stay refused.
+      const monitorId = await pushMonitorForToken(deps, c.req.param('token') ?? '')
+      if (monitorId) allowed = await consumePingRateLimit(deps.db, `ping:monitor:${monitorId}`, now, PER_MONITOR_PING_LIMIT)
+    }
+    if (!allowed) {
       return c.text('Too many requests', 429, { 'cache-control': 'no-store', 'retry-after': String(60 - (now % 60)) })
     }
     // The body is read only once the token matches a push monitor, and only its first
@@ -378,7 +391,7 @@ export function createApp(deps: Deps): Hono {
   // Alert capability links are deliberately confirmed with a non-mutating GET. The token is
   // signed and expires, while acknowledgements.incident_id makes the POST single-use.
   app.get('/ack/:token', async (c) => {
-    const secret = deps.getEnv('ACK_SECRET')
+    const secret = await acknowledgeSecret(deps, false)
     if (!secret) return c.text('Not found', 404)
     const incidentId = await verifyAcknowledgeToken(c.req.param('token'), nowSeconds(), secret)
     if (!incidentId) return c.text('Not found', 404)
@@ -390,7 +403,7 @@ export function createApp(deps: Deps): Hono {
     return c.html(acknowledgePage(chrome, c.req.param('token'), incident.name), 200, { 'cache-control': 'no-store' })
   })
   app.post('/ack', async (c) => {
-    const secret = deps.getEnv('ACK_SECRET')
+    const secret = await acknowledgeSecret(deps, false)
     if (!secret) return c.text('Not found', 404)
     const body = await c.req.parseBody()
     const token = typeof body.token === 'string' ? body.token : ''

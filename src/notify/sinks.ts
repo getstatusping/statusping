@@ -1,6 +1,8 @@
 import { type EnvGetter, type SinkInput, resolveSecret } from '../config.ts'
 import { readTruncatedText } from '../util/capped-body.ts'
 import { type SmtpConnector, sendSmtp } from './smtp.ts'
+import { formatMailbox } from '../util/email.ts'
+import { clipText } from '../util/text.ts'
 
 export interface AlertMessage {
   kind: 'down' | 'up' | 'renotify' | 'warning' | 'announcement' | 'test'
@@ -37,9 +39,23 @@ export interface SinkRuntime {
 
 const ERROR_TEXT_MAX_BYTES = 4096
 
-const clip = (s: string, max: number) => (s.length > max ? `${s.slice(0, max - 1)}…` : s)
+const clip = (s: string, max: number) => clipText(s, max)
 
 const escapeHtml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+
+/**
+ * Slack mrkdwn and Google Chat text treat `<...>` as links and mentions (`<!channel>`,
+ * `<url|text>`, `<users/all>`). Escaping `&`, `<` and `>` is their documented way to show text
+ * that came from elsewhere (an incident detail can quote a ping body or a target's response).
+ */
+export const escapeChatText = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+
+/**
+ * Mattermost Markdown: backslash-escape the punctuation that formats or links (links, images,
+ * headings, emphasis, code, tables, HTML-like `<...>`), and put a zero-width space after every `@`
+ * that starts a name so `@channel`, `@here`, `@all` and `@user` never mention anyone.
+ */
+export const escapeMattermost = (s: string) => s.replace(/[\\`*_~[\]<>#|!()]/g, '\\$&').replace(/@(?=[\w.-])/g, '@\u200b')
 
 async function ensureOk(res: Response, sink: string): Promise<void> {
   if (res.ok) return
@@ -225,12 +241,12 @@ function slack(name: string, cfg: Extract<SinkInput, { type: 'slack' }>, getEnv:
     async send(msg, fetchFn) {
       const webhookUrl = resolveSecret(cfg.webhookUrl, getEnv)!
       await withScrub([webhookUrl], async () => {
-        const detail = clip(msg.body || msg.title, 2_800)
+        const detail = escapeChatText(clip(msg.body || msg.title, 2_800))
         const res = await fetchFn(webhookUrl, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({
-            text: msg.title,
+            text: escapeChatText(msg.title),
             blocks: [
               { type: 'header', text: { type: 'plain_text', text: clip(msg.title, 150), emoji: true } },
               { type: 'section', text: { type: 'mrkdwn', text: detail } },
@@ -292,7 +308,7 @@ function googleChat(name: string, cfg: Extract<SinkInput, { type: 'googlechat' }
       const webhookUrl = resolveSecret(cfg.webhookUrl, getEnv)!
       const plain = (s: string) => s.replace(/[<>|*_~`]/g, '')
       await withScrub([webhookUrl], async () => {
-        const text = [`*${plain(clip(msg.title, 250))}*`, msg.body ? clip(msg.body, 3000) : null, `<${msg.url}|Open status page>`, msg.acknowledgeUrl ? `<${msg.acknowledgeUrl}|Acknowledge>` : null].filter(Boolean).join('\n')
+        const text = [`*${plain(clip(msg.title, 250))}*`, msg.body ? escapeChatText(clip(msg.body, 3000)) : null, `<${msg.url}|Open status page>`, msg.acknowledgeUrl ? `<${msg.acknowledgeUrl}|Acknowledge>` : null].filter(Boolean).join('\n')
         const res = await fetchFn(webhookUrl, { method: 'POST', headers: { 'content-type': 'application/json; charset=UTF-8' }, body: JSON.stringify({ text }) })
         await ensureOk(res, 'googlechat')
       })
@@ -308,7 +324,7 @@ function mattermost(name: string, cfg: Extract<SinkInput, { type: 'mattermost' }
     async send(msg, fetchFn) {
       const webhookUrl = resolveSecret(cfg.webhookUrl, getEnv)!
       await withScrub([webhookUrl], async () => {
-        const text = [`#### ${clip(msg.title, 250)}`, msg.body ? clip(msg.body, 3000) : null, `[Open status page](${msg.url})${msg.acknowledgeUrl ? ` · [Acknowledge](${msg.acknowledgeUrl})` : ''}`].filter(Boolean).join('\n')
+        const text = [`#### ${escapeMattermost(clip(msg.title, 250))}`, msg.body ? escapeMattermost(clip(msg.body, 3000)) : null, `[Open status page](${msg.url})${msg.acknowledgeUrl ? ` · [Acknowledge](${msg.acknowledgeUrl})` : ''}`].filter(Boolean).join('\n')
         const res = await fetchFn(webhookUrl, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text, username: 'StatusPing' }) })
         await ensureOk(res, 'mattermost')
       })
@@ -425,7 +441,7 @@ function email(
         const res = await fetchFn('https://api.resend.com/emails', {
           method: 'POST',
           headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
-          body: JSON.stringify({ from: via.from, to: cfg.to, subject, text, html }),
+          body: JSON.stringify({ from: formatMailbox(via.from), to: cfg.to, subject, text, html }),
         })
         await ensureOk(res, 'resend')
       })

@@ -1,4 +1,9 @@
 import type { JsonAssertionInput, JsonValue, NormalizedJsonAssertion } from '../config.ts'
+import { clipText } from '../util/text.ts'
+
+/** Characters of a JSON value quoted in an assertion failure; the value itself can be 1 MiB. */
+export const MAX_PRINTED_JSON = 200
+const print = (value: unknown) => clipText(JSON.stringify(value) ?? String(value), MAX_PRINTED_JSON)
 
 /** Validates the supported subset and returns simple property/index segments. */
 export function parseJsonPath(path: string): (string | number)[] {
@@ -47,12 +52,12 @@ export function assertJson(value: unknown, assertions: readonly JsonAssertion[])
       continue
     }
     if (!got.found) return `${check.path} does not exist`
-    const printable = JSON.stringify(got.value)
-    if (check.operator === 'equals' && !equalJson(got.value, check.expected)) return `${check.path} is ${printable}, expected ${JSON.stringify(check.expected)}`
-    if (check.operator === 'notEquals' && equalJson(got.value, check.expected)) return `${check.path} is ${printable}, expected a different value`
-    if (check.operator === 'contains' && (typeof got.value !== 'string' || typeof check.expected !== 'string' || !got.value.includes(check.expected))) return `${check.path} does not contain ${JSON.stringify(check.expected)}`
-    if (check.operator === 'lessThan' && (typeof got.value !== 'number' || typeof check.expected !== 'number' || !(got.value < check.expected))) return `${check.path} is ${printable}, expected less than ${check.expected}`
-    if (check.operator === 'greaterThan' && (typeof got.value !== 'number' || typeof check.expected !== 'number' || !(got.value > check.expected))) return `${check.path} is ${printable}, expected greater than ${check.expected}`
+    const printable = () => print(got.value)
+    if (check.operator === 'equals' && !equalJson(got.value, check.expected)) return `${check.path} is ${printable()}, expected ${print(check.expected)}`
+    if (check.operator === 'notEquals' && equalJson(got.value, check.expected)) return `${check.path} is ${printable()}, expected a different value`
+    if (check.operator === 'contains' && (typeof got.value !== 'string' || typeof check.expected !== 'string' || !got.value.includes(check.expected))) return `${check.path} does not contain ${print(check.expected)}`
+    if (check.operator === 'lessThan' && (typeof got.value !== 'number' || typeof check.expected !== 'number' || !(got.value < check.expected))) return `${check.path} is ${printable()}, expected less than ${print(check.expected)}`
+    if (check.operator === 'greaterThan' && (typeof got.value !== 'number' || typeof check.expected !== 'number' || !(got.value > check.expected))) return `${check.path} is ${printable()}, expected greater than ${print(check.expected)}`
   }
   return null
 }

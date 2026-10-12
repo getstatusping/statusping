@@ -1,4 +1,5 @@
 import type { Db, SqlValue, Statement } from './db/types.ts'
+import { clipText } from './util/text.ts'
 
 export type Status = 'new' | 'up' | 'late' | 'down' | 'paused'
 export type IncidentReason = 'missed' | 'failed' | 'hung' | 'check_failed' | 'ssl_expiring' | 'domain_expiring'
@@ -111,9 +112,9 @@ export async function applyTransition(db: Db, t: Transition): Promise<boolean> {
   return first?.changes === 1
 }
 
+/** Cuts at a code-point boundary (see clipText), so no lone surrogate is ever stored. */
 export function truncate(value: string | null, max: number): string | null {
-  if (value === null) return null
-  return value.length > max ? `${value.slice(0, max - 1)}…` : value
+  return value === null ? null : clipText(value, max)
 }
 
 export async function loadStates(db: Db): Promise<Map<string, MonitorStateRow>> {

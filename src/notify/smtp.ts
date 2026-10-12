@@ -3,7 +3,7 @@
  * (port 587), AUTH PLAIN or LOGIN, one message per connection. Plaintext delivery is not
  * supported, so credentials never cross the network unencrypted.
  */
-import { hasControlChars, isEmailAddress } from '../util/email.ts'
+import { hasControlChars, isEmailAddress, parseMailbox, quoteDisplayName } from '../util/email.ts'
 
 /** A connected byte stream. Runtime adapters (Workers sockets, Node net/tls) implement it. */
 export interface SmtpSocket {
@@ -48,9 +48,14 @@ const wrap = (value: string) => value.replace(/.{1,76}/g, '$&\r\n')
 export const mailboxAddress = (mailbox: string) => (/<([^<>]+)>\s*$/.exec(mailbox)?.[1] ?? mailbox).trim()
 /** Header-safe display text: RFC 2047 encoded when it is not plain ASCII. */
 const headerText = (value: string) => (/^[\x20-\x7e]*$/.test(value) ? value : `=?UTF-8?B?${b64(value)}?=`)
+/**
+ * The From header: a non-ASCII display name is RFC 2047 encoded (an encoded word needs no
+ * quoting); an ASCII one is quoted when it holds specials such as `,` or `:`.
+ */
 const headerMailbox = (mailbox: string) => {
-  const match = /^\s*"?([^"<]*?)"?\s*<([^<>]+)>\s*$/.exec(mailbox)
-  return match && match[1] ? `${headerText(match[1])} <${match[2]}>` : mailboxAddress(mailbox)
+  const { name, address } = parseMailbox(mailbox)
+  if (!name) return address
+  return `${/^[\x20-\x7e]*$/.test(name) ? quoteDisplayName(name) : headerText(name)} <${address}>`
 }
 
 /** Builds a multipart/alternative RFC 5322 message with base64 bodies (so no line is ever too long). */

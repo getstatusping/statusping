@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { env } from '../src/config.ts'
-import { type AlertMessage, createSink } from '../src/notify/sinks.ts'
+import { type AlertMessage, createSink, escapeChatText, escapeMattermost } from '../src/notify/sinks.ts'
 import { fakeFetch } from './helpers.ts'
 
 const down: AlertMessage = {
@@ -169,10 +169,10 @@ describe('sinks', () => {
     expect(teams.attachments[0].content.actions.map((a: { title: string }) => a.title)).toEqual(['Open status page', 'Acknowledge'])
 
     await createSink('g', { type: 'googlechat', webhookUrl: 'https://chat.googleapis.com/v1/spaces/X/messages?key=k&token=secret' }, getEnv).send(down, f.fn)
-    expect(JSON.parse(f.calls[1]!.body!).text).toBe(`*Backup missed a ping*\n${down.body}\n<${down.url}|Open status page>`.replace('Backup', '🔴 Backup'))
+    expect(JSON.parse(f.calls[1]!.body!).text).toBe(`*Backup missed a ping*\n${escapeChatText(down.body)}\n<${down.url}|Open status page>`.replace('Backup', '🔴 Backup'))
 
     await createSink('m', { type: 'mattermost', webhookUrl: 'https://mm.example.test/hooks/secret' }, getEnv).send(down, f.fn)
-    expect(JSON.parse(f.calls[2]!.body!)).toEqual({ text: `#### ${down.title}\n${down.body}\n[Open status page](${down.url})`, username: 'StatusPing' })
+    expect(JSON.parse(f.calls[2]!.body!)).toEqual({ text: `#### ${escapeMattermost(down.title)}\n${escapeMattermost(down.body)}\n[Open status page](${down.url})`, username: 'StatusPing' })
   })
 
   it('Matrix sends an HTML message to the room with the bot token', async () => {

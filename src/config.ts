@@ -656,9 +656,41 @@ export interface NormalizeOptions {
   save?: boolean
 }
 
+/**
+ * A list of strings from user input. Anything else (not a list, or a list holding numbers,
+ * objects or null) becomes a validation problem rather than a TypeError further on; the strings
+ * that are there are kept so the remaining checks can still report on them.
+ */
+function stringList(value: unknown, where: string, problems: string[]): string[] {
+  if (value === undefined || value === null) return []
+  if (!Array.isArray(value)) {
+    problems.push(`${where}: must be a list of strings`)
+    return []
+  }
+  if (value.some((item) => typeof item !== 'string')) problems.push(`${where}: every entry must be a string`)
+  return value.filter((item): item is string => typeof item === 'string')
+}
+
+/** A whole number within [min, max], or a problem naming the range. */
+function boundedInteger(value: unknown, fallback: number, where: string, min: number, max: number, problems: string[]): number {
+  if (value === undefined) return fallback
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < min || value > max) {
+    problems.push(`${where} must be a whole number from ${min} to ${max}`)
+    return fallback
+  }
+  return value
+}
+
+/** Bounds for the tick's work limits: at least one check (Workers allow 1000 subrequests), and a budget from 1 s to 5 min. */
+export const LIMIT_BOUNDS = { maxChecksPerTick: [1, 1000], tickBudgetMs: [1000, 300_000] } as const
+/** Session length bounds, in hours: from one hour to 30 days. */
+export const SESSION_HOURS_BOUNDS = [1, 720] as const
+
 export function normalizeConfig(config: StatusPingConfig, options: NormalizeOptions = {}): NormalizedConfig {
   const problems: string[] = []
   const sinks = config.sinks && typeof config.sinks === 'object' && !Array.isArray(config.sinks) ? config.sinks : {}
+  // Own keys only: a name such as "toString" must not resolve to an Object.prototype member.
+  const isSink = (name: string) => Object.prototype.hasOwnProperty.call(sinks, name)
   if (config.sinks !== undefined && sinks !== config.sinks) problems.push('sinks: must be an object')
   let subscribers: SubscriberConfigInput | null = null
   if (config.subscribers !== undefined) {
@@ -766,12 +798,13 @@ export function normalizeConfig(config: StatusPingConfig, options: NormalizeOpti
       problems.push('announcements.notify: must name one or more sinks')
     } else {
       if (new Set(notify).size !== notify.length) problems.push('announcements.notify: must not contain duplicates')
-      for (const sink of notify) if (!sinks[sink]) problems.push(`announcements.notify references unknown sink "${sink}"`)
+      for (const sink of notify) if (!isSink(sink)) problems.push(`announcements.notify references unknown sink "${sink}"`)
       announcementNotify = notify
     }
   }
 
-  const defaultNotify = config.defaults?.notify ?? Object.keys(sinks)
+  const defaultNotify = config.defaults?.notify === undefined ? Object.keys(sinks) : stringList(config.defaults.notify, 'defaults.notify', problems)
+  for (const s of config.defaults?.notify === undefined ? [] : defaultNotify) if (!isSink(s)) problems.push(`defaults.notify references unknown sink "${s}"`)
   let defaultGrace = 300
   let defaultRenotifyEvery: number | null = null
   let defaultRenotifyMax: number | null = null
@@ -818,8 +851,8 @@ export function normalizeConfig(config: StatusPingConfig, options: NormalizeOpti
       }
       if (seen.has(input.id)) fail('duplicate id')
       seen.add(input.id)
-      const notify = input.notify ?? defaultNotify
-      for (const s of notify) if (!sinks[s]) fail(`notify references unknown sink "${s}"`)
+      const notify = input.notify === undefined ? defaultNotify : stringList(input.notify, `${where}.notify`, problems)
+      for (const s of notify) if (!isSink(s)) fail(`notify references unknown sink "${s}"`)
 
       let renotifyEvery = defaultRenotifyEvery
       if (input.renotifyEvery !== undefined) {
@@ -856,10 +889,10 @@ export function normalizeConfig(config: StatusPingConfig, options: NormalizeOpti
             } catch (error) {
               fail((error as Error).message)
             }
-            const notifyStep = Array.isArray(step.notify) ? step.notify : []
+            const notifyStep = stringList(step.notify, `${where}: ${stepWhere}.notify`, problems)
             if (!notifyStep.length) fail(`${stepWhere}.notify must name one or more sinks`)
             if (new Set(notifyStep).size !== notifyStep.length) fail(`${stepWhere}.notify must not contain duplicates`)
-            for (const sink of notifyStep) if (!sinks[sink]) fail(`${stepWhere}.notify references unknown sink "${sink}"`)
+            for (const sink of notifyStep) if (!isSink(sink)) fail(`${stepWhere}.notify references unknown sink "${sink}"`)
             if (after !== null) {
               if (stepIndex === 0 && after !== 0) fail('escalation[0].after must be 0s')
               if (after <= previous) fail(`${stepWhere}.after must be strictly greater than the previous step`)
@@ -1018,8 +1051,8 @@ export function normalizeConfig(config: StatusPingConfig, options: NormalizeOpti
     problems.push('limits.pingPerIpPerMinute must be a whole number from 1 to 10000')
   }
   const limits = {
-    maxChecksPerTick: config.limits?.maxChecksPerTick ?? 35,
-    tickBudgetMs: config.limits?.tickBudgetMs ?? 20_000,
+    maxChecksPerTick: boundedInteger(config.limits?.maxChecksPerTick, 35, 'limits.maxChecksPerTick', ...LIMIT_BOUNDS.maxChecksPerTick, problems),
+    tickBudgetMs: boundedInteger(config.limits?.tickBudgetMs, 20_000, 'limits.tickBudgetMs', ...LIMIT_BOUNDS.tickBudgetMs, problems),
     maxConfirmationsPerTick: config.limits?.maxConfirmationsPerTick ?? 6,
     pingPerIpPerMinute,
   }
@@ -1227,8 +1260,8 @@ function normalizePages(
       if (!access) problems.push(`${where}: restricted access requires an \`access.provider\` config`)
       const sso = access?.provider.type === 'oidc'
       const match = normalizeMatch(p.access, `${where}: access`, sso, problems)
-      const teams = p.access.teams ?? []
-      for (const t of teams) if (access && !access.teams[t]) problems.push(`${where}: unknown team "${t}"`)
+      const teams = stringList(p.access.teams, `${where}: access.teams`, problems)
+      for (const t of teams) if (access && !Object.prototype.hasOwnProperty.call(access.teams, t)) problems.push(`${where}: unknown team "${t}"`)
       if (!match.emails.length && !match.groups.length && !teams.length) {
         problems.push(`${where}: access must list emails${sso ? ', groups' : ''} or teams (or be 'public')`)
       }
@@ -1248,11 +1281,13 @@ function normalizePages(
 const EMAIL_PATTERN_RE = /^(\*|[^@\s*]+)@[^@\s*]+\.[^@\s*]+$/
 
 function normalizeMatch(input: MatchInput | undefined, where: string, sso: boolean, problems: string[]): NormalizedMatch {
-  const emails = (input?.emails ?? []).map((e) => e.trim().toLowerCase())
+  if (input !== undefined && (input === null || typeof input !== 'object' || Array.isArray(input))) problems.push(`${where}: must be an object`)
+  const record = input && typeof input === 'object' ? input : undefined
+  const emails = stringList(record?.emails, `${where}.emails`, problems).map((e) => e.trim().toLowerCase())
   for (const e of emails) {
     if (!EMAIL_PATTERN_RE.test(e)) problems.push(`${where}: "${e}" is not an email or *@domain pattern`)
   }
-  const groups = input?.groups ?? []
+  const groups = stringList(record?.groups, `${where}.groups`, problems)
   if (groups.length && !sso) {
     problems.push(`${where}: groups are only available with SSO (provider "oidc"); use emails for basic / cloudflare-access`)
   }
@@ -1283,20 +1318,25 @@ function normalizeAccess(input: AccessInput | undefined, problems: string[]): No
     problems.push(`access.provider: unknown type "${(p as { type: string }).type}"`)
   }
   const teams: Record<string, NormalizedMatch> = {}
-  for (const [name, t] of Object.entries(input.teams ?? {})) {
+  const teamInput = input.teams === undefined ? {} : input.teams && typeof input.teams === 'object' && !Array.isArray(input.teams) ? input.teams : (problems.push('access.teams: must be an object of named member lists'), {})
+  for (const [name, t] of Object.entries(teamInput)) {
     teams[name] = normalizeMatch(t, `access.teams.${name}`, sso, problems)
   }
   let admins: NormalizedAccess['admins'] = null
   if (input.admins !== undefined) {
     const match = normalizeMatch(input.admins, 'access.admins', sso, problems)
-    const adminTeams = input.admins.teams ?? []
-    for (const team of adminTeams) if (!teams[team]) problems.push(`access.admins: unknown team "${team}"`)
+    const adminTeams = stringList(input.admins?.teams, 'access.admins.teams', problems)
+    for (const team of adminTeams) if (!Object.prototype.hasOwnProperty.call(teams, team)) problems.push(`access.admins: unknown team "${team}"`)
     if (!match.emails.length && !match.groups.length && !adminTeams.length) {
       problems.push(`access.admins: must list emails${sso ? ', groups' : ''} or teams`)
     }
     admins = { ...match, teams: adminTeams }
   }
-  return { provider: p, teams, sessionHours: input.sessionHours ?? 12, admins }
+  const sessionHours = input.sessionHours ?? 12
+  if (typeof sessionHours !== 'number' || !Number.isFinite(sessionHours) || sessionHours < SESSION_HOURS_BOUNDS[0] || sessionHours > SESSION_HOURS_BOUNDS[1]) {
+    problems.push(`access.sessionHours must be a number of hours from ${SESSION_HOURS_BOUNDS[0]} to ${SESSION_HOURS_BOUNDS[1]}`)
+  }
+  return { provider: p, teams, sessionHours: typeof sessionHours === 'number' && sessionHours >= SESSION_HOURS_BOUNDS[0] && sessionHours <= SESSION_HOURS_BOUNDS[1] ? sessionHours : 12, admins }
 }
 
 export function isEnvRef(value: unknown): value is EnvRef {

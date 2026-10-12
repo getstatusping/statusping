@@ -4,6 +4,7 @@ import { type EnvGetter, type SubscriberConfigInput, resolveSecret } from './con
 import type { Db } from './db/types.ts'
 import type { Deps } from './deps.ts'
 import { randomToken, sha256Hex, timingSafeEqual } from './util/crypto.ts'
+import { formatMailbox } from './util/email.ts'
 
 const ATTEMPTS = 3
 const RETRY_AFTER = 50
@@ -36,7 +37,7 @@ export async function consumeSubscribeLimit(db: Db, bucket: string, now: number)
 async function resend(cfg: SubscriberConfigInput, getEnv: EnvGetter, fetchFn: typeof fetch, to: string, subject: string, text: string, html: string) {
   const apiKey = resolveSecret(cfg.apiKey, getEnv)
   if (!apiKey) throw new Error('subscriber Resend API key is unavailable')
-  const response = await fetchFn('https://api.resend.com/emails', { method: 'POST', headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' }, body: JSON.stringify({ from: cfg.from, to: [to], subject, text, html }) })
+  const response = await fetchFn('https://api.resend.com/emails', { method: 'POST', headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' }, body: JSON.stringify({ from: formatMailbox(cfg.from), to: [to], subject, text, html }) })
   if (!response.ok) throw new Error(`subscriber email: HTTP ${response.status}`)
 }
 

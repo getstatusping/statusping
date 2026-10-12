@@ -124,9 +124,8 @@ export function createDeps(opts: CreateDepsOptions): Deps {
   const input = opts.config ?? UNCONFIGURED
   const normalized = normalizeConfig(resolveConfigEnv(input, opts.getEnv))
   const config = tenant ? clampToTenantPolicy(normalized, tenant) : normalized
-  if (config.monitors.some((monitor) => monitor.escalation) && !opts.getEnv('ACK_SECRET')) {
-    throw new Error('ACK_SECRET must be set when escalation is configured')
-  }
+  // Escalation needs no ACK_SECRET: acknowledgement links fall back to a key the site generates
+  // and stores (acknowledgeSecret), the same way for an injected and a stored configuration.
   if (config.subscribers && !opts.getEnv('SUBSCRIBER_TOKEN_SECRET')) {
     throw new Error('SUBSCRIBER_TOKEN_SECRET must be set when subscribers are configured')
   }

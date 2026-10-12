@@ -17,6 +17,7 @@ import { type MonitorStateRow, applyTransition, loadStates } from './state.ts'
 import { syncConfig } from './sync.ts'
 import { nowSeconds } from './util/time.ts'
 import { loadSetupState } from './setup/state.ts'
+import { MAX_CHECK_ERROR, clipText } from './util/text.ts'
 
 // A scheduled tick has no request host, and a configured baseUrl may be stale (setup is where
 // it gets set), so the log names the path rather than guessing the site address.
@@ -39,7 +40,27 @@ export interface TickSummary {
 
 const HTTP_CONCURRENCY = 5 // Workers allow 6 simultaneous outbound connections.
 
-async function applyCheckResult(deps: Deps, m: HttpMonitor | TcpMonitor, s: MonitorStateRow, r: CheckResult, now: number, allowDown = true) {
+/**
+ * Every check error is bounded here, before anything stores it (`last_error`, incident detail,
+ * `tick_results`) or a status page loads it back: an error can quote a target's response (a JSON
+ * assertion, a probe's message), and no error source may grow a row without bound.
+ */
+function boundedResult(r: CheckResult): CheckResult {
+  return typeof r.err === 'string' && r.err.length > MAX_CHECK_ERROR ? { ...r, err: clipText(r.err, MAX_CHECK_ERROR) } : r
+}
+
+/** Runs one tick phase; a failure is logged and never skips the phases after it. */
+async function phase<T>(deps: Deps, name: string, fallback: T, run: () => Promise<T>): Promise<T> {
+  try {
+    return await run()
+  } catch (e) {
+    deps.log('error', `tick: ${name} failed`, { error: (e as Error)?.message ?? String(e) })
+    return fallback
+  }
+}
+
+async function applyCheckResult(deps: Deps, m: HttpMonitor | TcpMonitor, s: MonitorStateRow, checked: CheckResult, now: number, allowDown = true) {
+  const r = boundedResult(checked)
   if (r.ok) {
     if (s.status === 'up' && s.consecutive_fail === 0) return false
     return applyTransition(deps.db, {
@@ -159,11 +180,12 @@ export async function tick(deps: Deps, nowMs: number = Date.now()): Promise<Tick
   const overCap = due.splice(deps.config.limits.maxChecksPerTick)
   const httpFetch = targetFetch(deps)
   const tcpConnect = targetTcpConnect(deps)
-  const { results, skipped } = await runPool(due, HTTP_CONCURRENCY, startedMs + deps.config.limits.tickBudgetMs, (m) => {
+  const { results: raw, skipped } = await runPool(due, HTTP_CONCURRENCY, startedMs + deps.config.limits.tickBudgetMs, (m) => {
     if (m.kind === 'http') return runHttpCheck(m, httpFetch)
     if (!tcpConnect) return Promise.resolve({ id: m.id, ok: false, ms: null, code: null, err: 'TCP checks are unavailable in this runtime' })
     return runTcpCheck(m, tcpConnect)
   })
+  const results = raw.map(boundedResult)
   summary.checks = results.length
   summary.skippedChecks = [...overCap, ...skipped].map((m) => m.id)
   if (summary.skippedChecks.length) {
@@ -199,23 +221,27 @@ export async function tick(deps: Deps, nowMs: number = Date.now()): Promise<Tick
     if (await applyCheckResult(deps, m, s, r, now)) summary.transitions++
   }
   if (results.length) {
-    await deps.db.run(`UPDATE tick_results SET results_json = ? WHERE tick_at = ?`, [JSON.stringify(results), tickAt])
+    await phase(deps, 'check results', undefined, async () => {
+      await deps.db.run(`UPDATE tick_results SET results_json = ? WHERE tick_at = ?`, [JSON.stringify(results), tickAt])
+    })
   }
 
-  await rollupLatency(
+  // From here on each phase is independent: one that throws (a database error, a bad channel)
+  // is logged and the rest still run, so a failure can never silently cost the alerts after it.
+  await phase(deps, 'latency rollup', undefined, () => rollupLatency(
     deps.db,
     monitors.filter((m): m is HttpMonitor => m.kind === 'http'),
     now,
-  )
+  ))
 
   await pingPeer(deps)
-  summary.notifications = await dispatchNotifications(deps, now)
-  summary.notifications += await dispatchAnnouncementNotifications(deps, now)
-  await enqueueIncidentSubscribers(deps, now)
-  await dispatchSubscriberOutbox(deps, now)
+  summary.notifications = await phase(deps, 'notifications', 0, () => dispatchNotifications(deps, now))
+  summary.notifications += await phase(deps, 'announcement notifications', 0, () => dispatchAnnouncementNotifications(deps, now))
+  await phase(deps, 'subscriber enqueue', undefined, () => enqueueIncidentSubscribers(deps, now))
+  await phase(deps, 'subscriber delivery', undefined, () => dispatchSubscriberOutbox(deps, now))
   // Expiry lookups call third parties (crt.sh, RDAP) that can be slow, so they run only after this
   // tick's alerts are out. A new expiry warning is notified by the next tick's dispatch.
-  await runExpiryChecks(deps, now)
-  await maybeRunRetention(deps, now)
+  await phase(deps, 'expiry checks', undefined, () => runExpiryChecks(deps, now))
+  await phase(deps, 'retention', undefined, () => maybeRunRetention(deps, now))
   return summary
 }

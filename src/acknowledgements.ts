@@ -1,5 +1,6 @@
 import type { Db } from './db/types.ts'
-import { timingSafeEqual } from './util/crypto.ts'
+import { randomToken, timingSafeEqual } from './util/crypto.ts'
+import { nowSeconds } from './util/time.ts'
 
 export const ACK_LINK_TTL = 24 * 60 * 60
 
@@ -24,12 +25,36 @@ async function hmac(secret: string, payload: string): Promise<string> {
   return btoa(String.fromCharCode(...bytes)).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '')
 }
 
+/** Where the derived acknowledgement key lives when ACK_SECRET is not set. */
+export const ACK_KEY_NAME = 'ack_key'
+
+/**
+ * The key that signs alert acknowledgement links: ACK_SECRET when it is set, otherwise a random
+ * key this site generates once and keeps in `instance_secrets` (like the session key setup
+ * stores), so escalation works without an extra secret and can never sign with an empty key.
+ * With `create: false` (verifying a link) a missing key returns null: no link was ever signed.
+ */
+export async function acknowledgeSecret(deps: { db: Db; getEnv: (name: string) => string | undefined }, create = true): Promise<string | null> {
+  const explicit = deps.getEnv('ACK_SECRET')
+  if (explicit) return explicit
+  const read = async () => (await deps.db.first<{ value: string }>(`SELECT value FROM instance_secrets WHERE name = ?`, [ACK_KEY_NAME]))?.value || null
+  const stored = await read()
+  if (stored || !create) return stored
+  // Concurrent first uses race on the primary key; everyone then reads the one that won.
+  await deps.db.run(`INSERT INTO instance_secrets (name, value, created_at) VALUES (?, ?, ?) ON CONFLICT(name) DO NOTHING`, [ACK_KEY_NAME, randomToken(48), nowSeconds()])
+  const created = await read()
+  if (!created) throw new Error('could not store the acknowledgement key')
+  return created
+}
+
 export async function createAcknowledgeToken(incidentId: number, now: number, secret: string): Promise<string> {
+  if (!secret) throw new Error('acknowledgement links need a signing key')
   const payload = base64url(JSON.stringify({ i: incidentId, e: now + ACK_LINK_TTL } satisfies Capability))
   return `${payload}.${await hmac(secret, payload)}`
 }
 
 export async function verifyAcknowledgeToken(token: string, now: number, secret: string): Promise<number | null> {
+  if (!secret) return null
   const [payload, signature, ...extra] = token.split('.')
   if (!payload || !signature || extra.length || !timingSafeEqual(await hmac(secret, payload), signature)) return null
   const decoded = unbase64url(payload)

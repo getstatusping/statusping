@@ -5,6 +5,7 @@ import type { CheckResult } from '../evaluate/http.ts'
 import { maintenanceAppliesTo, maintenanceOccurrencesLenient, type MaintenanceOccurrence } from '../maintenance.ts'
 import type { IncidentReason, MonitorStateRow, Status } from '../state.ts'
 import { DAY } from '../util/time.ts'
+import { MAX_CHECK_ERROR, clipText } from '../util/text.ts'
 
 export const HISTORY_DAYS = 90
 
@@ -509,8 +510,17 @@ export async function loadMonitorDetail(deps: Deps, id: string, now: number): Pr
         )
       : Promise.resolve([]),
     view.monitor.kind !== 'push'
-      ? deps.db.all<{ tick_at: number; results_json: string }>(
-          `SELECT tick_at, results_json FROM tick_results WHERE results_json <> '[]' ORDER BY tick_at DESC LIMIT 180`,
+      ? // Only this monitor's entry leaves the database, with its error cut short: a page never
+        // loads every monitor's results for 180 ticks, nor an oversized error stored by an
+        // older release (before check errors were bounded at write time).
+        deps.db.all<{ tick_at: number; ok: number | null; ms: number | null; code: number | null; err: string | null }>(
+          `SELECT t.tick_at, json_extract(j.value, '$.ok') AS ok, json_extract(j.value, '$.ms') AS ms,
+                  json_extract(j.value, '$.code') AS code, substr(json_extract(j.value, '$.err'), 1, ?) AS err
+           FROM (SELECT tick_at, results_json FROM tick_results WHERE results_json <> '[]' ORDER BY tick_at DESC LIMIT 180) t,
+                json_each(t.results_json) j
+           WHERE json_extract(j.value, '$.id') = ?
+           ORDER BY t.tick_at DESC LIMIT 120`,
+          [MAX_CHECK_ERROR, id],
         )
       : Promise.resolve([]),
     deps.db.all<{ id: number; reason: IncidentReason; severity: 'outage' | 'warning'; detail: string | null; started_at: number; resolved_at: number | null }>(
@@ -519,12 +529,14 @@ export async function loadMonitorDetail(deps: Deps, id: string, now: number): Pr
     ),
     listAnnouncements(deps.db, { monitorId: id }),
   ])
-  const checks: MonitorDetail['checks'] = []
-  for (const t of ticks) {
-    const r = (JSON.parse(t.results_json) as CheckResult[]).find((c) => c.id === id)
-    if (r) checks.push({ ...r, at: t.tick_at })
-    if (checks.length >= 120) break
-  }
+  const checks: MonitorDetail['checks'] = ticks.map((t) => ({
+    id,
+    ok: Boolean(t.ok),
+    ms: typeof t.ms === 'number' ? t.ms : null,
+    code: typeof t.code === 'number' ? t.code : null,
+    err: typeof t.err === 'string' ? clipText(t.err, MAX_CHECK_ERROR) : null,
+    at: t.tick_at,
+  }))
   return {
     view,
     lastTickAt: data.lastTickAt,

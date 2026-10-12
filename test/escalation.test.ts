@@ -23,7 +23,8 @@ describe('escalation', () => {
   }
 
   it('validates an immediate strictly ordered, non-duplicated policy', () => {
-    expect(() => makeDeps({} as never, { config: config() })).toThrow('ACK_SECRET must be set when escalation is configured')
+    // ACK_SECRET is optional: without it the links are signed with a key the site stores.
+    expect(() => makeDeps({} as never, { config: config() })).not.toThrow()
     const valid = config()
     valid.groups[0]!.monitors = valid.groups[0]!.monitors.map((monitor) => monitor.id === 'heartbeat'
       ? { ...monitor, renotifyEvery: undefined, escalation: [{ after: '1m', notify: ['ntfy', 'ntfy'] }, { after: '1m', notify: ['ntfy'] }] }

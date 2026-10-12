@@ -2,6 +2,7 @@ import type { Deps } from './deps.ts'
 import { activeMaintenance } from './maintenance.ts'
 import { type MonitorStateRow, type Status, type Transition, applyTransition, truncate } from './state.ts'
 import { sha256Hex } from './util/crypto.ts'
+import { clipText } from './util/text.ts'
 
 /** Characters of a ping body that are stored. */
 export const MAX_PING_BODY = 10_000
@@ -47,6 +48,16 @@ function failureDetail(exitCode: number | null, body: string | null): string {
   return excerpt ? `${head}: ${excerpt}` : head
 }
 
+/** The active push monitor a ping token belongs to, or null. One indexed read. */
+export async function pushMonitorForToken(deps: Deps, token: string): Promise<string | null> {
+  if (token.length < 16 || token.length > 128) return null
+  const row = await deps.db.first<{ id: string; kind: string; paused: number }>(
+    `SELECT id, kind, paused FROM monitors WHERE ping_token_hash = ?`,
+    [await sha256Hex(token)],
+  )
+  return row && row.kind === 'push' && !row.paused ? row.id : null
+}
+
 /** Records a push signal. Retries on concurrent updates (optimistic concurrency). */
 export async function handlePing(
   deps: Deps,
@@ -69,7 +80,7 @@ export async function handlePing(
     )
     if (!row || row.kind !== 'push' || row.paused) return { status: 404 }
     if (typeof source === 'function') source = await source()
-    body = source ? source.slice(0, MAX_PING_BODY) : null
+    body = source ? clipText(source, MAX_PING_BODY, '') : null
 
     const durationMs =
       signal.kind === 'success' || signal.kind === 'fail'
