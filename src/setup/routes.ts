@@ -12,11 +12,12 @@ import { sign, unsign } from '../auth/session.ts'
 import type { AdminConfig } from '../admin/security.ts'
 import { validateAdminConfig } from '../admin/security.ts'
 import { locateProblems, parseAdminYaml, stringifyAdminYaml } from '../admin/yaml.ts'
-import { FormError, monitorRows, pageList, SINK_FIELDS, sinkEnvName, sinkFromForm, type SinkType } from '../admin/forms.ts'
+import { FormError, monitorRows, pageList, SINK_FIELDS, sinkFromForm, type SinkType } from '../admin/forms.ts'
 import { revisionStatements, sendSinkTest } from '../admin/service.ts'
+import { forgetChannelStatements } from '../admin/channel-credentials.ts'
 import type { Statement } from '../db/types.ts'
 import { SINK_TYPES } from '../config.ts'
-import { b64urlEncode, verifyJwt } from '../auth/jwt.ts'
+import { b64urlEncode, emailVerified, verifyJwt } from '../auth/jwt.ts'
 import { discover } from '../auth/providers.ts'
 import type { AuthProviderInput, MonitorInput, StatusPingConfig } from '../config.ts'
 import { type Deps, isStorableEnv, refreshAdminConfig, STORABLE_ENV, storedEnvKey } from '../deps.ts'
@@ -240,11 +241,8 @@ export function mountSetupRoutes(app: Hono, deps: Deps): void {
     }
     return out
   }
-  /** Erases the credentials a wizard channel stored (exact prefix; LIKE would treat _ as a wildcard). */
-  const forgetChannel = (name: string) => {
-    const prefix = storedEnvKey(sinkEnvName(name, ''))
-    return deps.db.run(`DELETE FROM instance_secrets WHERE substr(name, 1, ?) = ?`, [prefix.length, prefix])
-  }
+  /** Erases the credentials a wizard channel stored, by exact name (never a prefix). */
+  const forgetChannel = (name: string) => deps.db.batch(forgetChannelStatements(name))
 
   const limited = async (c: Context, bucket: string) => {
     // Without a client address (Node without STATUSPING_TRUST_PROXY) every client shares one bucket.
@@ -804,7 +802,8 @@ export function mountSetupAuthRoutes(app: Hono, deps: Deps): void {
     } catch { return back(c, 'oidc-discovery') }
     if (claims.nonce !== login.nonce) return back(c, 'oidc-state')
     const email = typeof claims.email === 'string' ? claims.email.toLowerCase() : ''
-    if (!email || (claims.email_verified === false && !draft.trustUnverifiedEmail)) return back(c, 'oidc-email')
+    // A missing email_verified claim counts as unverified unless the provider is trusted.
+    if (!email || (!emailVerified(claims) && !draft.trustUnverifiedEmail)) return back(c, 'oidc-email')
     await saveDraft(deps.db, { ...draft, email, verified: true }, nowSeconds())
     return back(c)
   })

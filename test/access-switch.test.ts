@@ -25,10 +25,10 @@ describe('changing the sign-in method from Settings', () => {
   beforeEach(() => clearJwksCache())
   afterEach(async () => close?.())
 
-  async function signedIn(handler: (call: FetchCall) => Response | Promise<Response>) {
+  async function signedIn(handler: (call: FetchCall) => Response | Promise<Response>, env: Record<string, string> = {}) {
     const t = await createTestDb('libsql'); close = t.close
     const config = { ...testConfig({ sinks: {}, access: { provider: { type: 'basic' as const }, admins: { emails: ['admin@example.test'] } } }), baseUrl: ORIGIN, admin: true }
-    const deps = makeDeps(t.db, { config, env: { BASIC_AUTH_USERS: JSON.stringify({ 'admin@example.test': await hashPassword('admin-password-123') }) }, fetch: fakeFetch(handler).fn })
+    const deps = makeDeps(t.db, { config, env: { BASIC_AUTH_USERS: JSON.stringify({ 'admin@example.test': await hashPassword('admin-password-123') }), ...env }, fetch: fakeFetch(handler).fn })
     await tick(deps, Date.parse('2026-10-11T00:00:00Z'))
     const app = createApp(deps)
     const jar = new Map<string, string>()
@@ -132,5 +132,115 @@ describe('changing the sign-in method from Settings', () => {
     await s.post('/admin/access/method/apply', {})
     expect(await s.db.first<{ email: string }>(`SELECT email FROM local_users`)).toEqual({ email: 'admin@example.test' })
     expect((await s.get('/admin')).res.status).toBe(200)
+  })
+  /** An identity provider at `host` that answers discovery, JWKS and the token exchange. */
+  async function provider(host: string, claims: () => Record<string, unknown>) {
+    const idp = await signer(`${host}-key`)
+    const tokenCalls: URLSearchParams[] = []
+    const handle = async (call: FetchCall): Promise<Response | null> => {
+      if (call.url === `https://${host}/.well-known/openid-configuration`) return Response.json({ issuer: `https://${host}`, authorization_endpoint: `https://${host}/authorize`, token_endpoint: `https://${host}/token`, jwks_uri: `https://${host}/jwks` })
+      if (call.url === `https://${host}/jwks`) return Response.json({ keys: [idp.jwk] })
+      if (call.url === `https://${host}/token`) {
+        tokenCalls.push(new URLSearchParams(call.body ?? ''))
+        return Response.json({ id_token: await idp.sign({ iss: `https://${host}`, exp: now() + 300, ...claims() }) })
+      }
+      return null
+    }
+    return { handle, tokenCalls }
+  }
+
+  it('offers the current client ID and secret only for the issuer they belong to', async () => {
+    let nonce = ''
+    let aud = 'client-1'
+    const claims = () => ({ aud, email: 'admin@example.test', email_verified: true, nonce })
+    const good = await provider('idp.test', claims)
+    const evil = await provider('evil.test', claims)
+    const s = await signedIn(async (call) => (await good.handle(call)) ?? (await evil.handle(call)) ?? new Response('nf', { status: 404 }))
+    const testSignIn = async () => {
+      const start = (await s.get('/admin/access/method/oidc/start')).res.headers.get('location')!
+      if (!start.startsWith('https://')) return start
+      const authorize = new URL(start)
+      nonce = authorize.searchParams.get('nonce')!
+      return (await s.get(`/auth/callback?code=c&state=${authorize.searchParams.get('state')}`)).res.headers.get('location')
+    }
+    // Switch to idp.test; its client secret is now stored in the database.
+    await s.get('/admin/access/method')
+    await s.post('/admin/access/method', { method: 'oidc' })
+    await s.get('/admin/access/method')
+    await s.post('/admin/access/method/settings', { preset: 'other', issuer: 'https://idp.test', OIDC_CLIENT_ID: 'client-1', OIDC_CLIENT_SECRET: 'secret-1' })
+    expect(await testSignIn()).toBe('/admin/access/method')
+    await s.get('/admin/access/method')
+    await s.post('/admin/access/method/apply', {})
+    expect((await s.provider()).issuer).toBe('https://idp.test')
+
+    // A new issuer does not get the stored credentials: no test sign-in until they are entered.
+    await s.get('/admin/access/method')
+    await s.post('/admin/access/method', { method: 'oidc' })
+    await s.get('/admin/access/method')
+    await s.post('/admin/access/method/settings', { preset: 'other', issuer: 'https://evil.test' })
+    const page = (await s.get('/admin/access/method')).body
+    expect(page).not.toContain('Using the current value')
+    expect(page).not.toContain('href="/admin/access/method/oidc/start"')
+    expect(await testSignIn()).toBe('/admin/access/method?notice=method-saved')
+    expect(evil.tokenCalls).toHaveLength(0)
+
+    // Entering credentials for the new issuer works as usual, and only those are sent to it.
+    aud = 'evil-client'
+    await s.post('/admin/access/method/settings', { preset: 'other', issuer: 'https://evil.test', OIDC_CLIENT_ID: 'evil-client', OIDC_CLIENT_SECRET: 'evil-secret' })
+    expect(await testSignIn()).toBe('/admin/access/method')
+    expect(evil.tokenCalls.map((form) => form.get('client_secret'))).toEqual(['evil-secret'])
+    await s.post('/admin/access/method/cancel', {})
+
+    // The same issuer keeps the current credentials.
+    aud = 'client-1'
+    await s.get('/admin/access/method')
+    await s.post('/admin/access/method', { method: 'oidc' })
+    await s.get('/admin/access/method')
+    expect((await s.get('/admin/access/method')).body).toContain('Using the current value')
+    expect(await testSignIn()).toBe('/admin/access/method')
+    expect(good.tokenCalls.at(-1)!.get('client_secret')).toBe('secret-1')
+  })
+
+  it('uses a Worker client secret for a new issuer only once it is entered again', async () => {
+    let nonce = ''
+    const evil = await provider('evil.test', () => ({ aud: 'env-client', email: 'admin@example.test', email_verified: true, nonce }))
+    const s = await signedIn(async (call) => (await evil.handle(call)) ?? new Response('nf', { status: 404 }), { OIDC_CLIENT_ID: 'env-client', OIDC_CLIENT_SECRET: 'env-secret' })
+    const start = async () => (await s.get('/admin/access/method/oidc/start')).res.headers.get('location')!
+    await s.get('/admin/access/method')
+    await s.post('/admin/access/method', { method: 'oidc' })
+    await s.get('/admin/access/method')
+    await s.post('/admin/access/method/settings', { preset: 'other', issuer: 'https://evil.test' })
+    expect((await s.get('/admin/access/method')).body).toContain('is set as a Worker secret')
+    expect(await start()).toBe('/admin/access/method?notice=method-saved')
+    // A different value does not unlock it (the Worker secret would still be used at sign-in).
+    const wrong = await s.post('/admin/access/method/settings', { preset: 'other', issuer: 'https://evil.test', OIDC_CLIENT_ID: 'env-client', OIDC_CLIENT_SECRET: 'other-secret' })
+    expect(wrong.res.status).toBe(400)
+    expect(wrong.body).toContain('does not match')
+    expect(await start()).toBe('/admin/access/method?notice=method-saved')
+    // The same value does.
+    await s.post('/admin/access/method/settings', { preset: 'other', issuer: 'https://evil.test', OIDC_CLIENT_ID: 'env-client', OIDC_CLIENT_SECRET: 'env-secret' })
+    const authorize = new URL(await start())
+    nonce = authorize.searchParams.get('nonce')!
+    expect((await s.get(`/auth/callback?code=c&state=${authorize.searchParams.get('state')}`)).res.headers.get('location')).toBe('/admin/access/method')
+    expect(evil.tokenCalls.map((form) => form.get('client_secret'))).toEqual(['env-secret'])
+  })
+
+  it('treats a missing email_verified claim as unverified in the test sign-in', async () => {
+    let nonce = ''
+    let trusted = false
+    const idp = await provider('idp.test', () => ({ aud: 'client-1', email: 'admin@example.test', nonce }))
+    const s = await signedIn(async (call) => (await idp.handle(call)) ?? new Response('nf', { status: 404 }))
+    const testSignIn = async () => {
+      await s.get('/admin/access/method')
+      await s.post('/admin/access/method/settings', { preset: 'other', issuer: 'https://idp.test', OIDC_CLIENT_ID: 'client-1', OIDC_CLIENT_SECRET: 'secret-1', ...(trusted ? { trustUnverifiedEmail: '1' } : {}) })
+      const authorize = new URL((await s.get('/admin/access/method/oidc/start')).res.headers.get('location')!)
+      nonce = authorize.searchParams.get('nonce')!
+      return (await s.get(`/auth/callback?code=c&state=${authorize.searchParams.get('state')}`)).res.headers.get('location')
+    }
+    await s.get('/admin/access/method')
+    await s.post('/admin/access/method', { method: 'oidc' })
+    expect(await testSignIn()).toBe('/admin/access/method?error=oidc-email')
+    trusted = true
+    expect(await testSignIn()).toBe('/admin/access/method')
   })
 })

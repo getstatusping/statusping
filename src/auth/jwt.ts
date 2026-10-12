@@ -96,3 +96,11 @@ export async function verifyJwt(token: string, opts: VerifyOptions): Promise<Jwt
 export function clearJwksCache() {
   jwksCache.clear()
 }
+
+/**
+ * Whether an ID token says its email address is verified. A missing claim counts as unverified;
+ * some providers send the claim as the string "true".
+ */
+export function emailVerified(claims: Record<string, unknown>): boolean {
+  return claims.email_verified === true || claims.email_verified === 'true'
+}

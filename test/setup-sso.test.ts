@@ -212,12 +212,13 @@ describe('setup wizard: Cloudflare Access and OpenID Connect', () => {
   it('accepts an unverified email only when the owner trusts the provider (e.g. Pocket ID)', async () => {
     const idp = await signer('pocket-1')
     let nonce = ''
+    let verified: boolean | undefined = false
     const handler = async (call: FetchCall) => {
       if (call.url === 'https://id.pocket.test/.well-known/openid-configuration') {
         return Response.json({ issuer: 'https://id.pocket.test', authorization_endpoint: 'https://id.pocket.test/authorize', token_endpoint: 'https://id.pocket.test/api/oidc/token', jwks_uri: 'https://id.pocket.test/.well-known/jwks.json' })
       }
       if (call.url === 'https://id.pocket.test/.well-known/jwks.json') return Response.json({ keys: [idp.jwk] })
-      if (call.url === 'https://id.pocket.test/api/oidc/token') return Response.json({ id_token: await idp.sign({ iss: 'https://id.pocket.test', aud: 'pocket-client', email: 'owner@acme.test', email_verified: false, nonce, exp: now() + 300 }) })
+      if (call.url === 'https://id.pocket.test/api/oidc/token') return Response.json({ id_token: await idp.sign({ iss: 'https://id.pocket.test', aud: 'pocket-client', email: 'owner@acme.test', ...(verified === undefined ? {} : { email_verified: verified }), nonce, exp: now() + 300 }) })
       return new Response('not found', { status: 404 })
     }
     const { b, csrf, db } = await claimedWizard({ OIDC_CLIENT_ID: 'pocket-client', OIDC_CLIENT_SECRET: 'pocket-secret' }, handler, 'oidc')
@@ -229,6 +230,9 @@ describe('setup wizard: Cloudflare Access and OpenID Connect', () => {
     await b.post('/setup/oidc', { csrf, preset: 'pocket-id', issuer: 'https://id.pocket.test' })
     expect(await signInOnce()).toBe('/setup?step=account&error=oidc-email')
     expect((await b.get('/setup?step=account&error=oidc-email')).body).toContain('Accept emails this provider has not verified')
+    // A token without an email_verified claim is not treated as verified either.
+    verified = undefined
+    expect(await signInOnce()).toBe('/setup?step=account&error=oidc-email')
 
     await b.post('/setup/oidc', { csrf, preset: 'pocket-id', issuer: 'https://id.pocket.test', trustUnverifiedEmail: '1' })
     expect(await signInOnce()).toBe('/setup?step=account')

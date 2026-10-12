@@ -7,7 +7,7 @@ import { isStorableEnv, refreshAdminConfig, storedEnvKey } from '../deps.ts'
 import { isValidTimeZone, nowSeconds } from '../util/time.ts'
 import {
   describeChanges, findMonitor, type Form, FormError, monitorFromForm, monitorRows, pageFromForm, pageList, putMonitor, putPage, putSink,
-  removeMonitor, removePage, removeSink, SINK_FIELDS, sinkEnvName, sinkFromForm, type SinkType, text,
+  removeMonitor, removePage, removeSink, SINK_FIELDS, sinkFromForm, type SinkType, text,
 } from './forms.ts'
 import {
   accessPage, activityPage, mcpPage, mcpTokenCreated, channelForm, channelsPage, diffBlock, generalPage, configurationPage, importPreview, monitorForm, monitorsPage,
@@ -21,6 +21,7 @@ import { type AdminConfig, authorizeAdminToken, canAdmin, envReferences, issueCs
 import { exportAdminYaml, locateProblems, parseAdminYaml, stringifyAdminYaml } from './yaml.ts'
 import { configSchema } from './config-schema.ts'
 import { lineDiff, withContext } from './diff.ts'
+import { collidingChannel, forgetChannelStatements } from './channel-credentials.ts'
 import { syncConfig } from '../sync.ts'
 import { readRecoverySession } from '../setup/recovery.ts'
 import { beginSetup } from '../setup/state.ts'
@@ -166,7 +167,7 @@ export function mountAdminRoutes(app: Hono, deps: Deps): void {
       ])
     }
     try {
-      await saveAdminConfig(deps.db, { ...next, admin: true }, viewer.email, now, deps.getEnv, { ...opts, base: p.base })
+      await saveAdminConfig(deps.db, { ...next, admin: true }, viewer.email, now, deps.getEnv, { ...opts, base: p.base, entered: secrets.map((s) => s.name), hasRealEnv: deps.hasRealEnv })
     } catch (error) {
       if (error instanceof RevisionConflict) { formRevision.set(p.c.req.raw, error.current); return CONFLICT }
       return (error as Error).message
@@ -435,6 +436,8 @@ Alert links, ping URLs and sign-in callbacks use ${esc(configured)}. If the site
       if (!name) {
         if (!/^[A-Za-z0-9_-]{1,40}$/.test(channel)) throw new FormError('Use letters, numbers, - and _ for the channel name.')
         if (p.config.sinks?.[channel]) throw new FormError(`A channel named "${channel}" already exists.`)
+        const close = collidingChannel(p.config, channel)
+        if (close) throw new FormError(`The name is too close to the channel "${close}". Choose a different name.`)
       }
       const { sink, secrets } = sinkFromForm(p.form, channel, existing)
       // Validate with the new values visible, so a just-entered credential counts as set.
@@ -466,11 +469,11 @@ Alert links, ping URLs and sign-in callbacks use ${esc(configured)}. If the site
     if (p instanceof Response) return p
     const name = c.req.param('name')
     if (!p.config.sinks?.[name]) return notFound(c)
-    const error = await save(p, removeSink(p.config, name))
+    const remaining = removeSink(p.config, name)
+    const error = await save(p, remaining)
     if (error) return html(c, channelsPage({ viewer: p.viewer, csrf: p.csrf, sinks: channelRows(p.config), error }), 400)
-    // Erase the credentials this channel stored (exact prefix match; LIKE would treat _ as a wildcard).
-    const prefix = storedEnvKey(sinkEnvName(name, ''))
-    await deps.db.run(`DELETE FROM instance_secrets WHERE substr(name, 1, ?) = ?`, [prefix.length, prefix])
+    // Erase the credentials this channel stored, by exact name.
+    await deps.db.batch(forgetChannelStatements(name, p.config.sinks[name]!.type, remaining))
     await refreshAdminConfig(deps, nowSeconds())
     return done(c, '/admin/channels', 'channel-deleted')
   })
@@ -710,7 +713,13 @@ Alert links, ping URLs and sign-in callbacks use ${esc(configured)}. If the site
       }
       // Admin mode is always on for a stored configuration; a file may leave the flag out.
       if (value && typeof value === 'object' && !Array.isArray(value) && !('admin' in value)) value = { ...value, admin: true }
-      const saved = await saveAdminConfig(deps.db, value, 'api-token', nowSeconds(), deps.getEnv, { base, yaml, action: 'config.api' })
+      // As with an import, the sign-in method stays as it is: change it in Settings → Access.
+      const current = (await storedConfig()).access
+      if (current && value && typeof value === 'object' && !Array.isArray(value)) {
+        const next = value as AdminConfig
+        value = { ...next, access: { ...(next.access ?? {}), provider: current.provider } }
+      }
+      const saved = await saveAdminConfig(deps.db, value, 'api-token', nowSeconds(), deps.getEnv, { base, yaml, action: 'config.api', hasRealEnv: deps.hasRealEnv })
       await refreshAdminConfig(deps, nowSeconds())
       return c.json({ config: saved.config, updatedAt: saved.updatedAt, revision: saved.revision }, 200, { ...noStore, etag: etag(saved.revision) })
     } catch (error) {

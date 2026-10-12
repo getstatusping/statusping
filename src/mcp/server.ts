@@ -10,6 +10,7 @@ import { type Form, FormError, findMonitor, monitorFromForm, monitorRows, putMon
 import { currentRevision, loadAdminConfig, RevisionConflict, rotatePingToken, saveAdminConfig, type SaveOptions } from '../admin/service.ts'
 import { locateProblems } from '../admin/yaml.ts'
 import { type AdminConfig, validateAdminConfig } from '../admin/security.ts'
+import { ChannelCredentialError } from '../admin/channel-credentials.ts'
 import { dispatchAnnouncementNotifications, enqueueAnnouncementNotifications } from '../notify/announcements.ts'
 import { dispatchSubscriberOutbox, enqueueAnnouncement } from '../subscribers.ts'
 import { syncConfig } from '../sync.ts'
@@ -67,9 +68,10 @@ export function mountMcp(app: Hono, deps: Deps): void {
       await refreshAdminConfig(deps, now)
     }
     try {
-      await saveAdminConfig(deps.db, { ...next, admin: true }, actor(token), now, getEnv, { action: 'config.mcp', ...opts })
+      await saveAdminConfig(deps.db, { ...next, admin: true }, actor(token), now, getEnv, { action: 'config.mcp', ...opts, entered: secrets.map((s) => s.name), hasRealEnv: deps.hasRealEnv })
     } catch (error) {
       if (error instanceof RevisionConflict) throw new ToolError(`The configuration changed after revision ${opts.base}. Call get_configuration again and retry.`)
+      if (error instanceof ChannelCredentialError) throw new ToolError(opts.yaml ? locateProblems(opts.yaml, error.message) : error.message)
       throw error
     }
     await refreshAdminConfig(deps, now)

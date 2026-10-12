@@ -143,9 +143,11 @@ Every YAML import is parsed as safe plain data, validated by the StatusPing conf
 
 Credentials are named, never written: webhook URLs and header values, HTTP monitor URLs and header values, and every channel credential accept `{ $env: NAME }`. A literal URL or header that carries a credential is refused. **Settings → Configuration** lists every `$env` name the configuration uses and whether it is set.
 
+A channel credential saved in Settings or through MCP (`SINK_<CHANNEL>_<FIELD>`) stays with the destination it was entered for: the ntfy or Gotify server, the Matrix homeserver, or the SMTP server and username. A save that points the channel somewhere else, from YAML, the API or MCP, is refused until the credential is entered again. Credentials set as Worker secrets or environment variables are not tied to a destination. The ntfy server must be an `https://` URL. A new channel's name may not differ from an existing one only in case or in `-`, `_` and `.`, because their stored credentials would share names.
+
 Every save is kept as a version (the newest 50). **Configuration → History** shows who changed what, a line diff against the current version, and **Restore**. If someone else saved after you opened a page, your save is refused with a note instead of overwriting their change. Exported YAML starts with a `# yaml-language-server: $schema=…` line pointing at `/admin/schema.json` ([`statusping.schema.json`](statusping.schema.json), generated from the config types with `npm run schema:generate`), so editors validate and complete it. Validation errors name the line.
 
-Automation uses the same API with `ADMIN_TOKEN`: `GET /api/admin/config` returns JSON, or YAML with `Accept: application/yaml`, and an `ETag` with the revision; `PUT` accepts either, and with `If-Match: "<revision>"` it answers 412 when the configuration changed since. From a checkout:
+Automation uses the same API with `ADMIN_TOKEN`: `GET /api/admin/config` returns JSON, or YAML with `Accept: application/yaml`, and an `ETag` with the revision; `PUT` accepts either, and with `If-Match: "<revision>"` it answers 412 when the configuration changed since. Like an import, `PUT` keeps the current sign-in method (`access.provider`); change it in Settings → Access → **Change sign-in method**. From a checkout:
 
 ```bash
 npm run cli -- config check statusping.yaml                         # validate offline
@@ -158,6 +160,10 @@ Scheduled jobs no longer need `PING_TOKENS`: adding one in Settings (or through 
 ## Change the sign-in method
 
 Settings → Access → **Change sign-in method** switches between email and password, Cloudflare Access and OpenID Connect without taking the site offline. You enter the new settings, then run a real test sign-in as an administrator; the current method keeps working until that succeeds and you choose **Switch**. Switching signs everyone else out.
+
+For OpenID Connect, the current client ID and secret (saved in Settings or set as Worker secrets) are offered only while the issuer stays the same. A new issuer needs them entered again; with Worker secrets, enter the same values to confirm them, or update the secrets first.
+
+**Verified email.** A sign-in counts only when the ID token says `email_verified: true`. A token without the claim counts as unverified. Microsoft Entra ID does not send it, so for Entra (and providers you run yourself, such as Pocket ID) tick **Accept emails this provider has not verified** (`trustUnverifiedEmail: true`).
 
 **Server-side requests to the issuer.** Whoever runs setup or this switch can make StatusPing
 fetch the issuer they enter (`/.well-known/openid-configuration`, then its `token_endpoint` and

@@ -180,6 +180,17 @@ export function validateAdminConfig(value: unknown, getEnv: EnvGetter, mode: 'sa
   const admin = config.admin
   if (admin !== undefined && typeof admin !== 'boolean') throw new Error('admin: must be a boolean')
   const problems = validateAdminSecrets(config)
+  // The ntfy server receives the topic and access token. Checked on save only, so a site that
+  // already uses a plain-http server keeps loading.
+  if (mode === 'save') {
+    for (const [name, sink] of Object.entries(record(config.sinks) ?? {})) {
+      const s = record(sink)
+      if (s?.type !== 'ntfy' || s.server === undefined) continue
+      let ok = false
+      try { ok = typeof s.server === 'string' && new URL(s.server).protocol === 'https:' } catch { /* reported below */ }
+      if (!ok) problems.push(`sinks.${name}.server: must be an https:// URL`)
+    }
+  }
   if (problems.length) throw new Error(`Unsafe admin config:\n  - ${problems.join('\n  - ')}`)
   try {
     // Environment-backed monitor URLs need a harmless placeholder during validation.  Their

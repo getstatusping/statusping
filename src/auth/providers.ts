@@ -6,7 +6,7 @@ import { HTTPException } from 'hono/http-exception'
 import { attemptBucket, consumePingRateLimit, rateLimitExhausted } from '../rate-limit.ts'
 import { randomToken, sha256Hex, timingSafeEqual } from '../util/crypto.ts'
 import { nowSeconds } from '../util/time.ts'
-import { b64urlEncode, verifyJwt } from './jwt.ts'
+import { b64urlEncode, emailVerified, verifyJwt } from './jwt.ts'
 import { sign, unsign } from './session.ts'
 import { buildChrome } from '../web/chrome.ts'
 import { signInPage, ssoSignInPage } from '../web/pages.ts'
@@ -338,7 +338,8 @@ function oidcHandlers(deps: Deps, p: Oidc) {
     }
     if (claims.nonce !== login.nonce) return c.text('Sign-in failed (nonce mismatch).', 401)
     const email = typeof claims.email === 'string' ? claims.email.toLowerCase() : null
-    if (!email || (claims.email_verified === false && !p.trustUnverifiedEmail)) return c.text('Your account has no verified email address.', 403)
+    // A missing email_verified claim counts as unverified unless the provider is trusted.
+    if (!email || (!emailVerified(claims) && !p.trustUnverifiedEmail)) return c.text('Your account has no verified email address.', 403)
 
     // Keep only groups the config refers to: keeps the cookie small (Entra/Okta can send hundreds).
     const wanted = deps.config.access ? referencedGroups(deps.config.pages, deps.config.access) : new Set<string>()

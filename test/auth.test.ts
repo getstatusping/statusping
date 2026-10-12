@@ -231,12 +231,12 @@ describe('SSO / OIDC (groups or emails)', () => {
 
   const SESSION_SECRET = 'x'.repeat(40)
 
-  async function oidcSetup() {
+  async function oidcSetup(extra: Record<string, unknown> = {}) {
     const k = await keyPair('ES256', 'idp1')
     let idToken = ''
     const s = await setup(
       pagesConfig(
-        { type: 'oidc', issuer: 'https://idp.test', clientId: 'client-1', clientSecret: 'shh-secret', scopes: ['openid', 'email', 'groups'] },
+        { type: 'oidc', issuer: 'https://idp.test', clientId: 'client-1', clientSecret: 'shh-secret', scopes: ['openid', 'email', 'groups'], ...extra },
         true,
       ),
       { SESSION_SECRET },
@@ -310,7 +310,7 @@ describe('SSO / OIDC (groups or emails)', () => {
 
   it('access by email (team) works too; tampered cookies and nonce mismatches are rejected', async () => {
     const s = await oidcSetup()
-    const { session } = await s.login({ email: 'erin@statusping.test' }, '/pages/ops')
+    const { session } = await s.login({ email: 'erin@statusping.test', email_verified: true }, '/pages/ops')
     expect((await s.app.request('/pages/ops', { headers: { cookie: session } })).status).toBe(200)
 
     const tampered = session.slice(0, -3) + 'AAA'
@@ -318,11 +318,21 @@ describe('SSO / OIDC (groups or emails)', () => {
 
     const unverified = await s.login({ email: 'mallory@statusping.test', email_verified: false })
     expect(unverified.cb.status).toBe(403)
+    // A missing email_verified claim counts as unverified too.
+    const missing = await s.login({ email: 'erin@statusping.test' })
+    expect(missing.cb.status).toBe(403)
+    expect((await s.login({ email: 'erin@statusping.test', email_verified: 'true' })).cb.status).toBe(302)
+  })
+
+  it('a provider marked trustUnverifiedEmail may leave out email_verified', async () => {
+    const s = await oidcSetup({ trustUnverifiedEmail: true })
+    const { cb } = await s.login({ email: 'erin@statusping.test' }, '/pages/ops')
+    expect(cb.status).toBe(302)
   })
 
   it('open redirects are blocked', async () => {
     const s = await oidcSetup()
-    const { cb } = await s.login({ email: 'erin@statusping.test' }, '//evil.test/phish')
+    const { cb } = await s.login({ email: 'erin@statusping.test', email_verified: true }, '//evil.test/phish')
     expect(cb.headers.get('location')).toBe('/')
   })
 })

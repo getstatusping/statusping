@@ -6,8 +6,9 @@
  */
 import { acknowledgeIncident } from '../acknowledgements.ts'
 import type { MaintenanceInput, PageInput, SinkInput } from '../config.ts'
-import { type Deps, storedEnvKey } from '../deps.ts'
-import { describeChanges, type Form, FormError, pageFromForm, pageList, putPage, putSink, removePage, removeSink, SINK_FIELDS, type SinkType, sinkEnvName, sinkFromForm } from '../admin/forms.ts'
+import type { Deps } from '../deps.ts'
+import { describeChanges, type Form, FormError, pageFromForm, pageList, putPage, putSink, removePage, removeSink, SINK_FIELDS, type SinkType, sinkFromForm } from '../admin/forms.ts'
+import { collidingChannel, forgetChannelStatements } from '../admin/channel-credentials.ts'
 import type { AdminConfig } from '../admin/security.ts'
 import { currentRevision, currentYamlText, listAudit, rotatePingToken, type SaveOptions, sendSinkTest } from '../admin/service.ts'
 import { parseAdminYaml, stringifyAdminYaml } from '../admin/yaml.ts'
@@ -173,6 +174,8 @@ export function adminTools({ deps, storedConfig, save, actor }: Ctx): Tool[] {
         const name = at(args.name)
         if (!/^[A-Za-z0-9_-]{1,40}$/.test(name)) throw new ToolError('Use 1–40 letters, numbers, - or _ for the channel name.')
         if (config.sinks?.[name]) throw new ToolError(`A channel named "${name}" already exists.`)
+        const close = collidingChannel(config, name)
+        if (close) throw new ToolError(`The name "${name}" is too close to the channel "${close}". Choose a different name.`)
         const settings = (args.settings && typeof args.settings === 'object' ? args.settings : {}) as Json
         const { sink, secrets } = formErrors(() => sinkFromForm({ ...settingsForm(settings), type: at(args.type) }, name, undefined))
         await save(token, putSink(config, name, sink), secrets)
@@ -202,9 +205,10 @@ export function adminTools({ deps, storedConfig, save, actor }: Ctx): Tool[] {
         const config = await storedConfig()
         const name = at(args.name)
         if (!config.sinks?.[name]) throw new ToolError(`No channel named "${name}".`)
-        await save(token, removeSink(config, name))
-        const prefix = storedEnvKey(sinkEnvName(name, ''))
-        await deps.db.run(`DELETE FROM instance_secrets WHERE substr(name, 1, ?) = ?`, [prefix.length, prefix])
+        const remaining = removeSink(config, name)
+        await save(token, remaining)
+        // Erase the credentials this channel stored, by exact name.
+        await deps.db.batch(forgetChannelStatements(name, config.sinks[name]!.type, remaining))
         return { deleted: name }
       },
     },

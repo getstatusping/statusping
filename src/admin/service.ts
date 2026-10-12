@@ -3,6 +3,7 @@ import type { Db, Statement } from '../db/types.ts'
 import { createSink, type SinkRuntime } from '../notify/sinks.ts'
 import { randomToken, sha256Hex } from '../util/crypto.ts'
 import { type AdminConfig, validateAdminConfig } from './security.ts'
+import { ChannelCredentialError, channelBindingStatements, channelNameProblems } from './channel-credentials.ts'
 import { parseAdminYaml } from './yaml.ts'
 
 export interface StoredAdminConfig {
@@ -166,6 +167,10 @@ export interface SaveOptions {
   /** The YAML text the change came from, kept so comments and ordering survive. */
   yaml?: string | null
   action?: string
+  /** SINK_ credentials entered with this save; they are bound to their channel's destination. */
+  entered?: readonly string[]
+  /** Whether a name is a real Worker secret / environment variable (unbound), not a stored value. */
+  hasRealEnv?: (name: string) => boolean
 }
 
 /** Atomically validates, records, and stores an admin-managed config as a new revision. */
@@ -180,6 +185,9 @@ export async function saveAdminConfig(
   const { config } = validateAdminConfig(value, getEnv)
   if (config.admin !== true) throw new Error('admin: cannot disable admin mode through the admin API')
   const before = await loadAdminConfig(db)
+  const nameProblems = channelNameProblems(config, before?.config)
+  if (nameProblems.length) throw new ChannelCredentialError(nameProblems)
+  const bindings = await channelBindingStatements(db, config, before?.config, { getEnv, hasRealEnv: opts.hasRealEnv, entered: opts.entered, now })
   if (opts.base !== undefined) {
     const current = await currentRevision(db)
     if (current !== opts.base) throw new RevisionConflict(current)
@@ -198,6 +206,7 @@ export async function saveAdminConfig(
         // Activity keeps its long-standing config.save, except for whole-file replacements.
         params: [actor, action === 'config.import' || action === 'config.restore' ? action : 'config.save', before ? JSON.stringify(redactAdminValue(before.config)) : null, JSON.stringify(redactAdminValue(config)), now],
       },
+      ...bindings,
     ])
   } catch (error) {
     if (opts.base !== undefined && isConflict(error)) throw new RevisionConflict(await currentRevision(db))

@@ -6,7 +6,7 @@
 import type { Context, Hono } from 'hono'
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie'
 import { currentViewer, discover, hashUserPassword, setSession } from '../auth/providers.ts'
-import { b64urlEncode, verifyJwt } from '../auth/jwt.ts'
+import { b64urlEncode, emailVerified, verifyJwt } from '../auth/jwt.ts'
 import { sign, unsign } from '../auth/session.ts'
 import type { Viewer } from '../auth/viewer.ts'
 import type { AuthProviderInput } from '../config.ts'
@@ -62,14 +62,36 @@ const clearDraft = (deps: Deps) => deps.db.run(`DELETE FROM instance_secrets WHE
 
 /** Where a credential for the new method comes from: a Worker secret, entered for this switch, the current setting, or nowhere. */
 type Source = 'env' | 'pending' | 'current' | false
+/** `envSet`: a Worker secret exists but is not offered, because the draft names a different issuer. */
+type Credential = { value?: string; source: Source; envSet?: boolean }
 
-async function credentials(deps: Deps, method: Method): Promise<Record<string, { value?: string; source: Source }>> {
-  const out: Record<string, { value?: string; source: Source }> = {}
-  for (const name of SECRETS[method]) {
-    if (deps.hasRealEnv(name)) { out[name] = { value: deps.getEnv(name), source: 'env' }; continue }
+const sameIssuer = (a: string, b: string) => a.trim().replace(/\/+$/, '') === b.trim().replace(/\/+$/, '')
+
+/**
+ * Whether the draft's identity provider is the one configured now. The client ID and secret are
+ * sent to the provider (the secret to its token endpoint), so the current values, stored or from
+ * a Worker secret, are offered only for the same issuer. A new issuer needs them entered again.
+ */
+function keepsIssuer(deps: Deps, draft: Pick<SwitchDraft, 'method' | 'issuer'>): boolean {
+  if (draft.method !== 'oidc') return true
+  const current = deps.config.access?.provider
+  return current?.type === 'oidc' && draft.issuer !== undefined && sameIssuer(current.issuer, draft.issuer)
+}
+
+async function credentials(deps: Deps, draft: Pick<SwitchDraft, 'method' | 'issuer'>): Promise<Record<string, Credential>> {
+  const out: Record<string, Credential> = {}
+  const same = keepsIssuer(deps, draft)
+  for (const name of SECRETS[draft.method]) {
     const pending = (await deps.db.first<{ value: string }>(`SELECT value FROM instance_secrets WHERE name = ?`, [pendingKey(name)]))?.value
+    if (deps.hasRealEnv(name)) {
+      // A Worker secret always wins at sign-in, so for a new issuer it counts only once the
+      // administrator has entered the same value (proving it is meant for that issuer).
+      const env = deps.getEnv(name)!
+      out[name] = same || (pending !== undefined && timingSafeEqual(pending, env)) ? { value: env, source: 'env' } : { source: false, envSet: true }
+      continue
+    }
     if (pending) { out[name] = { value: pending, source: 'pending' }; continue }
-    const current = deps.getEnv(name)
+    const current = same ? deps.getEnv(name) : undefined
     out[name] = current ? { value: current, source: 'current' } : { source: false }
   }
   return out
@@ -125,11 +147,12 @@ function sourceNote(source: Source): string {
       : source === 'current' ? '<span class="secret-state ok">✓ Using the current value. Enter a new one to replace it.</span>' : ''
 }
 
-function configurePage(opts: { viewer: Viewer; csrf: string; origin: string; draft: SwitchDraft; creds: Record<string, { value?: string; source: Source }>; error?: string; notice?: string; preset?: string }): string {
+function configurePage(opts: { viewer: Viewer; csrf: string; origin: string; draft: SwitchDraft; creds: Record<string, Credential>; error?: string; notice?: string; preset?: string }): string {
   const d = opts.draft
   const verified = d.verifiedEmail
   const secretField = (name: string, label: string, type = 'password') => opts.creds[name]?.source === 'env' ? `<p class="hint">${label}: ${sourceNote('env')}</p>`
-    : field(label, `<input class="input" id="${name}" name="${name}" type="${type}" autocomplete="off" spellcheck="false">`, sourceNote(opts.creds[name]?.source ?? false))
+    : field(label, `<input class="input" id="${name}" name="${name}" type="${type}" autocomplete="off" spellcheck="false">`, opts.creds[name]?.envSet
+      ? `${name} is set as a Worker secret. For a new issuer, enter the same value here to confirm it, or update the Worker secret first.` : sourceNote(opts.creds[name]?.source ?? false))
   let body = ''
   if (d.method === 'basic') {
     body = `<section class="card"><h2>Your password</h2><p class="lead">You will sign in as <strong>${escape(opts.viewer.email)}</strong>.</p>
@@ -189,7 +212,7 @@ const currentMethod = (deps: Deps) => deps.config.access?.provider.type as Metho
 /** Settings pages for the switch. Called from mountAdminRoutes with its signed-in helpers. */
 export function mountAccessSwitch(app: Hono, deps: Deps, h: SwitchHelpers): void {
   const configure = async (c: Context, v: View | Post, draft: SwitchDraft, error?: string, status: 200 | 400 = 200) =>
-    h.html(c, configurePage({ viewer: v.viewer, csrf: v.csrf, origin: origin(c, deps), draft, creds: await credentials(deps, draft.method), error: error ?? ERRORS[c.req.query('error') ?? ''], notice: 'notice' in v ? v.notice : undefined, preset: c.req.query('preset') }), status)
+    h.html(c, configurePage({ viewer: v.viewer, csrf: v.csrf, origin: origin(c, deps), draft, creds: await credentials(deps, draft), error: error ?? ERRORS[c.req.query('error') ?? ''], notice: 'notice' in v ? v.notice : undefined, preset: c.req.query('preset') }), status)
 
   app.get('/admin/access/method', async (c) => {
     const v = await h.view(c)
@@ -229,9 +252,10 @@ export function mountAccessSwitch(app: Hono, deps: Deps, h: SwitchHelpers): void
     const now = nowSeconds()
     // Any change to the settings needs a fresh test sign-in.
     const next: SwitchDraft = { ...draft, verifiedEmail: undefined }
-    const stash = async (name: string) => {
+    const stash = async (name: string, newIssuer = false) => {
       const value = text(p.form, name)
-      if (!value || value.length > 2048 || deps.hasRealEnv(name)) return
+      // A Worker secret wins anyway; entering it again only confirms it for a new issuer.
+      if (!value || value.length > 2048 || (deps.hasRealEnv(name) && !newIssuer)) return
       await deps.db.run(`INSERT INTO instance_secrets (name, value, created_at) VALUES (?, ?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value, created_at = excluded.created_at`, [pendingKey(name), value, now])
     }
     if (draft.method === 'basic') {
@@ -253,8 +277,14 @@ export function mountAccessSwitch(app: Hono, deps: Deps, h: SwitchHelpers): void
       let error: string | undefined
       try { if (new URL(issuer).protocol !== 'https:') error = 'The issuer must be an https:// URL.' } catch { error = 'Enter the issuer URL, such as https://accounts.google.com.' }
       if (!error) { try { await discover(issuer, deps) } catch (e) { error = `StatusPing could not read ${issuer}/.well-known/openid-configuration (${(e as Error).message}).` } }
-      await stash('OIDC_CLIENT_ID')
-      await stash('OIDC_CLIENT_SECRET')
+      const newIssuer = !keepsIssuer(deps, updated)
+      await stash('OIDC_CLIENT_ID', newIssuer)
+      await stash('OIDC_CLIENT_SECRET', newIssuer)
+      if (!error && newIssuer) {
+        const creds = await credentials(deps, updated)
+        const mismatch = SECRETS.oidc.filter((name) => creds[name]?.envSet && text(p.form, name))
+        if (mismatch.length) error = `${mismatch.join(' and ')} ${mismatch.length > 1 ? 'are' : 'is'} set as a Worker secret, and the value entered does not match. Update the Worker secret for the new provider first.`
+      }
       if (error) return configure(c, p, updated, error, 400)
       await saveDraft(deps, updated)
     }
@@ -265,8 +295,9 @@ export function mountAccessSwitch(app: Hono, deps: Deps, h: SwitchHelpers): void
     const v = await h.view(c)
     if (v instanceof Response) return v
     const draft = await loadDraft(deps)
-    const creds = await credentials(deps, 'oidc')
-    if (draft?.method !== 'oidc' || !draft.issuer || !creds.OIDC_CLIENT_ID?.value || !creds.OIDC_CLIENT_SECRET?.value) return h.done(c, '/admin/access/method', 'method-saved')
+    if (draft?.method !== 'oidc' || !draft.issuer) return h.done(c, '/admin/access/method', 'method-saved')
+    const creds = await credentials(deps, draft)
+    if (!creds.OIDC_CLIENT_ID?.value || !creds.OIDC_CLIENT_SECRET?.value) return h.done(c, '/admin/access/method', 'method-saved')
     const d = await discover(draft.issuer, deps)
     const [state, nonce, verifier] = [randomToken(32), randomToken(32), randomToken(64)]
     const challenge = b64urlEncode(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier))))
@@ -281,7 +312,7 @@ export function mountAccessSwitch(app: Hono, deps: Deps, h: SwitchHelpers): void
     if (p instanceof Response) return p
     const draft = await loadDraft(deps)
     if (!draft?.verifiedEmail) return h.done(c, '/admin/access/method', 'method-expired')
-    const creds = await credentials(deps, draft.method)
+    const creds = await credentials(deps, draft)
     const getEnv = (name: string) => (name in creds ? creds[name]!.value : deps.getEnv(name))
     const next: AdminConfig = { ...p.config, access: { ...(p.config.access ?? {}), provider: providerFor(draft) } as AdminConfig['access'] }
     let normalized
@@ -296,7 +327,7 @@ export function mountAccessSwitch(app: Hono, deps: Deps, h: SwitchHelpers): void
       { sql: `INSERT INTO audit_log (actor, action, target, before_json, after_json, at) VALUES (?, 'access.method-change', 'access', ?, ?, ?)`, params: [p.viewer.email, JSON.stringify({ method: currentMethod(deps) ?? null }), JSON.stringify({ method: draft.method }), now] },
     ])
     await ensureSessionKey(deps)
-    await saveAdminConfig(deps.db, { ...next, admin: true }, p.viewer.email, now, getEnv)
+    await saveAdminConfig(deps.db, { ...next, admin: true }, p.viewer.email, now, getEnv, { hasRealEnv: deps.hasRealEnv })
     await clearDraft(deps)
     await refreshAdminConfig(deps, now)
     // Keep the administrator who switched signed in; Cloudflare Access signs in on every request.
@@ -324,7 +355,7 @@ export function mountAccessSwitchAuthRoutes(app: Hono, deps: Deps): void {
   app.get('/auth/method-verify', async (c) => {
     const draft = await adminDraft(c)
     if (draft?.method !== 'cloudflare-access' || !draft.teamDomain) return c.redirect('/admin/access', 303)
-    const audience = (await credentials(deps, 'cloudflare-access')).CF_ACCESS_AUD?.value
+    const audience = (await credentials(deps, draft)).CF_ACCESS_AUD?.value
     const token = c.req.header('cf-access-jwt-assertion') ?? getCookie(c, 'CF_Authorization')
     if (!audience) return back(c)
     if (!token) return back(c, 'access-no-token')
@@ -348,15 +379,16 @@ export function mountAccessSwitchAuthRoutes(app: Hono, deps: Deps): void {
     if (c.req.query('error')) return back(c, 'oidc-denied')
     const code = c.req.query('code')
     if (!login || !code || !timingSafeEqual(c.req.query('state') ?? '', login.state)) return back(c, 'oidc-state')
-    const creds = await credentials(deps, 'oidc')
-    const clientId = creds.OIDC_CLIENT_ID?.value ?? ''
+    const creds = await credentials(deps, draft)
+    const clientId = creds.OIDC_CLIENT_ID?.value
+    if (!clientId || !creds.OIDC_CLIENT_SECRET?.value) return back(c, 'oidc-token')
     let claims: Record<string, unknown>
     try {
       const d = await discover(draft.issuer, deps)
       const res = await targetFetch(deps)(d.token_endpoint, {
         method: 'POST',
         headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/json' },
-        body: new URLSearchParams({ grant_type: 'authorization_code', code, redirect_uri: `${origin(c, deps)}/auth/callback`, client_id: clientId, client_secret: creds.OIDC_CLIENT_SECRET?.value ?? '', code_verifier: login.verifier }),
+        body: new URLSearchParams({ grant_type: 'authorization_code', code, redirect_uri: `${origin(c, deps)}/auth/callback`, client_id: clientId, client_secret: creds.OIDC_CLIENT_SECRET.value, code_verifier: login.verifier }),
       })
       const idToken = res.ok ? ((await res.json()) as { id_token?: string }).id_token : undefined
       if (!idToken) return back(c, 'oidc-token')
@@ -364,7 +396,8 @@ export function mountAccessSwitchAuthRoutes(app: Hono, deps: Deps): void {
     } catch { return back(c, 'oidc-token') }
     if (claims.nonce !== login.nonce) return back(c, 'oidc-state')
     const email = typeof claims.email === 'string' ? claims.email.toLowerCase() : ''
-    if (!email || (claims.email_verified === false && !draft.trustUnverifiedEmail)) return back(c, 'oidc-email')
+    // A missing email_verified claim counts as unverified unless the provider is trusted.
+    if (!email || (!emailVerified(claims) && !draft.trustUnverifiedEmail)) return back(c, 'oidc-email')
     if (!isAdminEmail(deps, email, 'oidc')) return back(c, 'not-admin')
     await saveDraft(deps, { ...draft, verifiedEmail: email })
     return back(c)
