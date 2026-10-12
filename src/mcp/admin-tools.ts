@@ -242,7 +242,7 @@ export function adminTools({ deps, storedConfig, save, actor }: Ctx): Tool[] {
     },
     {
       name: 'add_maintenance', scope: 'monitors', annotations: { title: 'Add maintenance window', readOnlyHint: false, destructiveHint: false },
-      description: 'Plan maintenance: give start and end (ISO 8601) for a one-off window, or schedule (cron), duration and optional tz for a recurring one. Affected monitors show maintenance instead of an outage.',
+      description: 'Plan maintenance: give start and end (ISO 8601) for a one-off window, or schedule (five-field cron, runs at least an hour apart), duration and optional tz for a recurring one. Affected monitors show maintenance instead of an outage.',
       inputSchema: { type: 'object', required: ['title', 'monitors'], properties: {
         title: str, monitors: { description: 'Monitor ids, or "*" for every monitor.', anyOf: [strings, { type: 'string', enum: ['*'] }] },
         start: str, end: str, schedule: str, duration: { ...str, description: 'Such as 30m or 2h.' }, tz: str,
