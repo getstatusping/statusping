@@ -131,9 +131,15 @@ describe('Basic auth (email allowlist)', () => {
     const post = (fields: Record<string, string>, headers: Record<string, string> = {}) =>
       s.app.request('/auth/login', {
         method: 'POST',
-        headers: { 'content-type': 'application/x-www-form-urlencoded', ...headers },
+        headers: { 'content-type': 'application/x-www-form-urlencoded', origin: 'http://localhost', ...headers },
         body: new URLSearchParams(fields).toString(),
       })
+    // Login CSRF: a sign-in post must say it came from this site (Origin, or a same-site Referer).
+    const noOrigin = await s.app.request('/auth/login', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ email: 'alice@statusping.test', password: 'alice-password-123456', next: '/' }).toString() })
+    expect(noOrigin.status).toBe(403)
+    expect(noOrigin.headers.get('set-cookie')).toBeNull()
+    const viaReferer = await s.app.request('/auth/login', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded', referer: 'http://localhost/auth/login' }, body: new URLSearchParams({ email: 'alice@statusping.test', password: 'alice-password-123456', next: '/' }).toString() })
+    expect(viaReferer.status).toBe(303)
 
     // "Sign in" opens a themed sign-in page that returns to the page you were on.
     const pub = await (await s.app.request('/')).text()

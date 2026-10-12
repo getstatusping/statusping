@@ -55,7 +55,7 @@ describe('password hashes', () => {
     const app = createApp(deps)
     const login = (password: string) => app.request('/auth/login', {
       method: 'POST',
-      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      headers: { 'content-type': 'application/x-www-form-urlencoded', origin: 'http://localhost' },
       body: new URLSearchParams({ email: 'alice@example.test', password, next: '/' }).toString(),
     })
     expect((await login('alice chosen password')).status).toBe(303)

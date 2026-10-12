@@ -126,7 +126,7 @@ describe('admin secure configuration', () => {
     await tick(deps, 60_000)
     calls.length = 0
     const app = createApp(deps)
-    const login = await app.request('/auth/login', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ email: 'admin@example.test', password: 'very-long-admin-password', next: '/admin' }).toString() })
+    const login = await app.request('/auth/login', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded', origin: 'http://localhost' }, body: new URLSearchParams({ email: 'admin@example.test', password: 'very-long-admin-password', next: '/admin' }).toString() })
     const cookie = login.headers.getSetCookie().find((header) => header.startsWith('sp_session='))!.split(';')[0]!
     const page = await app.request('/admin', { headers: { cookie } })
     expect(page.status).toBe(200)

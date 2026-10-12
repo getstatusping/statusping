@@ -312,6 +312,19 @@ export function sameOrigin(c: Context, deps: Deps): boolean {
   return allowed.has(origin)
 }
 
+/**
+ * Stricter than sameOrigin, for the sign-in form (login CSRF): the request must say it came from
+ * this site. Browsers send Origin on every form POST; a Referer from this site is accepted as a
+ * fallback. A request with neither is refused.
+ */
+function fromThisSite(c: Context, deps: Deps): boolean {
+  let origin = c.req.header('origin')
+  if (!origin) {
+    try { origin = new URL(c.req.header('referer') ?? '').origin } catch { return false }
+  }
+  return new Set([new URL(c.req.url).origin, new URL(deps.config.baseUrl).origin]).has(origin)
+}
+
 function passwordHandlers(deps: Deps) {
   const page = async (c: Context, opts: { next: string; email?: string; error?: string }, status: 200 | 400 | 401 | 403 | 429 = 200) => {
     const chrome = await buildChrome(deps, { viewer: null, current: opts.next, signIn: false })
@@ -329,7 +342,7 @@ function passwordHandlers(deps: Deps) {
     const next = safeNext(typeof form.next === 'string' ? form.next : undefined)
     const email = typeof form.email === 'string' ? form.email.trim() : ''
     const password = typeof form.password === 'string' ? form.password : ''
-    if (!sameOrigin(c, deps)) return page(c, { next, email, error: 'Please try again.' }, 403)
+    if (!fromThisSite(c, deps)) return page(c, { next, email, error: 'Please try again.' }, 403)
     const ip = deps.clientIp(c.req.raw)
     if (ip !== null && !(await consumePingRateLimit(deps.db, `login:${ip}`, nowSeconds(), 10))) {
       return page(c, { next, email, error: 'Too many attempts. Wait a minute and try again.' }, 429)

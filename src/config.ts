@@ -1332,8 +1332,17 @@ export function activeMonitors(config: NormalizedConfig, role: Role): Monitor[] 
 
 export type EnvGetter = (name: string) => string | undefined
 
+/**
+ * StatusPing's own server secrets. No configuration may reference them with { $env }: a reference
+ * in a webhook header or monitor URL would send the value to an address the config chooses.
+ */
+const RESERVED_ENV = new Set(['SESSION_SECRET', 'ADMIN_TOKEN', 'ACK_SECRET', 'SUBSCRIBER_TOKEN_SECRET', 'TICK_SECRET', 'BASIC_AUTH_USERS', 'PING_TOKENS'])
+export const isReservedEnv = (name: string) => RESERVED_ENV.has(name) || name.startsWith('STATUSPING_') || name.startsWith('TURSO_')
+
 export function resolveSecret(value: Secret, getEnv: EnvGetter): string | undefined {
   if (typeof value === 'string') return value
+  // Defense in depth: the admin validator already refuses these names.
+  if (isReservedEnv(value.$env)) throw new Error(`${value.$env} is a server secret and cannot be referenced in the configuration`)
   const v = getEnv(value.$env)
   if (v === undefined || v === '') {
     if (value.optional) return undefined

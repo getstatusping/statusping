@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { confirmSubscription, consumeSubscribeLimit, startSubscription, unsubscribe } from '../src/subscribers.ts'
+import { createApp } from '../src/web/app.ts'
 import { DB_KINDS, createTestDb, fakeFetch, makeDeps, sec, testConfig } from './helpers.ts'
 
 describe.each(DB_KINDS)('subscribers (%s)', (kind) => {
@@ -21,6 +22,27 @@ describe.each(DB_KINDS)('subscribers (%s)', (kind) => {
     const allowed = await Promise.all(Array.from({ length: 5 }, () => consumeSubscribeLimit(db, 'ip:127.0.0.1', now)))
     expect(allowed).toEqual([true, true, true, true, true])
     expect(await consumeSubscribeLimit(db, 'ip:127.0.0.1', now)).toBe(false)
+    await close()
+  })
+})
+
+describe('subscribe rate limit (security review finding 2)', () => {
+  it('ignores a forged cf-connecting-ip header on runtimes that do not vouch for it', async () => {
+    const { db, close } = await createTestDb('libsql')
+    const fetch = fakeFetch()
+    const deps = makeDeps(db, { fetch: fetch.fn, env: { SUBSCRIBER_TOKEN_SECRET: 'subscriber-token-secret' }, config: testConfig({ subscribers: { provider: 'resend', apiKey: 're_test_key', from: 'Status <status@example.com>' } }) })
+    const app = createApp(deps)
+    const statuses: number[] = []
+    for (let i = 0; i < 8; i++) {
+      const res = await app.request('/pages/status/subscribe', {
+        method: 'POST',
+        headers: { 'content-type': 'application/x-www-form-urlencoded', 'cf-connecting-ip': `198.51.100.${i}` },
+        body: new URLSearchParams({ email: `victim${i}@example.com` }).toString(),
+      })
+      statuses.push(res.status)
+    }
+    expect(statuses.filter((s) => s === 429).length).toBeGreaterThan(0)
+    expect(fetch.calls.length).toBeLessThanOrEqual(5)
     await close()
   })
 })

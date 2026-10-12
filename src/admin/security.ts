@@ -1,7 +1,7 @@
 import type { Context } from 'hono'
 import { getCookie } from 'hono/cookie'
 import { canAcknowledge, type Viewer } from '../auth/viewer.ts'
-import { type EnvGetter, type EnvRef, type NormalizedConfig, normalizeConfig, resolveConfigEnv, type StatusPingConfig } from '../config.ts'
+import { type EnvGetter, type EnvRef, isReservedEnv, type NormalizedConfig, normalizeConfig, resolveConfigEnv, type StatusPingConfig } from '../config.ts'
 import type { Db } from '../db/types.ts'
 import { randomToken, sha256Hex, timingSafeEqual } from '../util/crypto.ts'
 import { TENANT_ENV, clampToTenantPolicy, explicitIntervalIds, parseTenantPolicy, tenantPolicyProblems } from '../platform.ts'
@@ -16,10 +16,35 @@ function record(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null
 }
 
-function envRef(value: unknown, path: string, problems: string[]): value is EnvRef {
+/**
+ * Where a secret reference appears decides which names it may read. A reference resolves to a
+ * real value that may be sent somewhere (a webhook header, a monitor URL), so:
+ * - StatusPing's own server secrets are never readable (isReservedEnv);
+ * - sign-in settings (OIDC_*, CF_ACCESS_AUD) only from the sign-in method;
+ * - a channel's saved credential (SINK_<NAME>_<FIELD>) only from the field it was saved for, so a
+ *   channel can't be retyped to send its own stored credential somewhere else.
+ */
+type RefScope = { kind: 'provider' } | { kind: 'sink'; name: string; field: string | null } | { kind: 'other' }
+const SIGN_IN_ENV = /^(OIDC_[A-Z0-9_]+|CF_ACCESS_AUD)$/
+const sinkEnv = (name: string, field: string) => `SINK_${name}_${field}`.toUpperCase().replace(/[^A-Z0-9_]/g, '_')
+
+function envRef(value: unknown, path: string, problems: string[], scope: RefScope = { kind: 'other' }): value is EnvRef {
   const ref = record(value)
   if (!ref || typeof ref.$env !== 'string' || !ENV_NAME.test(ref.$env) || Object.keys(ref).some((key) => key !== '$env' && key !== 'optional')) {
     problems.push(`${path}: must be a secret reference, { $env: NAME }`)
+    return false
+  }
+  const name = ref.$env
+  if (isReservedEnv(name)) {
+    problems.push(`${path}: ${name} is a server secret and cannot be referenced`)
+    return false
+  }
+  if (SIGN_IN_ENV.test(name) && scope.kind !== 'provider') {
+    problems.push(`${path}: ${name} belongs to the sign-in method and cannot be referenced here`)
+    return false
+  }
+  if (name.startsWith('SINK_') && !(scope.kind === 'sink' && scope.field !== null && name === sinkEnv(scope.name, scope.field))) {
+    problems.push(`${path}: ${name} is a saved channel credential and can only be used by the field it was saved for`)
     return false
   }
   if (ref.optional !== undefined && typeof ref.optional !== 'boolean') problems.push(`${path}.optional: must be a boolean`)
@@ -37,14 +62,14 @@ function literalUrl(value: string, path: string, problems: string[]): void {
 }
 
 /** Header values: literal text, or { $env: NAME }. Credential-bearing headers must use $env. */
-function headerValues(value: unknown, path: string, problems: string[]): void {
+function headerValues(value: unknown, path: string, problems: string[], scope: RefScope = { kind: 'other' }): void {
   if (value === undefined) return
   const headers = record(value)
   if (!headers) { problems.push(`${path}: must be an object`); return }
   for (const [header, item] of Object.entries(headers)) {
     if (typeof item === 'string') {
       if (SENSITIVE_NAME.test(header)) problems.push(`${path}.${header}: holds a credential. Store it as a secret and write { $env: NAME } instead`)
-    } else envRef(item, `${path}.${header}`, problems)
+    } else envRef(item, `${path}.${header}`, problems, scope)
   }
 }
 
@@ -62,7 +87,8 @@ export function validateAdminSecrets(value: unknown): string[] {
   for (const [name, raw] of Object.entries(sinks ?? {})) {
     const sink = record(raw)
     if (!sink || typeof sink.type !== 'string') { problems.push(`sinks.${name}: must be an object`); continue }
-    const ref = (key: string) => envRef(sink[key], `sinks.${name}.${key}`, problems)
+    const scope = (field: string | null): RefScope => ({ kind: 'sink', name, field })
+    const ref = (key: string) => envRef(sink[key], `sinks.${name}.${key}`, problems, scope(key))
     switch (sink.type) {
       case 'pushover': ref('appToken'); ref('userKey'); break
       case 'ntfy':
@@ -79,10 +105,10 @@ export function validateAdminSecrets(value: unknown): string[] {
       case 'email': {
         const via = sink.via
         if (via && typeof via === 'object' && !Array.isArray(via) && (via as Record<string, unknown>).provider === 'resend') {
-          envRef((via as Record<string, unknown>).apiKey, `sinks.${name}.via.apiKey`, problems)
+          envRef((via as Record<string, unknown>).apiKey, `sinks.${name}.via.apiKey`, problems, scope('apiKey'))
         }
         if (via && typeof via === 'object' && !Array.isArray(via) && (via as Record<string, unknown>).provider === 'smtp' && (via as Record<string, unknown>).password !== undefined) {
-          envRef((via as Record<string, unknown>).password, `sinks.${name}.via.password`, problems)
+          envRef((via as Record<string, unknown>).password, `sinks.${name}.via.password`, problems, scope('password'))
         }
         break
       }
@@ -90,9 +116,9 @@ export function validateAdminSecrets(value: unknown): string[] {
         // A credential in the URL or a header must be a secret: { $env: NAME }, never a literal.
         if (typeof sink.url === 'string') literalUrl(sink.url, `sinks.${name}.url`, problems)
         else if (sink.url === undefined) problems.push(`sinks.${name}.url: must be a URL or { $env: NAME }`)
-        else envRef(sink.url, `sinks.${name}.url`, problems)
-        headerValues(sink.headers, `sinks.${name}.headers`, problems)
-        if (sink.secret !== undefined) envRef(sink.secret, `sinks.${name}.secret`, problems)
+        else envRef(sink.url, `sinks.${name}.url`, problems, scope('url'))
+        headerValues(sink.headers, `sinks.${name}.headers`, problems, scope(null))
+        if (sink.secret !== undefined) envRef(sink.secret, `sinks.${name}.secret`, problems, scope('secret'))
         break
       }
     }
@@ -101,8 +127,11 @@ export function validateAdminSecrets(value: unknown): string[] {
   if (subscribers?.provider === 'resend') envRef(subscribers.apiKey, 'subscribers.apiKey', problems)
   const access = record(config.access)
   const provider = record(access?.provider)
-  if (provider?.type === 'cloudflare-access') envRef(provider.audience, 'access.provider.audience', problems)
-  if (provider?.type === 'oidc') envRef(provider.clientSecret, 'access.provider.clientSecret', problems)
+  if (provider?.type === 'cloudflare-access') envRef(provider.audience, 'access.provider.audience', problems, { kind: 'provider' })
+  if (provider?.type === 'oidc') {
+    envRef(provider.clientSecret, 'access.provider.clientSecret', problems, { kind: 'provider' })
+    if (provider.clientId !== undefined && typeof provider.clientId !== 'string') envRef(provider.clientId, 'access.provider.clientId', problems, { kind: 'provider' })
+  }
   const peer = record(config.peer)
   if (peer?.pingUrl !== undefined && peer.pingUrl !== null) envRef(peer.pingUrl, 'peer.pingUrl', problems)
   for (const [groupIndex, groupValue] of (Array.isArray(config.groups) ? config.groups : []).entries()) {

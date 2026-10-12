@@ -321,7 +321,9 @@ export function createApp(deps: Deps): Hono {
     const form = await c.req.parseBody().catch(() => ({}))
     // A restricted-page subscription belongs to the authenticated viewer, never a form field.
     const email = r.page.access === 'public' ? String((form as Record<string, string | File>).email ?? '') : r.viewer!.email
-    const bucket = c.req.header('cf-connecting-ip') ? `ip:${c.req.header('cf-connecting-ip')}` : `page:${r.page.slug}`
+    // The adapter's trusted client address, never a raw header: on Node anyone can send cf-connecting-ip.
+    const ip = deps.clientIp(c.req.raw)
+    const bucket = ip ? `ip:${ip}` : `page:${r.page.slug}`
     if (!(await consumeSubscribeLimit(deps.db, bucket, nowSeconds()))) return c.text('Too many subscription attempts; try again later.', 429)
     const result = await startSubscription(deps, r.page.slug, email, nowSeconds())
     if (result === 'invalid') return c.text('Enter a valid email address.', 400)
