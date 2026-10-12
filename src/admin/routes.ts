@@ -200,7 +200,7 @@ Alert links, ping URLs and sign-in callbacks use ${esc(configured)}. If the site
   // ── General ───────────────────────────────────────────────────────────────────────────────
 
   const general = async (c: Context, v: { viewer: Viewer; csrf: string; config: AdminConfig; notice?: string }, error?: string, status: 200 | 400 = 200, resetError?: string) => {
-    const update = await checkForUpdate({ db: deps.db, config: deps.config, fetch: deps.fetch, now: nowSeconds() })
+    const update = await checkForUpdate({ db: deps.db, config: deps.config, fetch: deps.fetch, targetGuard: deps.targetGuard, now: nowSeconds() })
     return html(c, generalPage({ viewer: v.viewer, csrf: v.csrf, title: v.config.title, baseUrl: v.config.baseUrl, timezone: v.config.timezone ?? 'UTC', updatesEnabled: v.config.updates?.enabled === true, installedVersion: APP_VERSION, update, notice: v.notice, error, resetError }), status)
   }
 
@@ -239,7 +239,7 @@ Alert links, ping URLs and sign-in callbacks use ${esc(configured)}. If the site
   app.post('/admin/updates/check', async (c) => {
     const p = await post(c)
     if (p instanceof Response) return p
-    const result = await checkForUpdate({ db: deps.db, config: deps.config, fetch: deps.fetch, now: nowSeconds(), force: true })
+    const result = await checkForUpdate({ db: deps.db, config: deps.config, fetch: deps.fetch, targetGuard: deps.targetGuard, now: nowSeconds(), force: true })
     await appendAudit(deps.db, { actor: p.viewer.email, action: 'update.check', target: result.targetVersion ? `release:${result.targetVersion}` : 'release:none', before: null, after: null, at: nowSeconds() })
     return done(c, '/admin', `update-${result.result}`)
   })

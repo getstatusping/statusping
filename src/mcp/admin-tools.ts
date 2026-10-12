@@ -291,7 +291,7 @@ export function adminTools({ deps, storedConfig, save, actor }: Ctx): Tool[] {
       run: async () => {
         const config = await storedConfig()
         const p = config.access?.provider
-        const update = await checkForUpdate({ db: deps.db, config: deps.config, fetch: deps.fetch, now: nowSeconds() })
+        const update = await checkForUpdate({ db: deps.db, config: deps.config, fetch: deps.fetch, targetGuard: deps.targetGuard, now: nowSeconds() })
         return {
           title: config.title, baseUrl: config.baseUrl, timezone: config.timezone ?? 'UTC', updateChecks: config.updates?.enabled === true,
           administrators: config.access?.admins?.emails ?? [], signInMethod: p ? (p.type === 'oidc' ? { type: 'oidc', issuer: p.issuer } : p.type === 'cloudflare-access' ? { type: 'cloudflare-access', teamDomain: p.teamDomain } : { type: 'basic' }) : null,
@@ -337,7 +337,7 @@ export function adminTools({ deps, storedConfig, save, actor }: Ctx): Tool[] {
       description: 'Check the signed StatusPing release manifest for a newer version now.',
       inputSchema: { type: 'object', properties: {} },
       run: async (_args, { token }) => {
-        const result = await checkForUpdate({ db: deps.db, config: deps.config, fetch: deps.fetch, now: nowSeconds(), force: true })
+        const result = await checkForUpdate({ db: deps.db, config: deps.config, fetch: deps.fetch, targetGuard: deps.targetGuard, now: nowSeconds(), force: true })
         await deps.db.run(`INSERT INTO audit_log (actor, action, target, before_json, after_json, at) VALUES (?, 'update.check', ?, NULL, NULL, ?)`, [actor(token), result.targetVersion ? `release:${result.targetVersion}` : 'release:none', nowSeconds()])
         return { installed: APP_VERSION, result: result.result, availableVersion: result.targetVersion, checkedAt: iso(result.checkedAt) }
       },

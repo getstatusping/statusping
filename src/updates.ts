@@ -1,6 +1,7 @@
 import { APP_VERSION, SCHEMA_VERSION } from './version.ts'
 import type { NormalizedConfig } from './config.ts'
 import type { Db } from './db/types.ts'
+import { guardedFetch, type TargetGuard } from './util/private-targets.ts'
 
 export type UpdateCheckResult = 'disabled' | 'available' | 'current' | 'incompatible' | 'failed'
 export interface StoredUpdateCheck { result: Exclude<UpdateCheckResult, 'disabled'>; targetVersion: string | null; checkedAt: number }
@@ -90,10 +91,21 @@ async function store(db: Db, check: StoredUpdateCheck): Promise<StoredUpdateChec
   return check
 }
 
-/** Checks an explicitly configured, signed manifest. It never logs or persists response bodies. */
-export async function checkForUpdate(opts: { db: Db; config: NormalizedConfig; fetch: typeof fetch; now: number; force?: boolean }): Promise<StoredUpdateCheck | { result: 'disabled'; targetVersion: null; checkedAt: null }> {
-  const { updates } = opts.config
+/**
+ * Checks an explicitly configured, signed manifest. It never logs or persists response bodies.
+ *
+ * With the private-target guard on (`targetGuard`: hosted tenants, or
+ * STATUSPING_BLOCK_PRIVATE_TARGETS), a custom `manifestUrl`/`publicKey` is ignored in favour of
+ * the official ones, and the request and every redirect go through the guard: whoever can edit
+ * settings must not be able to point the server at an internal address.
+ */
+export async function checkForUpdate(opts: { db: Db; config: NormalizedConfig; fetch: typeof fetch; targetGuard?: TargetGuard; now: number; force?: boolean }): Promise<StoredUpdateCheck | { result: 'disabled'; targetVersion: null; checkedAt: null }> {
+  const configured = opts.config.updates
+  const updates = opts.targetGuard && configured.enabled
+    ? { ...configured, manifestUrl: OFFICIAL_MANIFEST_URL, publicKey: OFFICIAL_RELEASE_PUBLIC_KEY }
+    : configured
   if (!updates.enabled || !updates.manifestUrl || !updates.publicKey) return { result: 'disabled', targetVersion: null, checkedAt: null }
+  const fetchManifest = opts.targetGuard ? guardedFetch(opts.fetch, opts.targetGuard) : opts.fetch
   const existing = await loadUpdateCheck(opts.db)
   // A cached offer of a version this installation has already reached (it was updated since
   // the check) is stale, whatever its age.
@@ -102,7 +114,7 @@ export async function checkForUpdate(opts: { db: Db; config: NormalizedConfig; f
   if (!opts.force && existing && !outdatedOffer && opts.now - existing.checkedAt < DAY) return existing
   let next: StoredUpdateCheck = { result: 'failed', targetVersion: null, checkedAt: opts.now }
   try {
-    const response = await opts.fetch(updates.manifestUrl, {
+    const response = await fetchManifest(updates.manifestUrl, {
       headers: { accept: 'application/json' },
       // GitHub Release downloads always redirect to its asset CDN. The signature,
       // not the serving host, is what makes the manifest trustworthy.
