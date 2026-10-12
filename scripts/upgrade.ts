@@ -6,7 +6,8 @@
  *   npm run upgrade -- --adopt    # repositories created before release markers
  *
  * Fetches the installed and target release tags from the public template,
- * plans a file-level three-way upgrade, and commits it on a new
+ * checks them against each release's signed update manifest, plans a
+ * file-level three-way upgrade, and commits it on a new
  * `statusping/upgrade-vX.Y.Z` branch. Nothing is pushed: review the commit,
  * then push the branch and merge it through a pull request.
  */
@@ -14,8 +15,14 @@ import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { MARKER_PATH, planUpgrade, WRANGLER_PATH } from '../src/upgrade-plan.ts'
+import { MAX_UPDATE_MANIFEST_BYTES, OFFICIAL_RELEASE_PUBLIC_KEY, SOURCE_TREE_REQUIRED_FROM, sourceTreeMismatches, verifySignedManifest, type VerifiedRelease } from '../src/updates.ts'
+import { gitTree } from './git-tree.ts'
 
 const SOURCE = 'https://github.com/getstatusping/statusping.git'
+// Signed manifests always come from the official releases, also for a --source mirror: a mirror's
+// tags must hold the same files. The signature, not the host, is what is trusted.
+const RELEASES = process.env.STATUSPING_RELEASES_URL ?? 'https://github.com/getstatusping/statusping/releases/download'
+const PUBLIC_KEY = process.env.STATUSPING_RELEASE_PUBLIC_KEY ?? OFFICIAL_RELEASE_PUBLIC_KEY
 const SEMVER = /^v?(\d+)\.(\d+)\.(\d+)$/
 const BLOCKING = new Set(['modified-locally', 'deleted-locally', 'added-locally', 'template-marker-missing'])
 
@@ -40,15 +47,39 @@ function latestTag(source: string): string {
   return tags.at(-1) ?? fail(`No release tags found at ${source}`)
 }
 
-function tree(ref: string): Map<string, Uint8Array> {
-  const files = new Map<string, Uint8Array>()
-  for (const path of git(['ls-tree', '-r', '-z', '--name-only', ref]).toString('utf8').split('\0').filter(Boolean)) {
-    files.set(path, git(['cat-file', 'blob', `${ref}:${path}`]))
-  }
-  return files
+const tree = (ref: string) => gitTree(ref).files
+
+/** The release's update manifest, verified with the release key; null when it is missing or does not verify. */
+async function signedRelease(version: string): Promise<VerifiedRelease | null> {
+  try {
+    const res = await fetch(`${RELEASES}/v${version}/update-manifest.json`, { headers: { accept: 'application/json' }, redirect: 'follow', signal: AbortSignal.timeout(15_000) })
+    const raw = res.ok ? await res.text() : ''
+    const release = raw && raw.length <= MAX_UPDATE_MANIFEST_BYTES ? await verifySignedManifest(raw, PUBLIC_KEY) : null
+    return release?.version === version ? release : null
+  } catch { return null }
 }
 
-function main() {
+/**
+ * Prove a fetched release tree is the signed release: every updater-owned file must match the
+ * manifest's source tree. Releases from SOURCE_TREE_REQUIRED_FROM on always carry one, so for
+ * them a missing or unverifiable manifest is refused. Older releases cannot be checked; that is
+ * a warning only, because this command commits locally and never pushes.
+ */
+async function checkSourceTree(version: string, files: Map<string, Uint8Array>, role: 'installed' | 'target'): Promise<VerifiedRelease | null> {
+  const release = await signedRelease(version)
+  if (!release?.sourceTree) {
+    if (compare(version, SOURCE_TREE_REQUIRED_FROM) >= 0) fail(`The signed release manifest for v${version} could not be downloaded or verified, so its files cannot be checked. Nothing was changed.`)
+    if (role === 'target') console.warn(`Warning: v${version} predates signed source trees, so its files could not be checked against the release signature. Review the commit carefully, including .github/, before pushing it.`)
+    return release
+  }
+  const mismatches = await sourceTreeMismatches(files, release.sourceTree)
+  if (mismatches.length) {
+    fail(`The v${version} tag does not match its signed release (${mismatches.length} file(s) differ, e.g. ${mismatches.slice(0, 5).join(', ')}). Nothing was changed. Report this at https://github.com/getstatusping/statusping/security.`)
+  }
+  return release
+}
+
+async function main() {
   const args = process.argv.slice(2)
   const sourceIndex = args.indexOf('--source')
   const source = sourceIndex >= 0 ? args[sourceIndex + 1] ?? fail('--source needs a Git URL') : SOURCE
@@ -79,8 +110,9 @@ function main() {
   try {
     git(['fetch', '--quiet', '--no-tags', source, `+refs/${adopt ? 'heads/main' : `tags/v${installed}`}:${baseRef}`, `+refs/tags/${targetTag}:${targetRef}`])
     const next = tree(targetRef)
-    let minimum = ''
-    try { minimum = String((JSON.parse(new TextDecoder().decode(next.get('package.json'))) as { statusping?: { minimumUpgradeVersion?: unknown } }).statusping?.minimumUpgradeVersion ?? '') } catch { /* no minimum */ }
+    const targetRelease = await checkSourceTree(target, next, 'target')
+    let minimum = targetRelease?.minimumVersion ?? ''
+    if (!targetRelease) try { minimum = String((JSON.parse(new TextDecoder().decode(next.get('package.json'))) as { statusping?: { minimumUpgradeVersion?: unknown } }).statusping?.minimumUpgradeVersion ?? '') } catch { /* no minimum */ }
     if (SEMVER.test(minimum) && compare(installed, minimum) < 0) fail(`${targetTag} cannot be applied directly to v${installed}. Upgrade to v${minimum} first:\n  npm run upgrade -- ${minimum}`)
     let base: Map<string, Uint8Array>
     const current = new Map<string, Uint8Array>()
@@ -100,6 +132,8 @@ function main() {
       current.set(MARKER_PATH, adopted)
     } else {
       base = tree(baseRef)
+      // The installed release is only a merge base, but a tampered one could hide changes.
+      await checkSourceTree(installed, base, 'installed')
     }
     for (const path of new Set([...base.keys(), ...next.keys()])) {
       if (!current.has(path) && existsSync(path)) current.set(path, readFileSync(path))
@@ -142,4 +176,4 @@ function main() {
   }
 }
 
-main()
+void main().catch((error) => fail(error instanceof Error ? error.message : String(error)))

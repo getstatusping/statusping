@@ -6,8 +6,9 @@ import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import packageJson from '../package.json' with { type: 'json' }
 import { MIGRATIONS } from '../src/schema.ts'
-import { canonicalJson } from '../src/updates.ts'
+import { canonicalJson, MAX_UPDATE_MANIFEST_BYTES } from '../src/updates.ts'
 import { appRoot, releaseDir, wrangler } from './release-paths.ts'
+import { releaseSourceTree } from './git-tree.ts'
 
 const version = packageJson.version
 const outputDir = releaseDir(version)
@@ -141,6 +142,10 @@ async function main() {
     notesUrl: `https://github.com/getstatusping/statusping/releases/tag/v${version}`,
     // Breaking releases still upgrade directly; the flag tells owners to read the notes.
     breaking: packageJson.statusping.breaking === true,
+    // The updater-owned files at this commit (the release tag), so updaters can prove the tag
+    // archive they download is the signed release: a moved tag must not reach customer repos.
+    // Read from HEAD's blobs, not the working tree, because GitHub serves the tag's archive.
+    sourceTree: await releaseSourceTree('HEAD', appRoot),
   }
   // Signing is deliberately release-job-only. The public key is configured by an
   // operator on instances that opt into update checks; no private key enters this
@@ -156,6 +161,11 @@ async function main() {
     updateManifest.signature = { algorithm: 'Ed25519', value: signature }
   }
   artifactContents['update-manifest.json'] = Buffer.from(`${JSON.stringify(updateManifest, null, 2)}\n`)
+  // Installed instances (and the one-click updater) refuse manifests over 64 KB, and the cap in
+  // releases already deployed cannot be raised: past it, every installation stops seeing updates.
+  if (artifactContents['update-manifest.json'].byteLength > MAX_UPDATE_MANIFEST_BYTES) {
+    throw new Error(`update-manifest.json is ${artifactContents['update-manifest.json'].byteLength} bytes; installations refuse manifests over ${MAX_UPDATE_MANIFEST_BYTES}`)
+  }
   await writeFile(join(stagingDir, 'update-manifest.json'), artifactContents['update-manifest.json']!)
   assertNoBuildSecrets(artifactContents)
 

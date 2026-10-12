@@ -4,8 +4,9 @@ import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import packageJson from '../package.json' with { type: 'json' }
 import { MIGRATIONS } from '../src/schema.ts'
-import { canonicalJson, OFFICIAL_RELEASE_PUBLIC_KEY } from '../src/updates.ts'
-import { releaseDir } from './release-paths.ts'
+import { canonicalJson, MAX_UPDATE_MANIFEST_BYTES, OFFICIAL_RELEASE_PUBLIC_KEY, parseSourceTree } from '../src/updates.ts'
+import { releaseSourceTree } from './git-tree.ts'
+import { appRoot, releaseDir } from './release-paths.ts'
 
 type FileEntry = { sha256: string; bytes: number }
 type ReleaseManifest = { version: string; files: Record<string, FileEntry> }
@@ -21,6 +22,7 @@ type UpdateManifest = {
   template: { version: string; marker: string }
   notesUrl: string
   breaking: boolean
+  sourceTree?: unknown
   signature?: { algorithm: string; value: string }
 }
 
@@ -48,7 +50,9 @@ async function main() {
     assertion(actual.sha256 === expected.sha256 && actual.bytes === expected.bytes, `checksum mismatch for ${file}`)
   }
 
-  const update = JSON.parse(await readFile(join(root, 'update-manifest.json'), 'utf8')) as UpdateManifest
+  const updateBytes = await readFile(join(root, 'update-manifest.json'))
+  assertion(updateBytes.byteLength <= MAX_UPDATE_MANIFEST_BYTES, `update-manifest.json is larger than installations accept (${MAX_UPDATE_MANIFEST_BYTES} bytes)`)
+  const update = JSON.parse(updateBytes.toString('utf8')) as UpdateManifest
   assertion(update.format === 'statusping-update-manifest/v1', 'unsupported update manifest format')
   const [target, minimum] = [semver(update.version), semver(update.minimumVersion)]
   assertion(update.version === packageJson.version && update.minimumVersion === packageJson.statusping.minimumUpgradeVersion, 'unsafe version compatibility declaration')
@@ -66,6 +70,11 @@ async function main() {
   assertion(update.breaking === (packageJson.statusping.breaking === true), 'breaking flag does not match package.json')
   // Every release upgrades directly from any older one: migrations run on first start, never via a stepping-stone release.
   assertion(update.minimumVersion === '0.1.0', 'minimumUpgradeVersion must stay 0.1.0; migrate on first start instead of requiring an intermediate release')
+  // The signed source tree must be exactly the updater-owned files committed at this release.
+  const sourceTree = await parseSourceTree(update.sourceTree)
+  assertion(sourceTree, 'update manifest has no valid sourceTree')
+  const expectedTree = await releaseSourceTree('HEAD', appRoot)
+  assertion(canonicalJson(sourceTree) === canonicalJson(expectedTree), 'sourceTree does not match the updater-owned files committed at HEAD')
   if (update.signature !== undefined) {
     assertion(update.signature.algorithm === 'Ed25519' && /^[A-Za-z0-9+/]+={0,2}$/.test(update.signature.value), 'invalid release signature metadata')
   }
@@ -83,7 +92,7 @@ async function main() {
     } catch { /* the assertion below gives a safe, non-secret diagnostic */ }
     assertion(valid, 'update manifest signature does not match STATUSPING_RELEASE_PUBLIC_KEY')
   }
-  process.stdout.write(`Verified release bundle at ${root}\n`)
+  process.stdout.write(`Verified release bundle at ${root} (${Object.keys(sourceTree.files).length} signed source files, ${update.signature ? 'signed' : 'unsigned'})\n`)
 }
 
 void main().catch((error) => {
