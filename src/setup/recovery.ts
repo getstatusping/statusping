@@ -10,7 +10,7 @@ import { fromThisSite } from '../auth/providers.ts'
 import { sign, unsign } from '../auth/session.ts'
 import { canAcknowledge, type Viewer } from '../auth/viewer.ts'
 import type { Deps } from '../deps.ts'
-import { consumePingRateLimit } from '../rate-limit.ts'
+import { consumeAttempt } from '../rate-limit.ts'
 import { timingSafeEqual } from '../util/crypto.ts'
 import { nowSeconds } from '../util/time.ts'
 import { recoverPage } from './ui.ts'
@@ -46,8 +46,8 @@ export function mountRecoveryRoutes(app: Hono, deps: Deps): void {
     const key = recoveryKey(deps)
     if (!key || !available()) return notFound(c)
     if (!fromThisSite(c, deps)) return c.text('Forbidden', 403, headers)
-    const ip = deps.clientIp(c.req.raw)
-    if (ip !== null && !(await consumePingRateLimit(deps.db, `setup-recover:${ip}`, nowSeconds(), 5))) {
+    // Without a client address (Node without STATUSPING_TRUST_PROXY) every client shares one bucket.
+    if (!(await consumeAttempt(deps.db, 'setup-recover', deps.clientIp(c.req.raw), nowSeconds(), 5, 10))) {
       return c.html(recoverPage({ error: 'Too many attempts. Wait a minute and try again.' }), 429, headers)
     }
     const form = (await c.req.parseBody().catch(() => ({}))) as Record<string, unknown>

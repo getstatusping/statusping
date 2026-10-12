@@ -24,7 +24,7 @@ import { rotatePingToken } from '../admin/service.ts'
 import { syncConfig } from '../sync.ts'
 import { TEAM_DOMAIN, presetById } from './instructions.ts'
 import { accessPage, channelPage, type ChannelSources, type EnvSource, importPage, type MonitorValues, oidcPage, setupDonePage } from './ui.ts'
-import { consumePingRateLimit } from '../rate-limit.ts'
+import { consumeAttempt } from '../rate-limit.ts'
 import { randomToken, timingSafeEqual } from '../util/crypto.ts'
 import { discover as discoverIssuer } from '../auth/providers.ts'
 import { isValidTimeZone, nowSeconds } from '../util/time.ts'
@@ -56,6 +56,8 @@ const VERIFY_ERRORS: Record<string, string> = {
 }
 const SETUP_SESSION_SECONDS = 2 * 60 * 60
 const ATTEMPTS_PER_MINUTE = 5
+/** The shared bucket for clients whose address is unknown. */
+const ATTEMPTS_PER_MINUTE_UNKNOWN_CLIENT = 10
 const EMAIL = /^[^@\s]+@[^@\s]+\.[^@\s]+$/
 const headers = { 'cache-control': 'no-store', 'x-robots-tag': 'noindex' }
 
@@ -245,8 +247,8 @@ export function mountSetupRoutes(app: Hono, deps: Deps): void {
   }
 
   const limited = async (c: Context, bucket: string) => {
-    const ip = deps.clientIp(c.req.raw)
-    return ip !== null && !(await consumePingRateLimit(deps.db, `${bucket}:${ip}`, nowSeconds(), ATTEMPTS_PER_MINUTE))
+    // Without a client address (Node without STATUSPING_TRUST_PROXY) every client shares one bucket.
+    return !(await consumeAttempt(deps.db, bucket, deps.clientIp(c.req.raw), nowSeconds(), ATTEMPTS_PER_MINUTE, ATTEMPTS_PER_MINUTE_UNKNOWN_CLIENT))
   }
 
   /** The setup session for this browser, or null. */
@@ -429,8 +431,8 @@ export function mountSetupRoutes(app: Hono, deps: Deps): void {
     const form = (await c.req.parseBody().catch(() => ({}))) as Form
     const expected = expectedSetupCode(loaded.state, deps.getEnv)
     if (!expected || !loaded.state.sessionKey || !setupCodeMatches(field(form, 'code'), expected)) {
-      const regenerated = await recordFailedClaim(deps.db, loaded.state, usesEnvToken, nowSeconds())
-      return html(c, claimPage({ usesEnvToken, error: 'That setup code is not correct.', note: regenerated ? 'After repeated failures a new code was generated. Check the logs again.' : undefined }), 401)
+      await recordFailedClaim(deps, loaded.state, nowSeconds())
+      return html(c, claimPage({ usesEnvToken, error: 'That setup code is not correct.' }), 401)
     }
     await deps.db.run(`UPDATE setup_state SET failed_attempts = 0 WHERE id = 1`)
     // Older versions scoped this cookie to /setup; a stale copy there would shadow the new one.
@@ -674,10 +676,9 @@ export function mountSetupRoutes(app: Hono, deps: Deps): void {
     if (await limited(c, 'setup')) return json({ error: 'Too many attempts. Wait a minute and try again.' }, 429)
     let body: Record<string, unknown>
     try { body = await c.req.json() } catch { return json({ error: 'Send a JSON body: { "code", "admin", "yaml" }.' }, 400) }
-    const usesEnvToken = Boolean(deps.getEnv('STATUSPING_SETUP_TOKEN'))
     const expected = expectedSetupCode(state, deps.getEnv)
     if (!expected || typeof body.code !== 'string' || !setupCodeMatches(body.code, expected)) {
-      await recordFailedClaim(deps.db, state, usesEnvToken, nowSeconds())
+      await recordFailedClaim(deps, state, nowSeconds())
       return json({ error: 'That setup code is not correct.' }, 401)
     }
     const email = typeof body.admin === 'string' ? body.admin.trim().toLowerCase() : ''

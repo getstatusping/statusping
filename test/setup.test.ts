@@ -173,13 +173,14 @@ describe('first-run setup wizard and reset', () => {
     expect(res.headers.get('location')).toMatch(/^\/setup\?step=/)
   })
 
-  it('replaces a generated code after repeated failures and honours STATUSPING_SETUP_TOKEN', async () => {
+  it('keeps a generated code after repeated failures and honours STATUSPING_SETUP_TOKEN', async () => {
     const { app, db } = await instance({ STATUSPING_RESET_TOKEN: RESET_TOKEN })
     const b = browser(app)
     await b.post('/setup/reset', { token: RESET_TOKEN, confirm: 'reset' })
     const first = (await loadSetupState(db))!.code
-    for (let i = 0; i < 10; i++) await b.post('/setup/claim', { code: 'WRNG-WRNG-WRNG' })
-    expect((await loadSetupState(db))!.code).not.toBe(first)
+    // Wrong guesses must not let anyone invalidate the code the owner read from the logs.
+    for (let i = 0; i < 3; i++) expect((await b.post('/setup/claim', { code: 'WRNG-WRNG-WRNG' })).res.status).toBe(401)
+    expect((await loadSetupState(db))!).toMatchObject({ code: first, failedAttempts: 3 })
 
     const env = await instance({ STATUSPING_RESET_TOKEN: RESET_TOKEN, STATUSPING_SETUP_TOKEN: 'my-own-setup-token' })
     const c = browser(env.app)

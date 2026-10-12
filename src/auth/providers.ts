@@ -2,7 +2,8 @@ import type { Context, Hono } from 'hono'
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie'
 import { type AuthProviderInput, resolveSecret } from '../config.ts'
 import type { Deps } from '../deps.ts'
-import { consumePingRateLimit } from '../rate-limit.ts'
+import { HTTPException } from 'hono/http-exception'
+import { attemptBucket, consumePingRateLimit, rateLimitExhausted } from '../rate-limit.ts'
 import { randomToken, sha256Hex, timingSafeEqual } from '../util/crypto.ts'
 import { nowSeconds } from '../util/time.ts'
 import { b64urlEncode, verifyJwt } from './jwt.ts'
@@ -91,21 +92,47 @@ export async function verifyPassword(deps: Deps, rawEmail: string, password: str
   return (await passwordMatches(password, entry)) ? { email, groups: [], provider: 'basic' } : null
 }
 
+// ── Password attempt limits ──────────────────────────────────────────────────────────────────
+
+/** Password attempts per client address per minute (the sign-in form counts every attempt). */
+export const LOGIN_ATTEMPTS_PER_MINUTE = 10
+/** The shared bucket when the client address is unknown (Node without STATUSPING_TRUST_PROXY). */
+export const LOGIN_ATTEMPTS_UNKNOWN_CLIENT_PER_MINUTE = 30
+/** Failed password attempts per account per minute, from any address, form and Basic together. */
+export const LOGIN_FAILURES_PER_EMAIL_PER_MINUTE = 10
+const LOGIN_LIMITED = 'Too many attempts. Wait a minute and try again.'
+
+const loginBucket = (ip: string | null) => attemptBucket('login', ip, LOGIN_ATTEMPTS_PER_MINUTE, LOGIN_ATTEMPTS_UNKNOWN_CLIENT_PER_MINUTE)
+/** A bounded key for one account, whatever the address typed (hashed, so no email lands in the table). */
+const emailBucket = async (email: string) => `login-email:${(await sha256Hex(email.trim().toLowerCase())).slice(0, 32)}`
+
 /**
  * An `Authorization: Basic` header is still accepted for scripts and the JSON API (e.g.
  * `curl -u`). Browsers never send one because we never send a Basic challenge — people use the
- * sign-in form instead.
+ * sign-in form instead. Only failures count against the address and account limits, so a script
+ * making many authenticated calls is never limited; while a limit is used up the request gets
+ * a 429 and the password is not checked.
  */
 async function basicHeaderViewer(c: Context, deps: Deps): Promise<Viewer | null> {
   const header = c.req.header('authorization') ?? ''
   if (!header.startsWith('Basic ')) return null
-  try {
-    const decoded = atob(header.slice(6))
-    const i = decoded.indexOf(':')
-    return i < 0 ? null : verifyPassword(deps, decoded.slice(0, i), decoded.slice(i + 1))
-  } catch {
-    return null
+  let decoded: string
+  try { decoded = atob(header.slice(6)) } catch { return null }
+  const i = decoded.indexOf(':')
+  if (i < 0) return null
+  const email = decoded.slice(0, i)
+  const now = nowSeconds()
+  const byAddress = loginBucket(deps.clientIp(c.req.raw))
+  const byEmail = await emailBucket(email)
+  if (await rateLimitExhausted(deps.db, byAddress.key, now, byAddress.limit) || await rateLimitExhausted(deps.db, byEmail, now, LOGIN_FAILURES_PER_EMAIL_PER_MINUTE)) {
+    throw new HTTPException(429, { res: new Response(LOGIN_LIMITED, { status: 429, headers: { 'content-type': 'text/plain; charset=UTF-8', 'retry-after': '60', 'cache-control': 'no-store' } }) })
   }
+  const viewer = await verifyPassword(deps, email, decoded.slice(i + 1))
+  if (!viewer) {
+    await consumePingRateLimit(deps.db, byAddress.key, now, byAddress.limit)
+    await consumePingRateLimit(deps.db, byEmail, now, LOGIN_FAILURES_PER_EMAIL_PER_MINUTE)
+  }
+  return viewer
 }
 
 // ── Cloudflare Access ─────────────────────────────────────────────────────────────────────────
@@ -359,12 +386,20 @@ function passwordHandlers(deps: Deps) {
     const email = typeof form.email === 'string' ? form.email.trim() : ''
     const password = typeof form.password === 'string' ? form.password : ''
     if (!fromThisSite(c, deps)) return page(c, { next, email, error: 'Please try again.' }, 403)
-    const ip = deps.clientIp(c.req.raw)
-    if (ip !== null && !(await consumePingRateLimit(deps.db, `login:${ip}`, nowSeconds(), 10))) {
-      return page(c, { next, email, error: 'Too many attempts. Wait a minute and try again.' }, 429)
+    // Every form attempt counts against the address (or the shared unknown-address bucket);
+    // failures also count against the account, so many addresses cannot guess one password.
+    const now = nowSeconds()
+    const byAddress = loginBucket(deps.clientIp(c.req.raw))
+    const byEmail = await emailBucket(email)
+    if (!(await consumePingRateLimit(deps.db, byAddress.key, now, byAddress.limit))
+      || await rateLimitExhausted(deps.db, byEmail, now, LOGIN_FAILURES_PER_EMAIL_PER_MINUTE)) {
+      return page(c, { next, email, error: LOGIN_LIMITED }, 429)
     }
     const viewer = await verifyPassword(deps, email, password)
-    if (!viewer) return page(c, { next, email, error: 'Incorrect email or password.' }, 401)
+    if (!viewer) {
+      await consumePingRateLimit(deps.db, byEmail, now, LOGIN_FAILURES_PER_EMAIL_PER_MINUTE)
+      return page(c, { next, email, error: 'Incorrect email or password.' }, 401)
+    }
     await setSession(c, deps, viewer)
     const res = c.redirect(next, 303)
     res.headers.set('cache-control', 'no-store')

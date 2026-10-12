@@ -229,8 +229,25 @@ switches the site to email + password and prints a new password.
 
 After setup, the configuration lives in the database and is edited in Settings or as YAML.
 Passwords chosen in the wizard are stored as
-PBKDF2-SHA256 (50,000 iterations, which fits the Workers free plan's CPU limit), and password
-sign-in is limited to 10 attempts per minute per address.
+PBKDF2-SHA256 (50,000 iterations, which fits the Workers free plan's CPU limit).
+
+Guessing is rate limited per clock minute:
+
+- **Password sign-in** (the form and `Authorization: Basic`): 10 attempts per address, and 10
+  failed attempts per account from any address. Basic auth counts only failures, so scripts
+  making many authenticated calls are never limited. A limited request gets a 429 ("Too many
+  attempts") until the minute ends; a session cookie keeps working.
+- **Setup code** (`/setup/claim` and `/api/setup` together) and **reset token**: 5 attempts per
+  address. **Recovery token**: 5 attempts per address.
+- When StatusPing cannot see client addresses (Node without `STATUSPING_TRUST_PROXY=true`),
+  each of these uses one bucket shared by everyone, with a higher limit (30 sign-ins, 10
+  setup, reset or recovery attempts a minute). Someone flooding it can delay sign-in by a
+  minute at a time but cannot guess faster; put a proxy in front and set
+  `STATUSPING_TRUST_PROXY=true` to get per-address limits.
+
+The setup code (`XXXX-XXXX-XXXX`, about 60 bits) is never replaced because of wrong guesses,
+so nobody can invalidate the code you read from the logs; after every 100 wrong codes in a row
+a warning is logged.
 
 ## Use your own domain
 
@@ -268,7 +285,7 @@ status.example.com {
 ```
 
 Point an `A`/`AAAA` record for `status.example.com` at that machine. Set
-`STATUSPING_TRUST_PROXY=true` so ping rate limits see visitors' real IPs from
+`STATUSPING_TRUST_PROXY=true` so ping and sign-in rate limits see visitors' real IPs from
 `X-Forwarded-For`. Only set it when the proxy is the sole way in, since a
 direct client could otherwise spoof the header.
 

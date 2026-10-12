@@ -26,6 +26,7 @@ import { mountAccessSwitchAuthRoutes } from '../admin/access-switch.ts'
 import { mountSetupAuthRoutes, mountSetupRoutes, SETUP_AUTH_PATHS } from '../setup/routes.ts'
 import { mountRecoveryRoutes } from '../setup/recovery.ts'
 import { consumePingRateLimit } from '../rate-limit.ts'
+import { HTTPException } from 'hono/http-exception'
 import { runHttpCheck } from '../evaluate/http.ts'
 import { runTcpCheck } from '../evaluate/tcp.ts'
 import { targetFetch, targetTcpConnect } from '../util/private-targets.ts'
@@ -107,6 +108,8 @@ export function createApp(deps: Deps): Hono {
   })
 
   app.onError((err, c) => {
+    // A deliberate response from deep inside a handler, such as the 429 for a rate-limited Basic header.
+    if (err instanceof HTTPException) return err.getResponse()
     deps.log('error', 'request failed', { path: c.req.path, error: err.message })
     return c.text('Internal error', 500)
   })

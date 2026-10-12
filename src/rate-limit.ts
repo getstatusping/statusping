@@ -38,3 +38,28 @@ export function normalizeClientIp(value: string | null | undefined): string | nu
   if ((halves.length === 1 && units !== 8) || (halves.length === 2 && units >= 8)) return null
   return ip.toLowerCase()
 }
+
+/**
+ * The bucket for a sign-in-style attempt (password, setup code, reset or recovery token):
+ * per client address, or, when the adapter cannot tell addresses apart (Node without
+ * STATUSPING_TRUST_PROXY), one bucket shared by every client with a somewhat higher limit.
+ * An unknown address is never a reason to skip the limit.
+ */
+export function attemptBucket(prefix: string, ip: string | null, limit: number, unknownLimit: number): { key: string; limit: number } {
+  return ip === null ? { key: `${prefix}:unknown`, limit: unknownLimit } : { key: `${prefix}:${ip}`, limit }
+}
+
+/** Consumes one attempt from the client's bucket ({@link attemptBucket}); false when it is used up. */
+export async function consumeAttempt(db: Db, prefix: string, ip: string | null, now: number, limit: number, unknownLimit: number): Promise<boolean> {
+  const bucket = attemptBucket(prefix, ip, limit, unknownLimit)
+  return consumePingRateLimit(db, bucket.key, now, bucket.limit)
+}
+
+/**
+ * True when `key` has used up `limit` in the current minute, without consuming anything. For
+ * limits that count failures only: check first, then {@link consumePingRateLimit} on a failure.
+ */
+export async function rateLimitExhausted(db: Db, key: string, now: number, limit: number): Promise<boolean> {
+  const row = await db.first<{ count: number }>(`SELECT count FROM ping_rate_limits WHERE ip = ? AND window_at = ?`, [key, now - (now % 60)])
+  return (row?.count ?? 0) >= limit
+}
