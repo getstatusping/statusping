@@ -41,4 +41,31 @@ describe('Node confirmation endpoint', () => {
     expect(await response.json()).toEqual({ location: 'Portland, US', ok: true, err: null })
     await close()
   })
+
+  it('caps a chunked body without Content-Length at 1 KiB', async () => {
+    const { db, close } = await createTestDb('libsql')
+    const app = createApp(makeDeps(db, { fetch: fakeFetch(() => new Response('ok')).fn, env: { STATUSPING_CONFIRMATION_SECRET: 'shared_confirmation_secret' }, location: 'Portland, US' }))
+    const chunked = (chunks: string[]) => {
+      let pulled = 0
+      const body = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          if (pulled < chunks.length) controller.enqueue(new TextEncoder().encode(chunks[pulled++]!))
+          else controller.close()
+        },
+      })
+      const request = new Request('http://localhost/internal/confirm', {
+        method: 'POST', body, duplex: 'half', headers: { authorization: 'Bearer shared_confirmation_secret', 'content-type': 'application/json' },
+      } as RequestInit)
+      expect(request.headers.get('content-length')).toBeNull()
+      return { request, pulled: () => pulled }
+    }
+    // A huge streamed body is refused after the first chunk past the cap, not read to the end.
+    const big = chunked([`{"monitorId":"site","pad":"`, ...Array.from({ length: 1000 }, () => 'x'.repeat(512)), '"}'])
+    expect((await app.request(big.request)).status).toBe(400)
+    expect(big.pulled()).toBeLessThan(10)
+    // A small streamed body still works.
+    const small = chunked(['{"monitorId":', '"site"}'])
+    expect((await app.request(small.request)).status).toBe(200)
+    await close()
+  })
 })
