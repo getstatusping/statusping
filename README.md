@@ -159,6 +159,13 @@ Scheduled jobs no longer need `PING_TOKENS`: adding one in Settings (or through 
 
 Settings → Access → **Change sign-in method** switches between email and password, Cloudflare Access and OpenID Connect without taking the site offline. You enter the new settings, then run a real test sign-in as an administrator; the current method keeps working until that succeeds and you choose **Switch**. Switching signs everyone else out.
 
+**Server-side requests to the issuer.** Whoever runs setup or this switch can make StatusPing
+fetch the issuer they enter (`/.well-known/openid-configuration`, then its `token_endpoint` and
+`jwks_uri`) from the server. All three must be `https://` URLs (`http://localhost` is allowed for
+development). With `STATUSPING_BLOCK_PRIVATE_TARGETS=true` (always on for hosted tenants),
+issuers and endpoints on private addresses are refused too; see
+[Monitoring private addresses](#monitoring-private-addresses).
+
 ## Connect AI assistants (MCP)
 
 With the browser admin enabled, StatusPing is also a remote [MCP](https://modelcontextprotocol.io) server at `https://<your-site>/mcp`. Create a token in **Settings → MCP** and choose what it can do:
@@ -265,6 +272,19 @@ Point an `A`/`AAAA` record for `status.example.com` at that machine. Set
 `X-Forwarded-For`. Only set it when the proxy is the sole way in, since a
 direct client could otherwise spoof the header.
 
+#### Monitoring private addresses
+
+On Node, HTTP and TCP monitors may check internal services (`localhost`, `10.0.0.5`, a
+LAN host name), so anyone who can edit monitors (an administrator, or an MCP token with the
+`monitors` scope) can make the server connect to those addresses and read back the status,
+latency and error. If that is not what you want, set `STATUSPING_BLOCK_PRIVATE_TARGETS=true`.
+Monitors and OpenID Connect discovery then refuse loopback, private (RFC 1918), link-local
+(including the `169.254.169.254` cloud metadata address), unique-local IPv6, `0.0.0.0/8` and
+CGNAT (`100.64.0.0/10`) addresses, including IPv4-mapped IPv6 forms. Host names are resolved
+first and every address is checked; HTTP redirects are followed (at most 5) and each hop is
+checked again. A refused check fails with `target address is private (blocked)`. The guard is
+always on for hosted tenants. Cloudflare Workers cannot reach private addresses at all.
+
 ### Hosted on statusp.ing
 
 Sites on the Pro and Team plans can connect their own domain under **Your sites →
@@ -306,6 +326,10 @@ variables below, and none of this applies to them.
   policy and a secret, these routes do not exist.
 - A new tenant that has `STATUSPING_SETUP_TOKEN` set starts in the setup
   wizard. Its owner claims it with that token.
+- Monitors and OpenID Connect discovery refuse private addresses, as with
+  `STATUSPING_BLOCK_PRIVATE_TARGETS=true` (see
+  [Monitoring private addresses](#monitoring-private-addresses)); a tenant
+  cannot turn this off.
 
 ## Run on Node and use an independent confirmation peer
 

@@ -1,6 +1,6 @@
 import { Hono } from 'hono'
 import type { Context } from 'hono'
-import { currentViewer, hasCredentials, mountAuthRoutes, sameOrigin, signInResponse } from '../auth/providers.ts'
+import { currentViewer, hasCredentials, mountAuthRoutes, fromThisSite, signInResponse } from '../auth/providers.ts'
 import { type Viewer, canAcknowledge, canOpen } from '../auth/viewer.ts'
 import { acknowledgeIncident, verifyAcknowledgeToken } from '../acknowledgements.ts'
 import type { NormalizedPage } from '../config.ts'
@@ -28,6 +28,7 @@ import { mountRecoveryRoutes } from '../setup/recovery.ts'
 import { consumePingRateLimit } from '../rate-limit.ts'
 import { runHttpCheck } from '../evaluate/http.ts'
 import { runTcpCheck } from '../evaluate/tcp.ts'
+import { targetFetch, targetTcpConnect } from '../util/private-targets.ts'
 import { PLATFORM_SECRET_ENV, PLATFORM_SIGNATURE_HEADER, verifyPlatformRequest } from '../platform.ts'
 import { exportTenantData } from '../export.ts'
 
@@ -223,10 +224,11 @@ export function createApp(deps: Deps): Hono {
     if (typeof monitorId !== 'string' || monitorId.length > 120) return c.text('Bad request', 400, { 'cache-control': 'no-store' })
     const monitor = config.monitors.find((item) => item.id === monitorId)
     if (!monitor || (monitor.kind !== 'http' && monitor.kind !== 'tcp')) return c.text('Not found', 404, { 'cache-control': 'no-store' })
+    const tcpConnect = targetTcpConnect(deps)
     const result = monitor.kind === 'http'
-      ? await runHttpCheck(monitor, deps.fetch)
-      : deps.tcpConnect
-        ? await runTcpCheck(monitor, deps.tcpConnect)
+      ? await runHttpCheck(monitor, targetFetch(deps))
+      : tcpConnect
+        ? await runTcpCheck(monitor, tcpConnect)
         : { ok: false, err: 'TCP checks are not configured in this runtime' }
     return c.json({ location: deps.location, ok: result.ok, err: result.err }, 200, { 'cache-control': 'no-store' })
   })
@@ -317,7 +319,7 @@ export function createApp(deps: Deps): Hono {
     const r = await openPage(c, c.req.param('slug'))
     if (r instanceof Response) return r
     if (!config.subscribers) return c.text('Not found', 404)
-    if (!sameOrigin(c, deps)) return c.text('Invalid origin', 403)
+    if (!fromThisSite(c, deps)) return c.text('Invalid origin', 403)
     const form = await c.req.parseBody().catch(() => ({}))
     // A restricted-page subscription belongs to the authenticated viewer, never a form field.
     const email = r.page.access === 'public' ? String((form as Record<string, string | File>).email ?? '') : r.viewer!.email
@@ -442,7 +444,7 @@ export function createApp(deps: Deps): Hono {
     if (r instanceof Response) return r
     const viewer = await currentViewer(c, deps)
     if (!canAcknowledge(viewer, config.access)) return c.text('Forbidden', 403)
-    if (!sameOrigin(c, deps)) return c.text('Forbidden', 403)
+    if (!fromThisSite(c, deps)) return c.text('Forbidden', 403)
     const id = c.req.param('id')
     if (!r.page.monitorIds.includes(id)) return c.text('Not found', 404)
     const monitor = config.monitors.find((candidate) => candidate.id === id)

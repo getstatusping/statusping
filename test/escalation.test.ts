@@ -124,7 +124,9 @@ describe('escalation', () => {
     expect((await app.request('/pages/status/m/heartbeat/ack', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: `incidentId=${incident!.id}` })).status).toBe(403)
     expect((await app.request('/pages/status/m/heartbeat/ack', { method: 'POST', headers: { authorization: auth, origin: 'https://evil.test', 'content-type': 'application/x-www-form-urlencoded' }, body: `incidentId=${incident!.id}` })).status).toBe(403)
     expect(await db.all(`SELECT * FROM acknowledgements`)).toEqual([])
-    const acknowledged = await app.request('/pages/status/m/heartbeat/ack', { method: 'POST', headers: { authorization: auth, 'content-type': 'application/x-www-form-urlencoded' }, body: `incidentId=${incident!.id}` })
+    // A missing Origin (and Referer) is not taken as same-origin.
+    expect((await app.request('/pages/status/m/heartbeat/ack', { method: 'POST', headers: { authorization: auth, 'content-type': 'application/x-www-form-urlencoded' }, body: `incidentId=${incident!.id}` })).status).toBe(403)
+    const acknowledged = await app.request('/pages/status/m/heartbeat/ack', { method: 'POST', headers: { authorization: auth, origin: 'http://localhost', 'content-type': 'application/x-www-form-urlencoded' }, body: `incidentId=${incident!.id}` })
     expect(acknowledged.status).toBe(303)
     expect(await db.first<{ by: string; via: string }>(`SELECT by, via FROM acknowledgements WHERE incident_id = ?`, [incident!.id])).toEqual({ by: 'ops@example.com', via: 'admin-page' })
   })

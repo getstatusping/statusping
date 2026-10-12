@@ -2,6 +2,7 @@ import { type HttpMonitor, type TcpMonitor, activeMonitors, resolveSecret } from
 import { refreshAdminConfig, type Deps } from './deps.ts'
 import { type CheckResult, USER_AGENT, isDue, runHttpCheck, runPool } from './evaluate/http.ts'
 import { runTcpCheck } from './evaluate/tcp.ts'
+import { targetFetch, targetTcpConnect } from './util/private-targets.ts'
 import { evaluatePush } from './evaluate/push.ts'
 import { runExpiryChecks } from './expiry/run.ts'
 import { dispatchNotifications } from './notify/dispatch.ts'
@@ -156,10 +157,12 @@ export async function tick(deps: Deps, nowMs: number = Date.now()): Promise<Tick
     (m): m is HttpMonitor | TcpMonitor => m.kind !== 'push' && states.get(m.id)?.status !== 'paused' && isDue(m, tickAt / 60),
   )
   const overCap = due.splice(deps.config.limits.maxChecksPerTick)
+  const httpFetch = targetFetch(deps)
+  const tcpConnect = targetTcpConnect(deps)
   const { results, skipped } = await runPool(due, HTTP_CONCURRENCY, startedMs + deps.config.limits.tickBudgetMs, (m) => {
-    if (m.kind === 'http') return runHttpCheck(m, deps.fetch)
-    if (!deps.tcpConnect) return Promise.resolve({ id: m.id, ok: false, ms: null, code: null, err: 'TCP checks are unavailable in this runtime' })
-    return runTcpCheck(m, deps.tcpConnect)
+    if (m.kind === 'http') return runHttpCheck(m, httpFetch)
+    if (!tcpConnect) return Promise.resolve({ id: m.id, ok: false, ms: null, code: null, err: 'TCP checks are unavailable in this runtime' })
+    return runTcpCheck(m, tcpConnect)
   })
   summary.checks = results.length
   summary.skippedChecks = [...overCap, ...skipped].map((m) => m.id)

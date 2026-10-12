@@ -11,6 +11,7 @@ import { createDeps } from '../../src/deps.ts'
 import type { StatusPingConfig } from '../../src/config.ts'
 import { lookupNodeCertificateExpiry } from './expiry.ts'
 import { nodeTcpConnect } from './tcp.ts'
+import { nodeResolveHost } from './dns.ts'
 import { nodeSmtpConnect } from './smtp.ts'
 import { startNodeServer } from './server.ts'
 import { normalizeClientIp } from '../../src/rate-limit.ts'
@@ -37,6 +38,7 @@ const deps = createDeps({
   legacyConfig,
   certificateExpiry: lookupNodeCertificateExpiry,
   tcpConnect: nodeTcpConnect,
+  resolveHost: nodeResolveHost,
   smtpConnect: nodeSmtpConnect,
   confirmationProbe: confirmation ? nodeConfirmationProbe(confirmation) : undefined,
   location: env('STATUSPING_LOCATION'),

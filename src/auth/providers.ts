@@ -10,6 +10,7 @@ import { sign, unsign } from './session.ts'
 import { buildChrome } from '../web/chrome.ts'
 import { signInPage, ssoSignInPage } from '../web/pages.ts'
 import { type Viewer, referencedGroups } from './viewer.ts'
+import { targetFetch } from '../util/private-targets.ts'
 
 const SESSION_COOKIE = 'sp_session'
 const LOGIN_COOKIE = 'sp_oidc'
@@ -138,12 +139,34 @@ interface Discovery {
 }
 const discoveryCache = new Map<string, { doc: Discovery; expires: number }>()
 
-export async function discover(issuer: string, fetchFn: typeof fetch): Promise<Discovery> {
+/**
+ * An OIDC URL StatusPing fetches server-side: https only (plain http just for `localhost`
+ * development, matching the config rule, and never while the private-target guard is on), and on
+ * a public address when the guard is on.
+ */
+async function checkOidcUrl(value: unknown, field: string, deps: Pick<Deps, 'targetGuard'>): Promise<URL> {
+  let url: URL
+  try { url = new URL(String(value)) } catch { throw new Error(`${field} is not a valid URL`) }
+  const localDev = url.protocol === 'http:' && url.hostname === 'localhost' && !deps.targetGuard
+  if (url.protocol !== 'https:' && !localDev) throw new Error(`${field} must be an https:// URL`)
+  await deps.targetGuard?.(url.hostname)
+  return url
+}
+
+/**
+ * Reads `{issuer}/.well-known/openid-configuration`. The issuer, token_endpoint and jwks_uri are
+ * fetched server-side, so each must be https and, with the private-target guard on, public.
+ */
+export async function discover(issuer: string, deps: Pick<Deps, 'fetch' | 'targetGuard'>): Promise<Discovery> {
   const hit = discoveryCache.get(issuer)
   if (hit && hit.expires > Date.now()) return hit.doc
-  const res = await fetchFn(`${issuer.replace(/\/+$/, '')}/.well-known/openid-configuration`)
+  await checkOidcUrl(issuer, 'issuer', deps)
+  const res = await targetFetch(deps)(`${issuer.replace(/\/+$/, '')}/.well-known/openid-configuration`)
   if (!res.ok) throw new Error(`OIDC discovery failed: HTTP ${res.status}`)
   const doc = (await res.json()) as Discovery
+  if (!doc || typeof doc !== 'object') throw new Error('OIDC discovery returned no configuration')
+  await checkOidcUrl(doc.token_endpoint, 'token_endpoint', deps)
+  await checkOidcUrl(doc.jwks_uri, 'jwks_uri', deps)
   discoveryCache.set(issuer, { doc, expires: Date.now() + 3600_000 })
   return doc
 }
@@ -219,7 +242,7 @@ function oidcHandlers(deps: Deps, p: Oidc) {
   const redirectUri = `${deps.config.baseUrl}/auth/callback`
 
   const login = async (c: Context) => {
-    const d = await discover(p.issuer, deps.fetch)
+    const d = await discover(p.issuer, deps)
     const state = randomToken(32)
     const nonce = randomToken(32)
     const verifier = randomToken(64)
@@ -259,9 +282,9 @@ function oidcHandlers(deps: Deps, p: Oidc) {
     if (!login || !code || !timingSafeEqual(c.req.query('state') ?? '', login.state)) {
       return c.text('Sign-in failed or expired. Please try again.', 400)
     }
-    const d = await discover(p.issuer, deps.fetch)
+    const d = await discover(p.issuer, deps)
     const clientId = resolveSecret(p.clientId, deps.getEnv)!
-    const res = await deps.fetch(d.token_endpoint, {
+    const res = await targetFetch(deps)(d.token_endpoint, {
       method: 'POST',
       headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/json' },
       body: new URLSearchParams({
@@ -281,7 +304,7 @@ function oidcHandlers(deps: Deps, p: Oidc) {
     if (!id_token) return c.text('Sign-in failed (no ID token).', 502)
     let claims: Record<string, unknown>
     try {
-      claims = await verifyJwt(id_token, { jwksUrl: d.jwks_uri, issuer: d.issuer, audience: clientId, fetch: deps.fetch, now })
+      claims = await verifyJwt(id_token, { jwksUrl: d.jwks_uri, issuer: d.issuer, audience: clientId, fetch: targetFetch(deps), now })
     } catch (e) {
       deps.log('warn', 'OIDC ID token rejected', { error: (e as Error).message })
       return c.text('Sign-in failed (invalid ID token).', 401)
@@ -304,20 +327,13 @@ function oidcHandlers(deps: Deps, p: Oidc) {
 
 // ── Email + password sign-in form ─────────────────────────────────────────────────────────────
 
-/** Rejects cross-site form posts (login CSRF): the Origin, if sent, must be this site. */
-export function sameOrigin(c: Context, deps: Deps): boolean {
-  const origin = c.req.header('origin')
-  if (!origin) return true
-  const allowed = new Set([new URL(c.req.url).origin, new URL(deps.config.baseUrl).origin])
-  return allowed.has(origin)
-}
-
 /**
- * Stricter than sameOrigin, for the sign-in form (login CSRF): the request must say it came from
- * this site. Browsers send Origin on every form POST; a Referer from this site is accepted as a
- * fallback. A request with neither is refused.
+ * Rejects cross-site form posts (CSRF): the request must say it came from this site. Browsers
+ * send Origin on every form POST; a Referer from this site is accepted as a fallback. A request
+ * with neither is refused, so a missing Origin is never taken as same-origin. Used by every
+ * cookie-authenticated POST, alongside a CSRF token where the form has one.
  */
-function fromThisSite(c: Context, deps: Deps): boolean {
+export function fromThisSite(c: Context, deps: Deps): boolean {
   let origin = c.req.header('origin')
   if (!origin) {
     try { origin = new URL(c.req.header('referer') ?? '').origin } catch { return false }

@@ -7,7 +7,7 @@
  */
 import type { Context, Hono } from 'hono'
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie'
-import { hashUserPassword, sameOrigin, setSession } from '../auth/providers.ts'
+import { hashUserPassword, fromThisSite, setSession } from '../auth/providers.ts'
 import { sign, unsign } from '../auth/session.ts'
 import type { AdminConfig } from '../admin/security.ts'
 import { validateAdminConfig } from '../admin/security.ts'
@@ -33,6 +33,7 @@ import {
   type SetupDraft, type SetupMethod, type SetupMonitor, type SetupState,
 } from './state.ts'
 import { accountPage, basicsPage, claimPage, methodPage, monitorPage, resetPage, reviewPage, type SetupStep } from './ui.ts'
+import { targetFetch } from '../util/private-targets.ts'
 
 const SETUP_COOKIE = 'sp_setup'
 /** Short-lived state for the setup OIDC test sign-in (state, nonce, PKCE verifier). */
@@ -265,7 +266,7 @@ export function mountSetupRoutes(app: Hono, deps: Deps): void {
     if ('response' in loaded) return { response: loaded.response }
     if (!loaded.session) return { response: c.redirect('/setup', 303) }
     const form = (await c.req.parseBody().catch(() => ({}))) as Form
-    if (!sameOrigin(c, deps) || !timingSafeEqual(field(form, 'csrf'), loaded.session.csrf)) return { response: c.text('Forbidden', 403, headers) }
+    if (!fromThisSite(c, deps) || !timingSafeEqual(field(form, 'csrf'), loaded.session.csrf)) return { response: c.text('Forbidden', 403, headers) }
     return { state: loaded.state, csrf: loaded.session.csrf, form }
   }
 
@@ -349,7 +350,7 @@ export function mountSetupRoutes(app: Hono, deps: Deps): void {
       if (new URL(issuer).protocol !== 'https:') error = 'The issuer must be an https:// URL.'
     } catch { error = 'Enter the issuer URL, such as https://accounts.google.com.' }
     if (!error) {
-      try { await discover(issuer, deps.fetch) } catch (e) {
+      try { await discover(issuer, deps) } catch (e) {
         error = `StatusPing could not read ${issuer}/.well-known/openid-configuration (${(e as Error).message}). Check the issuer URL.`
       }
     }
@@ -367,7 +368,7 @@ export function mountSetupRoutes(app: Hono, deps: Deps): void {
     const clientId = deps.getEnv('OIDC_CLIENT_ID')
     if (draft.method !== 'oidc' || !draft.issuer || !clientId || !deps.getEnv('OIDC_CLIENT_SECRET')) return c.redirect('/setup?step=account', 303)
     let endpoint: string
-    try { endpoint = (await discover(draft.issuer, deps.fetch)).authorization_endpoint } catch { return c.redirect('/setup?step=account&error=oidc-discovery', 303) }
+    try { endpoint = (await discover(draft.issuer, deps)).authorization_endpoint } catch { return c.redirect('/setup?step=account&error=oidc-discovery', 303) }
     const [state, nonce, verifier] = [randomToken(32), randomToken(32), randomToken(64)]
     const challenge = b64urlEncode(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier))))
     setCookie(c, SETUP_LOGIN_COOKIE, await sign({ state, nonce, verifier, exp: nowSeconds() + 600 }, loaded.state.sessionKey), {
@@ -423,7 +424,7 @@ export function mountSetupRoutes(app: Hono, deps: Deps): void {
     const loaded = await pending(c)
     if ('response' in loaded) return loaded.response
     const usesEnvToken = Boolean(deps.getEnv('STATUSPING_SETUP_TOKEN'))
-    if (!sameOrigin(c, deps)) return c.text('Forbidden', 403, headers)
+    if (!fromThisSite(c, deps)) return c.text('Forbidden', 403, headers)
     if (await limited(c, 'setup')) return html(c, claimPage({ usesEnvToken, error: 'Too many attempts. Wait a minute and try again.' }), 429)
     const form = (await c.req.parseBody().catch(() => ({}))) as Form
     const expected = expectedSetupCode(loaded.state, deps.getEnv)
@@ -601,7 +602,7 @@ export function mountSetupRoutes(app: Hono, deps: Deps): void {
     if ('response' in loaded) return loaded.response
     if (!loaded.session) return c.redirect('/setup', 303)
     const form = (await c.req.parseBody().catch(() => ({}))) as Form
-    if (!sameOrigin(c, deps) || !timingSafeEqual(field(form, 'csrf'), loaded.session.csrf)) return c.text('Forbidden', 403, headers)
+    if (!fromThisSite(c, deps) || !timingSafeEqual(field(form, 'csrf'), loaded.session.csrf)) return c.text('Forbidden', 403, headers)
     const draft = loaded.state.draft
     if (!draft.title) return c.redirect('/setup', 303)
     const completed = new Set<SetupStep>(['claim', 'method', 'account', 'basics'])
@@ -691,7 +692,7 @@ export function mountSetupRoutes(app: Hono, deps: Deps): void {
     if (provider.type === 'cloudflare-access' && !deps.getEnv('CF_ACCESS_AUD')) return json({ error: 'CF_ACCESS_AUD is not set. Add it as a secret first.' }, 400)
     if (provider.type === 'oidc') {
       if (!deps.getEnv('OIDC_CLIENT_ID') || !deps.getEnv('OIDC_CLIENT_SECRET')) return json({ error: 'OIDC_CLIENT_ID and OIDC_CLIENT_SECRET must be set as secrets first.' }, 400)
-      try { await discoverIssuer(provider.issuer, deps.fetch) } catch (e) { return json({ error: `StatusPing could not read ${provider.issuer}/.well-known/openid-configuration (${(e as Error).message}).` }, 400) }
+      try { await discoverIssuer(provider.issuer, deps) } catch (e) { return json({ error: `StatusPing could not read ${provider.issuer}/.well-known/openid-configuration (${(e as Error).message}).` }, 400) }
     }
     const admins = input.access?.admins
     const next = { ...input, admin: true, access: { ...(input.access ?? {}), provider, admins: { ...(admins ?? {}), emails: [...new Set([email, ...(admins?.emails ?? [])])] } } } as AdminConfig
@@ -713,7 +714,7 @@ export function mountSetupRoutes(app: Hono, deps: Deps): void {
   app.post('/setup/reset', async (c) => {
     const token = resetToken()
     if (!token) return notFound(c)
-    if (!sameOrigin(c, deps)) return c.text('Forbidden', 403, headers)
+    if (!fromThisSite(c, deps)) return c.text('Forbidden', 403, headers)
     if (await limited(c, 'setup-reset')) return html(c, resetPage({ error: 'Too many attempts. Wait a minute and try again.' }), 429)
     const form = (await c.req.parseBody().catch(() => ({}))) as Form
     if (field(form, 'confirm').toLowerCase() !== 'reset') return html(c, resetPage({ error: 'Type reset to confirm.' }), 400)
@@ -784,8 +785,8 @@ export function mountSetupAuthRoutes(app: Hono, deps: Deps): void {
     const clientId = deps.getEnv('OIDC_CLIENT_ID') ?? ''
     let claims: Record<string, unknown>
     try {
-      const d = await discover(draft.issuer, deps.fetch)
-      const res = await deps.fetch(d.token_endpoint, {
+      const d = await discover(draft.issuer, deps)
+      const res = await targetFetch(deps)(d.token_endpoint, {
         method: 'POST',
         headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/json' },
         body: new URLSearchParams({
@@ -797,7 +798,7 @@ export function mountSetupAuthRoutes(app: Hono, deps: Deps): void {
       const idToken = ((await res.json()) as { id_token?: string }).id_token
       if (!idToken) return back(c, 'oidc-token')
       try {
-        claims = await verifyJwt(idToken, { jwksUrl: d.jwks_uri, issuer: d.issuer, audience: clientId, fetch: deps.fetch, now: nowSeconds() })
+        claims = await verifyJwt(idToken, { jwksUrl: d.jwks_uri, issuer: d.issuer, audience: clientId, fetch: targetFetch(deps), now: nowSeconds() })
       } catch { return back(c, 'oidc-id-token') }
     } catch { return back(c, 'oidc-discovery') }
     if (claims.nonce !== login.nonce) return back(c, 'oidc-state')

@@ -19,6 +19,7 @@ import { beginSetup, loadSetupState } from './setup/state.ts'
 import { validateAdminConfig } from './admin/security.ts'
 import { normalizeClientIp } from './rate-limit.ts'
 import { type TenantPolicy, TENANT_ENV, clampToTenantPolicy, parseTenantPolicy } from './platform.ts'
+import { type HostResolver, type TargetGuard, blockPrivateTargets, privateTargetGuard } from './util/private-targets.ts'
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error'
 export type Logger = (level: LogLevel, message: string, data?: Record<string, unknown>) => void
@@ -46,6 +47,11 @@ export interface Deps {
   certificateExpiry?: CertificateExpiryProvider
   /** Raw TCP connector supplied by the active runtime adapter. */
   tcpConnect?: TcpConnector
+  /**
+   * Set when STATUSPING_BLOCK_PRIVATE_TARGETS=true or in hosted tenant mode: refuses monitor and
+   * OIDC targets on private addresses. Use targetFetch/targetTcpConnect rather than calling it.
+   */
+  targetGuard?: TargetGuard
   /** Optional second-vantage implementation. Required at runtime by monitors with `confirm`. */
   confirmationProbe?: ConfirmationProbe
   /** Display name for this scheduler location; adapters may set a truthful value. */
@@ -92,6 +98,8 @@ export interface CreateDepsOptions {
   log?: Logger
   certificateExpiry?: CertificateExpiryProvider
   tcpConnect?: TcpConnector
+  /** Runtime DNS lookup (all addresses) used by the private-target guard. Workers omit it. */
+  resolveHost?: HostResolver
   confirmationProbe?: ConfirmationProbe
   location?: string
   cloudflareEmail?: CloudflareEmailSender
@@ -140,6 +148,7 @@ export function createDeps(opts: CreateDepsOptions): Deps {
     fetch: opts.fetch ?? fetch.bind(globalThis),
     certificateExpiry: opts.certificateExpiry,
     tcpConnect: opts.tcpConnect,
+    targetGuard: blockPrivateTargets(opts.getEnv, tenant) ? privateTargetGuard(opts.resolveHost) : undefined,
     confirmationProbe: opts.confirmationProbe,
     location: opts.location,
     cloudflareEmail: opts.cloudflareEmail,

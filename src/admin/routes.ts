@@ -1,5 +1,5 @@
 import type { Context, Hono } from 'hono'
-import { currentViewer, sameOrigin, signInResponse } from '../auth/providers.ts'
+import { currentViewer, fromThisSite, signInResponse } from '../auth/providers.ts'
 import type { Viewer } from '../auth/viewer.ts'
 import type { MonitorInput, PageInput, SinkInput } from '../config.ts'
 import type { Deps } from '../deps.ts'
@@ -123,7 +123,7 @@ export function mountAdminRoutes(app: Hono, deps: Deps): void {
     const viewer = await browserAdmin(c)
     if (viewer === null) return notFound(c)
     if (viewer instanceof Response) return viewer
-    if (!sameOrigin(c, deps)) return c.text('Forbidden', 403, noStore)
+    if (!fromThisSite(c, deps)) return c.text('Forbidden', 403, noStore)
     const form = await c.req.parseBody({ all: true }).catch(() => ({})) as Form
     if (!(await verifyCsrfToken(deps.db, c, form.csrf, nowSeconds()))) return c.text('Forbidden', 403, noStore)
     const base = /^\d+$/.test(text(form, 'revision')) ? Number(text(form, 'revision')) : undefined

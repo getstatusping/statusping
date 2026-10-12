@@ -19,6 +19,7 @@ import type { Form } from './forms.ts'
 import { type AdminConfig, canAdmin, validateAdminConfig } from './security.ts'
 import { saveAdminConfig } from './service.ts'
 import { field, hidden, layout, selectInput, textInput } from './ui.ts'
+import { targetFetch } from '../util/private-targets.ts'
 
 export type Method = 'basic' | 'cloudflare-access' | 'oidc'
 const METHODS: Record<Method, string> = { basic: 'Email and password', 'cloudflare-access': 'Cloudflare Access', oidc: 'Single sign-on (OpenID Connect)' }
@@ -251,7 +252,7 @@ export function mountAccessSwitch(app: Hono, deps: Deps, h: SwitchHelpers): void
       const updated = { ...next, issuer, preset, trustUnverifiedEmail: text(p.form, 'trustUnverifiedEmail') === '1' }
       let error: string | undefined
       try { if (new URL(issuer).protocol !== 'https:') error = 'The issuer must be an https:// URL.' } catch { error = 'Enter the issuer URL, such as https://accounts.google.com.' }
-      if (!error) { try { await discover(issuer, deps.fetch) } catch (e) { error = `StatusPing could not read ${issuer}/.well-known/openid-configuration (${(e as Error).message}).` } }
+      if (!error) { try { await discover(issuer, deps) } catch (e) { error = `StatusPing could not read ${issuer}/.well-known/openid-configuration (${(e as Error).message}).` } }
       await stash('OIDC_CLIENT_ID')
       await stash('OIDC_CLIENT_SECRET')
       if (error) return configure(c, p, updated, error, 400)
@@ -266,7 +267,7 @@ export function mountAccessSwitch(app: Hono, deps: Deps, h: SwitchHelpers): void
     const draft = await loadDraft(deps)
     const creds = await credentials(deps, 'oidc')
     if (draft?.method !== 'oidc' || !draft.issuer || !creds.OIDC_CLIENT_ID?.value || !creds.OIDC_CLIENT_SECRET?.value) return h.done(c, '/admin/access/method', 'method-saved')
-    const d = await discover(draft.issuer, deps.fetch)
+    const d = await discover(draft.issuer, deps)
     const [state, nonce, verifier] = [randomToken(32), randomToken(32), randomToken(64)]
     const challenge = b64urlEncode(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier))))
     setCookie(c, LOGIN_COOKIE, await sign({ state, nonce, verifier, exp: nowSeconds() + 600 }, draft.key), { httpOnly: true, secure: origin(c, deps).startsWith('https:'), sameSite: 'Lax', path: '/auth', maxAge: 600 })
@@ -351,15 +352,15 @@ export function mountAccessSwitchAuthRoutes(app: Hono, deps: Deps): void {
     const clientId = creds.OIDC_CLIENT_ID?.value ?? ''
     let claims: Record<string, unknown>
     try {
-      const d = await discover(draft.issuer, deps.fetch)
-      const res = await deps.fetch(d.token_endpoint, {
+      const d = await discover(draft.issuer, deps)
+      const res = await targetFetch(deps)(d.token_endpoint, {
         method: 'POST',
         headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/json' },
         body: new URLSearchParams({ grant_type: 'authorization_code', code, redirect_uri: `${origin(c, deps)}/auth/callback`, client_id: clientId, client_secret: creds.OIDC_CLIENT_SECRET?.value ?? '', code_verifier: login.verifier }),
       })
       const idToken = res.ok ? ((await res.json()) as { id_token?: string }).id_token : undefined
       if (!idToken) return back(c, 'oidc-token')
-      claims = await verifyJwt(idToken, { jwksUrl: d.jwks_uri, issuer: d.issuer, audience: clientId, fetch: deps.fetch, now: nowSeconds() })
+      claims = await verifyJwt(idToken, { jwksUrl: d.jwks_uri, issuer: d.issuer, audience: clientId, fetch: targetFetch(deps), now: nowSeconds() })
     } catch { return back(c, 'oidc-token') }
     if (claims.nonce !== login.nonce) return back(c, 'oidc-state')
     const email = typeof claims.email === 'string' ? claims.email.toLowerCase() : ''

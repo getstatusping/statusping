@@ -6,7 +6,7 @@
  */
 import type { Context, Hono } from 'hono'
 import { getCookie, setCookie } from 'hono/cookie'
-import { sameOrigin } from '../auth/providers.ts'
+import { fromThisSite } from '../auth/providers.ts'
 import { sign, unsign } from '../auth/session.ts'
 import { canAcknowledge, type Viewer } from '../auth/viewer.ts'
 import type { Deps } from '../deps.ts'
@@ -45,7 +45,7 @@ export function mountRecoveryRoutes(app: Hono, deps: Deps): void {
   app.post('/setup/recover', async (c) => {
     const key = recoveryKey(deps)
     if (!key || !available()) return notFound(c)
-    if (!sameOrigin(c, deps)) return c.text('Forbidden', 403, headers)
+    if (!fromThisSite(c, deps)) return c.text('Forbidden', 403, headers)
     const ip = deps.clientIp(c.req.raw)
     if (ip !== null && !(await consumePingRateLimit(deps.db, `setup-recover:${ip}`, nowSeconds(), 5))) {
       return c.html(recoverPage({ error: 'Too many attempts. Wait a minute and try again.' }), 429, headers)

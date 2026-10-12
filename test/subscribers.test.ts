@@ -36,7 +36,7 @@ describe('subscribe rate limit (security review finding 2)', () => {
     for (let i = 0; i < 8; i++) {
       const res = await app.request('/pages/status/subscribe', {
         method: 'POST',
-        headers: { 'content-type': 'application/x-www-form-urlencoded', 'cf-connecting-ip': `198.51.100.${i}` },
+        headers: { 'content-type': 'application/x-www-form-urlencoded', origin: 'http://localhost', 'cf-connecting-ip': `198.51.100.${i}` },
         body: new URLSearchParams({ email: `victim${i}@example.com` }).toString(),
       })
       statuses.push(res.status)
