@@ -5,6 +5,7 @@ import { parseAdminYaml, stringifyAdminYaml } from '../src/admin/yaml.ts'
 import { createApp } from '../src/web/app.ts'
 import { tick } from '../src/tick.ts'
 import { APP_VERSION } from '../src/version.ts'
+import type { StatusPingConfig } from '../src/config.ts'
 import { createTestDb, type FetchCall, fakeFetch, makeDeps, testConfig } from './helpers.ts'
 
 const ORIGIN = 'https://status.test'
@@ -41,10 +42,10 @@ describe('admin Settings pages', () => {
   let close: (() => Promise<void>) | undefined
   afterEach(async () => close?.())
 
-  async function signedIn(handler?: (call: FetchCall) => Response) {
+  async function signedIn(handler?: (call: FetchCall) => Response, extra: Partial<StatusPingConfig> = {}) {
     const t = await createTestDb('libsql'); close = t.close
     const config = {
-      ...testConfig({ sinks: {}, access: { provider: { type: 'basic' as const }, admins: { emails: ['admin@example.test', 'second@example.test'] } } }),
+      ...testConfig({ sinks: {}, access: { provider: { type: 'basic' as const }, admins: { emails: ['admin@example.test', 'second@example.test'] } }, ...extra }),
       baseUrl: ORIGIN, admin: true,
     }
     const users = { 'admin@example.test': await hashPassword('admin-password-123') }
@@ -186,6 +187,23 @@ describe('admin Settings pages', () => {
     expect((await db.all<{ action: string; actor: string }>(`SELECT action, actor FROM audit_log WHERE action = 'instance.reset'`))).toEqual([{ action: 'instance.reset', actor: 'admin@example.test' }])
     // Signed out and sent to setup.
     expect((await b.get('/admin')).res.headers.get('location')).toBe('/setup')
+  })
+
+  it('warns on General about stored maintenance windows that break the cadence rule (C6)', async () => {
+    const { b } = await signedIn(undefined, { maintenance: [
+      { title: 'Legacy deploys', monitors: '*', schedule: '*/5 * * * *', duration: '2m' },
+      { title: 'Nightly', monitors: '*', schedule: '0 3 * * *', duration: '30m' },
+    ] })
+    const general = (await b.get('/admin')).body
+    expect(general).toContain('saved before the hourly cadence rule')
+    expect(general).toContain('Fix or remove them in <a href="/admin/configuration">Configuration</a>')
+    expect(general).toContain('<strong>Legacy deploys</strong> <code>*/5 * * * *</code>')
+    expect(general).not.toContain('<strong>Nightly</strong>')
+  })
+
+  it('shows no cadence warning when every window follows the rule', async () => {
+    const { b } = await signedIn(undefined, { maintenance: [{ title: 'Nightly', monitors: '*', schedule: '0 3 * * *', duration: '30m' }] })
+    expect((await b.get('/admin')).body).not.toContain('hourly cadence rule')
   })
 
   it('keeps the update-check switch under Software updates, separate from the site form', async () => {

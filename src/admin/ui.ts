@@ -11,6 +11,7 @@ import { SINK_FIELDS } from './forms.ts'
 import type { StoredUpdateCheck } from '../updates.ts'
 import { type ApiToken, MCP_SCOPES, type McpScope } from '../mcp/tokens.ts'
 import { releaseNotesUrl } from '../updates.ts'
+import type { CadenceViolation } from '../maintenance.ts'
 import { STYLES } from '../web/styles.ts'
 import { timezoneSelect } from '../util/timezones.ts'
 
@@ -133,7 +134,14 @@ export function layout(opts: { viewer: Viewer; section: Section; title: string; 
 
 // ── General ─────────────────────────────────────────────────────────────────────────────────
 
-export function generalPage(opts: { viewer: Viewer; csrf: string; title: string; baseUrl: string; timezone: string; updatesEnabled: boolean; installedVersion: string; update: UpdateState; notice?: string; error?: string; resetError?: string }): string {
+/** Stored maintenance windows that break the cadence rule: the status page and alerts disagree on them. */
+function cadenceCard(violations: readonly CadenceViolation[] | undefined): string {
+  if (!violations?.length) return ''
+  const items = violations.map((v) => `<li><strong>${escape(v.title)}</strong> <code>${escape(v.schedule)}</code> (${escape(v.tz)}): ${escape(v.problem)}</li>`).join('')
+  return `<section class="card"><p class="alert warning">These recurring maintenance windows were saved before the hourly cadence rule. Alerts still treat them as maintenance, but the status page history skips them. Fix or remove them in <a href="/admin/configuration">Configuration</a>.</p><ul>${items}</ul></section>`
+}
+
+export function generalPage(opts: { viewer: Viewer; csrf: string; title: string; baseUrl: string; timezone: string; updatesEnabled: boolean; installedVersion: string; update: UpdateState; cadence?: readonly CadenceViolation[]; notice?: string; error?: string; resetError?: string }): string {
   const u = opts.update
   const available = u.result === 'available' && u.targetVersion ? u.targetVersion : null
   // A release that needs an intermediate one first: statusp.ing offers that release, then this one.
@@ -151,7 +159,7 @@ export function generalPage(opts: { viewer: Viewer; csrf: string; title: string;
     u.result === 'disabled' ? '' : `<form method="post" action="/admin/updates/check" style="display:contents">${hidden(opts.csrf)}<button class="btn-outline" type="submit">Check for updates</button></form>`,
     offered ? `<a class="btn-outline" href="${escape(releaseNotesUrl(offered))}">Release notes</a>` : '',
   ].filter(Boolean).join('')
-  return layout({ ...opts, section: 'general', title: 'General', description: 'Your status site and its software.', body: `
+  return layout({ ...opts, section: 'general', title: 'General', description: 'Your status site and its software.', body: `${cadenceCard(opts.cadence)}
 <section class="card"><h2>Site</h2><p class="lead">Shown on your status pages and used in alert links.</p>
 <form class="form" method="post" action="/admin/general">${hidden(opts.csrf)}
 ${field('Site title', textInput('title', opts.title, 'maxlength="80" required'))}

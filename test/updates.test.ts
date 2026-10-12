@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { normalizeConfig } from '../src/config.ts'
-import { canonicalJson, checkForUpdate, loadUpdateCheck, OFFICIAL_MANIFEST_URL, OFFICIAL_RELEASE_PUBLIC_KEY, verifySignedManifest } from '../src/updates.ts'
+import { canonicalJson, checkForUpdate, loadUpdateCheck, MAX_UPDATE_MANIFEST_BYTES, OFFICIAL_MANIFEST_URL, OFFICIAL_RELEASE_PUBLIC_KEY, readCappedText, verifySignedManifest } from '../src/updates.ts'
 import { privateTargetGuard } from '../src/util/private-targets.ts'
 import { createTestDb, fakeFetch, makeDeps, testConfig } from './helpers.ts'
 
@@ -82,6 +82,38 @@ describe('signed admin update checks', () => {
     expect(await checkForUpdate({ db: t.db, config, fetch: fetch.fn, now: 100, force: true })).toMatchObject({ result: 'failed', targetVersion: null })
     const validFetch = fakeFetch(() => new Response(signed.body))
     expect(await checkForUpdate({ db: t.db, config, fetch: validFetch.fn, now: 101, force: true })).toMatchObject({ result: 'incompatible', targetVersion: '99.0.0' })
+  })
+})
+
+/** An endless body without Content-Length; `pulled()` reports how many bytes were read from it. */
+function endlessBody() {
+  let pulled = 0
+  const chunk = new Uint8Array(16 * 1024).fill(32)
+  const body = new ReadableStream<Uint8Array>({ pull(controller) { pulled += chunk.byteLength; controller.enqueue(chunk) } }, { highWaterMark: 0 })
+  return { body, pulled: () => pulled }
+}
+
+describe('reading update manifests with a byte cap (C4)', () => {
+  let close: (() => Promise<void>) | undefined
+  afterEach(async () => close?.())
+
+  it('stops reading a chunked manifest body at 64 KB instead of buffering it whole', async () => {
+    const t = await createTestDb('libsql'); close = t.close
+    const signed = await signedManifest('99.0.0', '0.1.0')
+    const endless = endlessBody()
+    const fetch = fakeFetch(() => new Response(endless.body, { headers: { 'content-type': 'application/json' } }))
+    const config = normalizeConfig(testConfig({ updates: { enabled: true, manifestUrl: 'https://updates.example.test/stable.json', publicKey: signed.publicKey } }))
+    expect(await checkForUpdate({ db: t.db, config, fetch: fetch.fn, now: 100, force: true })).toMatchObject({ result: 'failed', targetVersion: null })
+    expect(endless.pulled()).toBeLessThanOrEqual(MAX_UPDATE_MANIFEST_BYTES + 32 * 1024)
+  })
+
+  it('readCappedText returns the text under the cap and null past it', async () => {
+    expect(await readCappedText(new Response('hello'), 5)).toBe('hello')
+    expect(await readCappedText(new Response('hello!'), 5)).toBeNull()
+    expect(await readCappedText(new Response(null), 5)).toBe('')
+    const endless = endlessBody()
+    expect(await readCappedText(new Response(endless.body), 1000)).toBeNull()
+    expect(endless.pulled()).toBeLessThanOrEqual(32 * 1024)
   })
 })
 

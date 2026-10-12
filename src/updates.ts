@@ -2,6 +2,9 @@ import { APP_VERSION, SCHEMA_VERSION } from './version.ts'
 import type { NormalizedConfig } from './config.ts'
 import type { Db } from './db/types.ts'
 import { guardedFetch, type TargetGuard } from './util/private-targets.ts'
+import { readCappedText } from './util/capped-body.ts'
+
+export { readCappedText }
 
 export type UpdateCheckResult = 'disabled' | 'available' | 'current' | 'incompatible' | 'failed'
 export interface StoredUpdateCheck { result: Exclude<UpdateCheckResult, 'disabled'>; targetVersion: string | null; checkedAt: number }
@@ -229,8 +232,9 @@ export async function checkForUpdate(opts: { db: Db; config: NormalizedConfig; f
     })
     const length = Number(response.headers.get('content-length') ?? '0')
     if (!response.ok || (Number.isFinite(length) && length > MAX_UPDATE_MANIFEST_BYTES)) throw new Error('unusable manifest response')
-    const raw = await response.text()
-    if (raw.length > MAX_UPDATE_MANIFEST_BYTES) throw new Error('manifest is too large')
+    // Content-Length may be absent (chunked), so the body is read with a byte cap too.
+    const raw = await readCappedText(response, MAX_UPDATE_MANIFEST_BYTES)
+    if (raw === null) throw new Error('manifest is too large')
     const manifest = await verifySignedManifest(raw, updates.publicKey)
     const installed = version(APP_VERSION)!
     if (!manifest) throw new Error('invalid manifest')

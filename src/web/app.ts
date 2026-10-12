@@ -1,4 +1,5 @@
 import { Hono } from 'hono'
+import { readCappedText } from '../util/capped-body.ts'
 import type { Context } from 'hono'
 import { currentViewer, hasCredentials, mountAuthRoutes, fromThisSite, signInResponse } from '../auth/providers.ts'
 import { type Viewer, canAcknowledge, canOpen } from '../auth/viewer.ts'
@@ -83,34 +84,6 @@ function runAfterResponse(c: Context, deps: Deps, p: Promise<unknown>) {
 }
 
 const CONFIRM_BODY_LIMIT = 1024
-
-/** The request body as text, or null once it exceeds `limit` bytes; stops reading at the cap. */
-async function readCappedText(request: Request, limit: number): Promise<string | null> {
-  if (!request.body) return ''
-  const reader = request.body.getReader()
-  const chunks: Uint8Array[] = []
-  let read = 0
-  try {
-    for (;;) {
-      const { done, value } = await reader.read()
-      if (done) break
-      read += value.byteLength
-      if (read > limit) return null
-      chunks.push(value)
-    }
-  } catch {
-    return null
-  } finally {
-    reader.cancel().catch(() => {})
-  }
-  const bytes = new Uint8Array(read)
-  let offset = 0
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset)
-    offset += chunk.byteLength
-  }
-  return new TextDecoder().decode(bytes)
-}
 
 export function createApp(deps: Deps): Hono {
   const app = new Hono()

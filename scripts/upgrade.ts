@@ -15,7 +15,7 @@ import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { MARKER_PATH, planUpgrade, WRANGLER_PATH } from '../src/upgrade-plan.ts'
-import { MAX_UPDATE_MANIFEST_BYTES, OFFICIAL_RELEASE_PUBLIC_KEY, SOURCE_TREE_REQUIRED_FROM, sourceTreeMismatches, verifySignedManifest, type VerifiedRelease } from '../src/updates.ts'
+import { MAX_UPDATE_MANIFEST_BYTES, OFFICIAL_RELEASE_PUBLIC_KEY, readCappedText, SOURCE_TREE_REQUIRED_FROM, sourceTreeMismatches, verifySignedManifest, type VerifiedRelease } from '../src/updates.ts'
 import { gitTree } from './git-tree.ts'
 
 const SOURCE = 'https://github.com/getstatusping/statusping.git'
@@ -53,8 +53,8 @@ const tree = (ref: string) => gitTree(ref).files
 async function signedRelease(version: string): Promise<VerifiedRelease | null> {
   try {
     const res = await fetch(`${RELEASES}/v${version}/update-manifest.json`, { headers: { accept: 'application/json' }, redirect: 'follow', signal: AbortSignal.timeout(15_000) })
-    const raw = res.ok ? await res.text() : ''
-    const release = raw && raw.length <= MAX_UPDATE_MANIFEST_BYTES ? await verifySignedManifest(raw, PUBLIC_KEY) : null
+    const raw = res.ok ? await readCappedText(res, MAX_UPDATE_MANIFEST_BYTES) : null
+    const release = raw ? await verifySignedManifest(raw, PUBLIC_KEY) : null
     return release?.version === version ? release : null
   } catch { return null }
 }
@@ -65,18 +65,21 @@ async function signedRelease(version: string): Promise<VerifiedRelease | null> {
  * them a missing or unverifiable manifest is refused. Older releases cannot be checked; that is
  * a warning only, because this command commits locally and never pushes.
  */
-async function checkSourceTree(version: string, files: Map<string, Uint8Array>, role: 'installed' | 'target'): Promise<VerifiedRelease | null> {
+async function checkSourceTree(version: string, files: Map<string, Uint8Array>, role: 'installed' | 'target'): Promise<{ release: VerifiedRelease | null; verified: boolean }> {
   const release = await signedRelease(version)
   if (!release?.sourceTree) {
     if (compare(version, SOURCE_TREE_REQUIRED_FROM) >= 0) fail(`The signed release manifest for v${version} could not be downloaded or verified, so its files cannot be checked. Nothing was changed.`)
     if (role === 'target') console.warn(`Warning: v${version} predates signed source trees, so its files could not be checked against the release signature. Review the commit carefully, including .github/, before pushing it.`)
-    return release
+    // The installed release is the merge base: a tampered one could make a file look unedited
+    // (so it is replaced or deleted) without any conflict. Removals are left to you (see below).
+    else console.warn(`Warning: your installed release v${version} predates signed source trees, so it could not be checked against the release signature. Review every changed line in the commit, and delete files StatusPing no longer uses by hand (they are listed below).`)
+    return { release, verified: false }
   }
   const mismatches = await sourceTreeMismatches(files, release.sourceTree)
   if (mismatches.length) {
     fail(`The v${version} tag does not match its signed release (${mismatches.length} file(s) differ, e.g. ${mismatches.slice(0, 5).join(', ')}). Nothing was changed. Report this at https://github.com/getstatusping/statusping/security.`)
   }
-  return release
+  return { release, verified: true }
 }
 
 async function main() {
@@ -110,11 +113,13 @@ async function main() {
   try {
     git(['fetch', '--quiet', '--no-tags', source, `+refs/${adopt ? 'heads/main' : `tags/v${installed}`}:${baseRef}`, `+refs/tags/${targetTag}:${targetRef}`])
     const next = tree(targetRef)
-    const targetRelease = await checkSourceTree(target, next, 'target')
+    const { release: targetRelease } = await checkSourceTree(target, next, 'target')
     let minimum = targetRelease?.minimumVersion ?? ''
     if (!targetRelease) try { minimum = String((JSON.parse(new TextDecoder().decode(next.get('package.json'))) as { statusping?: { minimumUpgradeVersion?: unknown } }).statusping?.minimumUpgradeVersion ?? '') } catch { /* no minimum */ }
     if (SEMVER.test(minimum) && compare(installed, minimum) < 0) fail(`${targetTag} cannot be applied directly to v${installed}. Upgrade to v${minimum} first:\n  npm run upgrade -- ${minimum}`)
     let base: Map<string, Uint8Array>
+    // An adopted base is a template commit, never signed; an installed release may predate signing.
+    let baseVerified = false
     const current = new Map<string, Uint8Array>()
     if (adopt) {
       // Use the template commit this repository was created from as the base:
@@ -133,12 +138,12 @@ async function main() {
     } else {
       base = tree(baseRef)
       // The installed release is only a merge base, but a tampered one could hide changes.
-      await checkSourceTree(installed, base, 'installed')
+      baseVerified = (await checkSourceTree(installed, base, 'installed')).verified
     }
     for (const path of new Set([...base.keys(), ...next.keys()])) {
       if (!current.has(path) && existsSync(path)) current.set(path, readFileSync(path))
     }
-    const plan = planUpgrade({ base, target: next, current, currentWrangler: existsSync(WRANGLER_PATH) ? readFileSync(WRANGLER_PATH) : undefined, addTemplateVersionLine: adopt })
+    const plan = planUpgrade({ base, target: next, current, currentWrangler: existsSync(WRANGLER_PATH) ? readFileSync(WRANGLER_PATH) : undefined, addTemplateVersionLine: adopt, unverifiedBase: !baseVerified })
 
     if (!plan.safe) fail(`Cannot prepare this upgrade:\n${plan.errors.map((error) => `  - ${error}`).join('\n')}`)
     const blocking = plan.conflicts.filter((conflict) => BLOCKING.has(conflict.reason))
@@ -153,7 +158,7 @@ async function main() {
     }
     if (plan.conflicts.length) {
       console.log('\nFiles that need your attention:')
-      for (const { path, reason } of plan.conflicts) console.log(`  - ${path} (${reason})`)
+      for (const { path, reason } of plan.conflicts) console.log(`  - ${path} (${reason === 'removed-upstream' ? 'removed by the release; the installed release could not be verified, so delete it yourself if it is not yours' : reason})`)
     }
     if (blocking.length && !skip) {
       fail(`\nThese files differ from v${installed}, so the upgrade did not change them. Restore them with\n  git checkout ${baseRef} -- <path>\nor rerun with --skip-conflicts to upgrade everything else and merge them by hand (compare with ${targetRef}).`)

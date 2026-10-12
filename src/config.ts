@@ -1,6 +1,6 @@
 import { Cron } from 'croner'
 import { parseJsonPath } from './evaluate/json.ts'
-import { recurringScheduleProblem } from './maintenance.ts'
+import { normalizeSchedule, recurringScheduleProblem } from './maintenance.ts'
 import { isValidTimeZone, parseDuration } from './util/time.ts'
 import { OFFICIAL_MANIFEST_URL, OFFICIAL_RELEASE_PUBLIC_KEY } from './updates.ts'
 
@@ -1078,6 +1078,9 @@ function parseIsoTimestamp(value: unknown, where: string, problems: string[]): n
   return Math.floor(milliseconds / 1000)
 }
 
+/** The most maintenance windows a saved config may hold. */
+export const MAX_MAINTENANCE_WINDOWS = 200
+
 function normalizeMaintenance(
   input: StatusPingConfig['maintenance'],
   monitors: Monitor[],
@@ -1090,6 +1093,8 @@ function normalizeMaintenance(
     problems.push('maintenance: must be an array')
     return []
   }
+  // Every window is expanded on each status-page render and tick, so a saved list is capped.
+  if (save && input.length > MAX_MAINTENANCE_WINDOWS) problems.push(`maintenance: at most ${MAX_MAINTENANCE_WINDOWS} windows (found ${input.length}); remove past one-off windows`)
   const knownMonitors = new Map(monitors.map((monitor, order) => [monitor.id, order]))
   const normalized: NormalizedMaintenance[] = []
 
@@ -1150,7 +1155,7 @@ function normalizeMaintenance(
       continue
     }
     if (hasRecurringField) {
-      const schedule = typeof window.schedule === 'string' ? window.schedule : ''
+      const schedule = typeof window.schedule === 'string' ? normalizeSchedule(window.schedule) : ''
       if (!schedule) problems.push(`${where}.schedule: must be a non-empty cron expression`)
       const tz = typeof window.tz === 'string' ? window.tz : defaultTimezone
       if (!isValidTimeZone(tz)) problems.push(`${where}.tz: unknown timezone "${tz}"`)

@@ -3,6 +3,7 @@ import { b64urlEncode, clearJwksCache } from '../src/auth/jwt.ts'
 import { hashPassword } from '../src/auth/providers.ts'
 import { createApp } from '../src/web/app.ts'
 import { tick } from '../src/tick.ts'
+import { hmacSha256Hex, sha256Hex } from '../src/util/crypto.ts'
 import { createTestDb, type FetchCall, fakeFetch, makeDeps, testConfig } from './helpers.ts'
 
 const ORIGIN = 'https://status.test'
@@ -221,6 +222,11 @@ describe('changing the sign-in method from Settings', () => {
     await s.post('/admin/access/method/settings', { preset: 'other', issuer: 'https://evil.test', OIDC_CLIENT_ID: 'env-client', OIDC_CLIENT_SECRET: 'env-secret' })
     // Only a digest of the confirming value is kept, never the value itself.
     expect(await s.db.first(`SELECT name FROM instance_secrets WHERE value IN ('env-secret', 'env-client', 'other-secret')`)).toBeNull()
+    // The digest is an HMAC keyed by the draft's random key, not a bare hash anyone could test guesses against.
+    const stored = (await s.db.first<{ value: string }>(`SELECT value FROM instance_secrets WHERE name = 'pending:confirm:OIDC_CLIENT_SECRET'`))!.value
+    expect(stored).not.toBe(await sha256Hex('statusping-confirm:env-secret'))
+    const draftKey = (JSON.parse((await s.db.first<{ value: string }>(`SELECT value FROM instance_secrets WHERE name = 'access_switch'`))!.value) as { key: string }).key
+    expect(stored).toBe(await hmacSha256Hex(draftKey, 'statusping-confirm:OIDC_CLIENT_SECRET\u0000env-secret'))
     const authorize = new URL(await start())
     nonce = authorize.searchParams.get('nonce')!
     expect((await s.get(`/auth/callback?code=c&state=${authorize.searchParams.get('state')}`)).res.headers.get('location')).toBe('/admin/access/method')

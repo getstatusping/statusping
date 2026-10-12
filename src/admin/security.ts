@@ -4,6 +4,7 @@ import { canAcknowledge, type Viewer } from '../auth/viewer.ts'
 import { type EnvGetter, type EnvRef, isReservedEnv, type NormalizedConfig, normalizeConfig, resolveConfigEnv, type StatusPingConfig } from '../config.ts'
 import type { Db } from '../db/types.ts'
 import { randomToken, sha256Hex, timingSafeEqual } from '../util/crypto.ts'
+import { normalizeSchedule } from '../maintenance.ts'
 import { TENANT_ENV, clampToTenantPolicy, explicitIntervalIds, parseTenantPolicy, tenantPolicyProblems } from '../platform.ts'
 
 /** Configuration accepted by the browser admin.  It is opt-in on purpose. */
@@ -174,9 +175,25 @@ export interface AdminConfigValidation {
  * tenant, a save over the plan's limits is rejected; loading an already-stored config instead
  * fits it into the plan, so a downgrade never takes the site down.
  */
+/** A saved config stores recurring schedules in their normalised form (whitespace collapsed). */
+function withNormalizedSchedules(config: Record<string, unknown>): Record<string, unknown> {
+  if (!Array.isArray(config.maintenance)) return config
+  let changed = false
+  const maintenance = config.maintenance.map((window: unknown) => {
+    const w = record(window)
+    if (!w || typeof w.schedule !== 'string') return window
+    const schedule = normalizeSchedule(w.schedule)
+    if (schedule === w.schedule || !schedule) return window
+    changed = true
+    return { ...w, schedule }
+  })
+  return changed ? { ...config, maintenance } : config
+}
+
 export function validateAdminConfig(value: unknown, getEnv: EnvGetter, mode: 'save' | 'load' = 'save'): AdminConfigValidation {
-  const config = record(value)
-  if (!config) throw new Error('config: must be an object')
+  const input = record(value)
+  if (!input) throw new Error('config: must be an object')
+  const config = mode === 'save' ? withNormalizedSchedules(input) : input
   const admin = config.admin
   if (admin !== undefined && typeof admin !== 'boolean') throw new Error('admin: must be a boolean')
   const problems = validateAdminSecrets(config)

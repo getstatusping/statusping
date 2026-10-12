@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { promisify } from 'node:util'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { gitTree, releaseSourceTree } from '../scripts/git-tree.ts'
+import { archiveMismatches, gitTree, readGitArchive, releaseSourceTree } from '../scripts/git-tree.ts'
 import { buildSourceTree, canonicalJson, parseSourceTree, SOURCE_TREE_REQUIRED_FROM, sourceTreeMismatches, verifySignedManifest, type SourceTree } from '../src/updates.ts'
 
 const realMarker = JSON.parse(readFileSync(new URL('../statusping.release.json', import.meta.url), 'utf8'))
@@ -119,6 +119,36 @@ describe('release source trees from Git', () => {
     commit(attributes, 'release')
     await expect(releaseSourceTree('HEAD', attributes)).rejects.toThrow(/\.gitattributes sets attributes/)
   })
+
+  it('refuses working-tree-encoding attributes, which change archived bytes (B3)', async () => {
+    const dir = join(root, 'encoding')
+    newRepo(dir)
+    writeTree(dir, release('0.4.0', { '.gitattributes': '*.ps1 working-tree-encoding=UTF-16LE\n' }))
+    commit(dir, 'release')
+    await expect(releaseSourceTree('HEAD', dir)).rejects.toThrow(/\.gitattributes sets attributes/)
+  })
+
+  it('compares the git archive with the committed blobs, catching transformations outside .gitattributes (B3)', async () => {
+    const dir = join(root, 'archive')
+    newRepo(dir)
+    writeTree(dir, release('0.4.0', { 'docs/a long/nested path/that is longer than one hundred bytes in total for the ustar name field/readme.md': '# hi\n' }))
+    commit(dir, 'release')
+    expect(archiveMismatches('HEAD', dir)).toEqual([])
+    expect(readGitArchive(new Uint8Array(execFileSync('git', ['archive', '--format=tar', 'HEAD'], { cwd: dir }))).get('src/app.ts')).toEqual(encode(`export const version = '0.4.0'\n`))
+    await expect(releaseSourceTree('HEAD', dir)).resolves.toMatchObject({ algorithm: 'sha256' })
+
+    // Repository-local attributes are not in the tree, but git archive applies them.
+    mkdirSync(join(dir, '.git/info'), { recursive: true })
+    writeFileSync(join(dir, '.git/info/attributes'), 'src/app.ts export-ignore\n')
+    expect(archiveMismatches('HEAD', dir)).toEqual(['src/app.ts'])
+    await expect(releaseSourceTree('HEAD', dir)).rejects.toThrow(/git archive HEAD differs from the committed files \(src\/app\.ts\)/)
+    rmSync(join(dir, '.git/info/attributes'))
+
+    // So does line-ending conversion from Git configuration.
+    git(dir, 'config', 'core.autocrlf', 'true')
+    git(dir, 'config', 'core.eol', 'crlf')
+    expect(archiveMismatches('HEAD', dir)).toContain('src/app.ts')
+  })
 })
 
 describe('npm run upgrade checks the signed source tree', () => {
@@ -141,7 +171,8 @@ describe('npm run upgrade checks the signed source tree', () => {
       commit(template, `release ${version}`)
       git(template, 'tag', `v${version}`)
     }
-    manifests.set('0.1.0', signed('0.1.0'))
+    // The usual installed release signs its tree too; the unverified-base test removes it.
+    manifests.set('0.1.0', signed('0.1.0', { sourceTree: await buildSourceTree(files(release('0.1.0'))) }))
     manifests.set(LEGACY, signed(LEGACY))
     manifests.set(TARGET, signed(TARGET, { sourceTree: await buildSourceTree(files(release(TARGET))) }))
     server = createServer((req, res) => {
@@ -212,6 +243,34 @@ describe('npm run upgrade checks the signed source tree', () => {
       expect(result.output).toMatch(/could not be downloaded or verified/)
     } finally {
       manifests.set(TARGET, signed(TARGET, { sourceTree: await buildSourceTree(files(release(TARGET))) }))
+    }
+  })
+
+  it('warns about an installed release it cannot verify, and leaves removals to the customer (B1)', async () => {
+    // The customer added their own workflow; a moved, unsigned v0.1.0 tag claims it, so the
+    // three-way merge would see it as unedited StatusPing file that the target removed.
+    const custom = { '.github/workflows/custom.yml': 'on: push\njobs: { deploy: {} }\n' }
+    const dir = customer('unverified-base')
+    writeTree(dir, custom)
+    commit(dir, 'our workflow')
+    const signedBase = manifests.get('0.1.0')!
+    manifests.set('0.1.0', signed('0.1.0'))
+    git(template, 'checkout', '--quiet', 'v0.1.0')
+    writeTree(template, custom)
+    commit(template, 'crafted base')
+    git(template, 'tag', '--force', 'v0.1.0')
+    git(template, 'checkout', '--quiet', 'main')
+    try {
+      const result = await upgrade(dir, TARGET)
+      expect(result.ok).toBe(true)
+      expect(result.output).toMatch(/Warning: your installed release v0\.1\.0 predates signed source trees/)
+      expect(result.output).toMatch(/\.github\/workflows\/custom\.yml \(removed by the release; the installed release could not be verified/)
+      expect(git(dir, 'branch', '--show-current')).toBe(`statusping/upgrade-v${TARGET}`)
+      expect(readFileSync(join(dir, '.github/workflows/custom.yml'), 'utf8')).toBe(custom['.github/workflows/custom.yml'])
+      expect(git(dir, 'show', '--stat', '--format=', 'HEAD')).not.toContain('custom.yml')
+    } finally {
+      manifests.set('0.1.0', signedBase)
+      git(template, 'tag', '--force', 'v0.1.0', 'main~2')
     }
   })
 

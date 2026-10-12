@@ -13,7 +13,7 @@ import type { AuthProviderInput } from '../config.ts'
 import { type Deps, refreshAdminConfig, storedEnvKey } from '../deps.ts'
 import { ACCESS_DOCS_URL, OIDC_PRESETS, presetById, TEAM_DOMAIN } from '../setup/instructions.ts'
 import { readRecoverySession, RECOVERY_COOKIE } from '../setup/recovery.ts'
-import { randomToken, sha256Hex, timingSafeEqual } from '../util/crypto.ts'
+import { hmacSha256Hex, randomToken, timingSafeEqual } from '../util/crypto.ts'
 import { consumeAttempt } from '../rate-limit.ts'
 import { nowSeconds } from '../util/time.ts'
 import type { Form } from './forms.ts'
@@ -29,9 +29,12 @@ const DRAFT_KEY = 'access_switch'
 const LOGIN_COOKIE = 'sp_method_oidc'
 const DRAFT_SECONDS = 60 * 60
 const pendingKey = (name: string) => `pending:${name}`
-/** A digest of a value entered to confirm a Worker secret; the value itself is never stored. */
+/**
+ * A MAC of a value entered to confirm a Worker secret; the value itself is never stored. It is
+ * keyed with the draft's random key, so a leaked row cannot be checked against guesses offline.
+ */
 const confirmKey = (name: string) => `pending:confirm:${name}`
-const confirmDigest = (value: string) => sha256Hex(`statusping-confirm:${value}`)
+const confirmDigest = (draftKey: string, name: string, value: string) => hmacSha256Hex(draftKey, `statusping-confirm:${name}\u0000${value}`)
 
 export interface SwitchDraft {
   method: Method
@@ -85,7 +88,7 @@ function keepsIssuer(deps: Deps, draft: Pick<SwitchDraft, 'method' | 'issuer'>):
   return current?.type === 'oidc' && draft.issuer !== undefined && sameIssuer(current.issuer, draft.issuer)
 }
 
-async function credentials(deps: Deps, draft: Pick<SwitchDraft, 'method' | 'issuer'>): Promise<Record<string, Credential>> {
+async function credentials(deps: Deps, draft: Pick<SwitchDraft, 'method' | 'issuer' | 'key'>): Promise<Record<string, Credential>> {
   const out: Record<string, Credential> = {}
   const same = keepsIssuer(deps, draft)
   for (const name of SECRETS[draft.method]) {
@@ -94,7 +97,7 @@ async function credentials(deps: Deps, draft: Pick<SwitchDraft, 'method' | 'issu
       // administrator has entered the same value (proving it is meant for that issuer).
       const env = deps.getEnv(name)!
       const confirmed = same ? undefined : (await deps.db.first<{ value: string }>(`SELECT value FROM instance_secrets WHERE name = ?`, [confirmKey(name)]))?.value
-      out[name] = same || (confirmed !== undefined && timingSafeEqual(confirmed, await confirmDigest(env))) ? { value: env, source: 'env' } : { source: false, envSet: true }
+      out[name] = same || (confirmed !== undefined && timingSafeEqual(confirmed, await confirmDigest(draft.key, name, env))) ? { value: env, source: 'env' } : { source: false, envSet: true }
       continue
     }
     const pending = (await deps.db.first<{ value: string }>(`SELECT value FROM instance_secrets WHERE name = ?`, [pendingKey(name)]))?.value
@@ -268,7 +271,7 @@ export function mountAccessSwitch(app: Hono, deps: Deps, h: SwitchHelpers): void
         // A Worker secret wins anyway; entering it again only confirms it for a new issuer. Only
         // a digest is kept, so the value can never be promoted to a stored credential that would
         // silently take over if the Worker secret were later deleted.
-        if (newIssuer) await put(confirmKey(name), await confirmDigest(value))
+        if (newIssuer) await put(confirmKey(name), await confirmDigest(draft.key, name, value))
         return
       }
       await put(pendingKey(name), value)

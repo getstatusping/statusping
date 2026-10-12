@@ -178,6 +178,27 @@ describe('three-way upgrade plan', () => {
     expect(overlapping.conflicts[0]).toMatchObject({ path: 'src/app.ts', reason: 'modified-locally' })
     expect(decode(overlapping.conflicts[0]!.markers)).toBe('// header\nexport const a = 1\nexport const b = 2\nexport const c = 3\n<<<<<<< your version\n// our footer\n=======\n// footer v2\n>>>>>>> StatusPing\n')
   })
+
+  it('never deletes a file when the base release could not be verified (B1)', () => {
+    // A tampered old tag adds the customer's own workflow to the base, so it looks unchanged and,
+    // being absent from the target, deletable.
+    const custom = 'on: push\njobs: { deploy: {} }\n'
+    const crafted = release('0.1.0', { '.github/workflows/custom.yml': custom })
+    const current = release('0.1.0', { '.github/workflows/custom.yml': custom })
+    const target = release('0.2.0', { 'src/removed.ts': null })
+    const run = (unverifiedBase?: boolean) => planUpgrade({ base: files(crafted), target: files(target), current: files(current), currentWrangler: encode(wrangler('0.1.0')), unverifiedBase })
+    expect(run().deletes).toEqual(['.github/workflows/custom.yml', 'src/removed.ts'])
+
+    const guarded = run(true)
+    expect(guarded.safe).toBe(true)
+    expect(guarded.deletes).toEqual([])
+    expect(guarded.conflicts).toEqual([
+      { path: '.github/workflows/custom.yml', reason: 'removed-upstream' },
+      { path: 'src/removed.ts', reason: 'removed-upstream' },
+    ])
+    // Everything else is planned as usual.
+    expect(decode(guarded.writes.get('src/app.ts'))).toBe("export const version = '0.2.0'\n")
+  })
 })
 
 describe('line-level merge', () => {

@@ -27,6 +27,7 @@ import { readRecoverySession } from '../setup/recovery.ts'
 import { beginSetup } from '../setup/state.ts'
 import { deleteCookie } from 'hono/cookie'
 import { checkForUpdate } from '../updates.ts'
+import { cadenceViolations } from '../maintenance.ts'
 import { mountAccessSwitch } from './access-switch.ts'
 import { createApiToken, isMcpScope, listApiTokens, revokeApiToken } from '../mcp/tokens.ts'
 import { APP_VERSION } from '../version.ts'
@@ -191,7 +192,7 @@ Alert links, ping URLs and sign-in callbacks use ${esc(configured)}. If the site
 
   const general = async (c: Context, v: { viewer: Viewer; csrf: string; config: AdminConfig; notice?: string }, error?: string, status: 200 | 400 = 200, resetError?: string) => {
     const update = await checkForUpdate({ db: deps.db, config: deps.config, fetch: deps.fetch, targetGuard: deps.targetGuard, now: nowSeconds() })
-    return html(c, generalPage({ viewer: v.viewer, csrf: v.csrf, title: v.config.title, baseUrl: v.config.baseUrl, timezone: v.config.timezone ?? 'UTC', updatesEnabled: v.config.updates?.enabled === true, installedVersion: APP_VERSION, update, notice: v.notice, error, resetError }), status)
+    return html(c, generalPage({ viewer: v.viewer, csrf: v.csrf, title: v.config.title, baseUrl: v.config.baseUrl, timezone: v.config.timezone ?? 'UTC', updatesEnabled: v.config.updates?.enabled === true, installedVersion: APP_VERSION, update, cadence: cadenceViolations(deps.config.maintenance), notice: v.notice, error, resetError }), status)
   }
 
   app.get('/admin', async (c) => {

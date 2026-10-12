@@ -13,7 +13,11 @@ export type Files = ReadonlyMap<string, Uint8Array>
 
 export type UpgradeConflict = {
   path: string
-  reason: 'modified-locally' | 'deleted-locally' | 'added-locally' | 'template-marker-missing' | 'changed-upstream'
+  /**
+   * `removed-upstream`: the target release no longer has this file, but the installed release
+   * could not be verified (`unverifiedBase`), so it is left for the customer to delete by hand.
+   */
+  reason: 'modified-locally' | 'deleted-locally' | 'added-locally' | 'template-marker-missing' | 'changed-upstream' | 'removed-upstream'
   /** For overlapping line edits: the file with both versions between conflict markers. */
   markers?: Uint8Array
 }
@@ -118,6 +122,12 @@ export function planUpgrade(input: {
   currentWrangler: Uint8Array | undefined
   /** Repositories created before the template version line existed get it added under [vars]. */
   addTemplateVersionLine?: boolean
+  /**
+   * The base (installed release) files could not be checked against a signature. A crafted base
+   * that matches a customer's file would make it look unchanged and so deletable, so with this
+   * set the plan never deletes: each removal is reported as a `removed-upstream` conflict.
+   */
+  unverifiedBase?: boolean
 }): UpgradePlan {
   const baseMarker = json(input.base.get(MARKER_PATH))
   const targetMarker = json(input.target.get(MARKER_PATH))
@@ -164,7 +174,10 @@ export function planUpgrade(input: {
     if (RENAMED_BY_DEPLOY.has(path) && !base && !current && next && projectName) next = renamePackage(next, packageName(next) ?? projectName, projectName)
     const result = mergeFile(base, next, current, target.ownership.preservedRegions[path])
     if (result.kind === 'write') { plan.writes.set(path, result.content); if (result.merged) plan.merged.push(path) }
-    else if (result.kind === 'delete') plan.deletes.push(path)
+    else if (result.kind === 'delete') {
+      if (input.unverifiedBase) plan.conflicts.push({ path, reason: 'removed-upstream' })
+      else plan.deletes.push(path)
+    }
     else if (result.kind === 'conflict') plan.conflicts.push({ path, reason: result.reason, ...(result.markers ? { markers: result.markers } : {}) })
   }
 

@@ -1,9 +1,14 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { Cron } from 'croner'
-import { normalizeConfig } from '../src/config.ts'
+import { MAX_MAINTENANCE_WINDOWS, normalizeConfig } from '../src/config.ts'
+import { validateAdminConfig } from '../src/admin/security.ts'
 import {
   activeMaintenance,
+  cadenceViolations,
+  CRON_CACHE_LIMIT,
+  cronCacheSize,
   maintenanceAppliesTo,
+  normalizeSchedule,
   maintenanceOccurrences,
   maintenanceOccurrencesLenient,
   MaintenanceOverflowError,
@@ -118,6 +123,59 @@ describe('recurring maintenance cadence', () => {
     expect(() => normalizeConfig(config('0 0 * * * *'), { save: true })).toThrow(/seconds field/)
     expect(normalizeConfig(config('*/5 * * * *')).maintenance).toHaveLength(1)
     expect(normalizeConfig(config('0 * * * *'), { save: true }).maintenance).toHaveLength(1)
+  })
+})
+
+describe('maintenance limits (B2)', () => {
+  const day = unix('2026-03-02T00:00:00Z')
+
+  it('keeps the compiled-schedule cache bounded', () => {
+    for (let i = 0; i < CRON_CACHE_LIMIT + 100; i++) {
+      const window: MaintenanceWindow = { kind: 'recurring', title: 'x', monitors: '*', schedule: `${i % 60} ${Math.floor(i / 60) % 24} ${1 + (Math.floor(i / 1440) % 28)} * *`, tz: 'UTC', duration: 60 }
+      windowOccurrences(window, day, day + 60)
+    }
+    expect(cronCacheSize()).toBeLessThanOrEqual(CRON_CACHE_LIMIT)
+  })
+
+  it('shares one cache entry between whitespace variants of a schedule', () => {
+    const run = (schedule: string) => windowOccurrences({ kind: 'recurring', title: 'x', monitors: '*', schedule, tz: 'Asia/Tokyo', duration: 60 }, day, day + 86_400)
+    const first = run('13 7 * * *')
+    const size = cronCacheSize()
+    for (const variant of ['13  7 * * *', ' 13 7 * * * ', '13\t7  *  *\t*']) expect(run(variant).map((o) => o.start)).toEqual(first.map((o) => o.start))
+    expect(cronCacheSize()).toBe(size)
+    expect(normalizeSchedule(' 13\t7  * * * ')).toBe('13 7 * * *')
+  })
+
+  it('stores the normalised schedule', () => {
+    const config = testConfig({ sinks: {}, maintenance: [{ title: 'Nightly', monitors: '*', schedule: '  0   3 * *\t* ', duration: '2m' }] })
+    expect(normalizeConfig(config, { save: true }).maintenance[0]).toMatchObject({ schedule: '0 3 * * *' })
+    const saved = validateAdminConfig({ ...config, admin: true }, () => undefined).config as unknown as { maintenance: Array<{ schedule: string }> }
+    expect(saved.maintenance[0]!.schedule).toBe('0 3 * * *')
+  })
+
+  it('refuses more than 200 windows on save, but still loads a stored config', () => {
+    const windows = (n: number) => testConfig({ maintenance: Array.from({ length: n }, (_, i) => ({ title: `W${i}`, monitors: '*' as const, start: '2026-01-01T00:00:00Z', end: '2026-01-01T01:00:00Z' })) })
+    expect(normalizeConfig(windows(MAX_MAINTENANCE_WINDOWS), { save: true }).maintenance).toHaveLength(200)
+    expect(() => normalizeConfig(windows(MAX_MAINTENANCE_WINDOWS + 1), { save: true })).toThrow(/maintenance: at most 200 windows \(found 201\)/)
+    expect(normalizeConfig(windows(MAX_MAINTENANCE_WINDOWS + 1)).maintenance).toHaveLength(201)
+  })
+})
+
+describe('legacy maintenance windows (C6)', () => {
+  it('lists stored recurring windows that break the cadence rule, logging each once', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const windows: MaintenanceWindow[] = [
+        { kind: 'recurring', title: 'Legacy', monitors: '*', schedule: '*/7 * * * *', tz: 'UTC', duration: 60 },
+        { kind: 'recurring', title: 'Nightly', monitors: '*', schedule: '0 3 * * *', tz: 'UTC', duration: 60 },
+        { kind: 'one-off', title: 'Once', monitors: '*', start: 0, end: 60 },
+      ]
+      expect(cadenceViolations(windows)).toEqual([{ title: 'Legacy', schedule: '*/7 * * * *', tz: 'UTC', problem: expect.stringContaining('at least an hour apart') }])
+      cadenceViolations(windows)
+      expect(warn.mock.calls.filter(([message]) => String(message).includes('"Legacy"'))).toHaveLength(1)
+    } finally {
+      warn.mockRestore()
+    }
   })
 })
 

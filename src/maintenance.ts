@@ -59,6 +59,8 @@ const CADENCE_SAMPLE = 50
  */
 const OFFSET_MARGIN = 3 * 3600
 const DAY_CACHE_LIMIT = 4096
+/** Each Croner instance retains tens of kilobytes, so compiled schedules are kept LRU-bounded. */
+export const CRON_CACHE_LIMIT = 1024
 
 /** Thrown when a recurring window expands to more occurrences than one range may hold. */
 export class MaintenanceOverflowError extends Error {
@@ -70,24 +72,42 @@ export class MaintenanceOverflowError extends Error {
   }
 }
 
+/**
+ * A cron expression with its whitespace collapsed. Croner reads every whitespace variant the
+ * same way, so this is what is stored and what caches are keyed on.
+ */
+export function normalizeSchedule(schedule: string): string {
+  return schedule.trim().split(/\s+/).join(' ')
+}
+
 const cronCache = new Map<string, Cron>()
 
 function cachedCron(key: string, make: () => Cron): Cron {
   let cron = cronCache.get(key)
-  if (!cron) {
+  if (cron) {
+    cronCache.delete(key)
+  } else {
     cron = make()
-    cronCache.set(key, cron)
+    if (cronCache.size >= CRON_CACHE_LIMIT) cronCache.delete(cronCache.keys().next().value!)
   }
+  cronCache.set(key, cron)
   return cron
+}
+
+/** Entries in the compiled-schedule cache (for tests). */
+export function cronCacheSize(): number {
+  return cronCache.size
 }
 
 /** No callback + paused means Croner is only used for timezone-aware date math. */
 function zonedCron(schedule: string, tz: string): Cron {
-  return cachedCron(`z\u0000${tz}\u0000${schedule}`, () => new Cron(schedule, { timezone: tz, paused: true }))
+  const normalized = normalizeSchedule(schedule)
+  return cachedCron(`z\u0000${tz}\u0000${normalized}`, () => new Cron(normalized, { timezone: tz, paused: true }))
 }
 
 function fixedCron(schedule: string, offsetMinutes: number): Cron {
-  return cachedCron(`o\u0000${offsetMinutes}\u0000${schedule}`, () => new Cron(schedule, { utcOffset: offsetMinutes, paused: true }))
+  const normalized = normalizeSchedule(schedule)
+  return cachedCron(`o\u0000${offsetMinutes}\u0000${normalized}`, () => new Cron(normalized, { utcOffset: offsetMinutes, paused: true }))
 }
 
 const zoneFormats = new Map<string, Intl.DateTimeFormat>()
@@ -118,7 +138,7 @@ const dayCache = new Map<string, readonly number[]>()
  * history only expands the days it has not seen yet.
  */
 function startsOnDay(schedule: string, tz: string, day: number, budget: number): readonly number[] {
-  const key = `${tz}\u0000${schedule}\u0000${day}`
+  const key = `${tz}\u0000${normalizeSchedule(schedule)}\u0000${day}`
   const cached = dayCache.get(key)
   if (cached) {
     dayCache.delete(key)
@@ -283,4 +303,30 @@ export function activeMaintenance(
 ): MaintenanceOccurrence[] {
   return maintenanceOccurrencesLenient(windows, at, at + 1, monitorId)
     .filter((window) => window.start <= at && at < window.end)
+}
+
+/** A stored recurring window that breaks the cadence rule enforced on save. */
+export interface CadenceViolation { title: string; schedule: string; tz: string; problem: string }
+
+const loggedViolations = new Set<string>()
+
+/**
+ * Stored recurring windows that would be refused if saved today (saved before the cadence rule).
+ * Status-page history may skip them while ticks still apply them, so the admin is told to fix or
+ * remove them. Each is logged once per isolate.
+ */
+export function cadenceViolations(windows: readonly MaintenanceWindow[], now = Date.now()): CadenceViolation[] {
+  const result: CadenceViolation[] = []
+  for (const window of windows) {
+    if (window.kind !== 'recurring') continue
+    const problem = recurringScheduleProblem(window.schedule, window.tz, now)
+    if (!problem) continue
+    result.push({ title: window.title, schedule: window.schedule, tz: window.tz, problem })
+    const key = `${window.tz}\u0000${normalizeSchedule(window.schedule)}`
+    if (loggedViolations.size < 100 && !loggedViolations.has(key)) {
+      loggedViolations.add(key)
+      console.warn(`statusping: maintenance window ${JSON.stringify(window.title)} (${JSON.stringify(window.schedule)}) ${problem}; fix or remove it in the admin configuration`)
+    }
+  }
+  return result
 }
