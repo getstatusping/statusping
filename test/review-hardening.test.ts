@@ -286,17 +286,26 @@ describe('hardening: numeric settings and list validation', () => {
     }
   }
 
-  it('refuses out-of-range tick limits and session lengths', () => {
-    expect(problems(testConfig({ limits: { maxChecksPerTick: 0 } }))).toContain('limits.maxChecksPerTick must be a whole number from 1 to 1000')
-    expect(problems(testConfig({ limits: { maxChecksPerTick: 2.5 } }))).toContain('limits.maxChecksPerTick must be a whole number from 1 to 1000')
-    expect(problems(testConfig({ limits: { tickBudgetMs: -1 } }))).toContain('limits.tickBudgetMs must be a whole number from 1000 to 300000')
-    expect(problems(testConfig({ limits: { tickBudgetMs: 'fast' as never } }))).toContain('limits.tickBudgetMs must be a whole number from 1000 to 300000')
-    expect(problems(testConfig({ limits: { maxChecksPerTick: 50, tickBudgetMs: 25_000 } }))).toEqual([])
+  it('refuses out-of-range tick limits and session lengths when saving', () => {
+    const save = (config: StatusPingConfig) => problems(config, true)
+    expect(save(testConfig({ limits: { maxChecksPerTick: 0 } }))).toContain('limits.maxChecksPerTick must be a whole number from 1 to 1000')
+    expect(save(testConfig({ limits: { maxChecksPerTick: 2.5 } }))).toContain('limits.maxChecksPerTick must be a whole number from 1 to 1000')
+    expect(save(testConfig({ limits: { tickBudgetMs: -1 } }))).toContain('limits.tickBudgetMs must be a whole number from 1000 to 300000')
+    expect(save(testConfig({ limits: { tickBudgetMs: 'fast' as never } }))).toContain('limits.tickBudgetMs must be a whole number from 1000 to 300000')
+    expect(save(testConfig({ limits: { maxChecksPerTick: 50, tickBudgetMs: 25_000 } }))).toEqual([])
     const access = (sessionHours: unknown) => testConfig({ access: { provider: { type: 'basic' }, sessionHours: sessionHours as number } })
-    expect(problems(access(0))).toContain('access.sessionHours must be a number of hours from 1 to 720')
-    expect(problems(access(10_000))).toContain('access.sessionHours must be a number of hours from 1 to 720')
-    expect(problems(access('12'))).toContain('access.sessionHours must be a number of hours from 1 to 720')
-    expect(problems(access(24))).toEqual([])
+    expect(save(access(0))).toContain('access.sessionHours must be a number from 1 to 720')
+    expect(save(access(10_000))).toContain('access.sessionHours must be a number from 1 to 720')
+    expect(save(access('12'))).toContain('access.sessionHours must be a number from 1 to 720')
+    expect(save(access(24))).toEqual([])
+  })
+
+  it('clamps out-of-range values in a stored configuration instead of failing to load it', () => {
+    const loaded = normalizeConfig(testConfig({ limits: { maxChecksPerTick: 0, tickBudgetMs: 10_000_000 }, access: { provider: { type: 'basic' }, sessionHours: 0.5 } }))
+    expect(loaded.limits.maxChecksPerTick).toBe(1)
+    expect(loaded.limits.tickBudgetMs).toBe(300_000)
+    expect(loaded.access!.sessionHours).toBe(1)
+    expect(normalizeConfig(testConfig({ limits: { tickBudgetMs: 'fast' as never } })).limits.tickBudgetMs).toBe(20_000)
   })
 
   it('reports non-string entries in notify, emails and teams lists instead of throwing', () => {
@@ -317,8 +326,15 @@ describe('hardening: numeric settings and list validation', () => {
     const teams = testConfig({ access: { provider: { type: 'basic' }, teams: { ops: { emails: 'ops@example.test' as never } }, admins: { teams: [null as never] } } })
     expect(problems(teams)).toEqual(expect.arrayContaining(['access.teams.ops.emails: must be a list of strings', 'access.admins.teams: every entry must be a string']))
 
-    const page = testConfig({ access: { provider: { type: 'basic' } }, pages: [{ slug: 'ops', title: 'Ops', monitors: ['*'], access: { teams: [7 as never] } }] })
-    expect(problems(page)).toContain('page "ops": access.teams: every entry must be a string')
+    const page = testConfig({ access: { provider: { type: 'basic' } }, pages: [{ slug: 'ops', title: 'Ops', monitors: ['*'], access: { emails: ['a@example.test'], teams: [7 as never] } }] })
+    expect(problems(page, true)).toContain('page "ops": access.teams: every entry must be a string')
+
+    // Shapes an older release accepted (SSO groups, page teams) are checked when saving; a stored
+    // configuration still loads, with the bad entries dropped.
+    const groups = testConfig({ access: { provider: { type: 'oidc', issuer: 'https://id.example.test', clientId: 'c', clientSecret: 's' }, admins: { emails: ['a@example.test'], groups: [5 as never] } } })
+    expect(problems(groups, true)).toContain('access.admins.groups: every entry must be a string')
+    expect(problems(groups)).toEqual([])
+    expect(problems(page)).toEqual([])
 
     const proto = testConfig()
     proto.groups[0]!.monitors[0] = { ...proto.groups[0]!.monitors[0]!, notify: ['toString'] }

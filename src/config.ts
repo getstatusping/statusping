@@ -659,26 +659,30 @@ export interface NormalizeOptions {
 /**
  * A list of strings from user input. Anything else (not a list, or a list holding numbers,
  * objects or null) becomes a validation problem rather than a TypeError further on; the strings
- * that are there are kept so the remaining checks can still report on them.
+ * that are there are kept so the remaining checks can still report on them. With `report` false
+ * (loading a stored configuration, for lists an older release accepted) bad entries are dropped.
  */
-function stringList(value: unknown, where: string, problems: string[]): string[] {
+function stringList(value: unknown, where: string, problems: string[], report = true): string[] {
   if (value === undefined || value === null) return []
   if (!Array.isArray(value)) {
-    problems.push(`${where}: must be a list of strings`)
+    if (report) problems.push(`${where}: must be a list of strings`)
     return []
   }
-  if (value.some((item) => typeof item !== 'string')) problems.push(`${where}: every entry must be a string`)
+  if (report && value.some((item) => typeof item !== 'string')) problems.push(`${where}: every entry must be a string`)
   return value.filter((item): item is string => typeof item === 'string')
 }
 
-/** A whole number within [min, max], or a problem naming the range. */
-function boundedInteger(value: unknown, fallback: number, where: string, min: number, max: number, problems: string[]): number {
+/**
+ * A number within [min, max]. Saving refuses anything else with a problem naming the range. A
+ * stored configuration is only loaded, so an out-of-range value saved by an older release is
+ * clamped (or a non-number replaced by the default) instead of making the whole site fail to load.
+ */
+function boundedNumber(value: unknown, fallback: number, where: string, [min, max]: readonly [number, number], problems: string[], save: boolean, integer = true): number {
   if (value === undefined) return fallback
-  if (typeof value !== 'number' || !Number.isInteger(value) || value < min || value > max) {
-    problems.push(`${where} must be a whole number from ${min} to ${max}`)
-    return fallback
-  }
-  return value
+  const valid = typeof value === 'number' && Number.isFinite(value) && (!integer || Number.isInteger(value))
+  if (valid && value >= min && value <= max) return value
+  if (save) problems.push(`${where} must be ${integer ? 'a whole number' : 'a number'} from ${min} to ${max}`)
+  return valid ? Math.min(max, Math.max(min, value)) : fallback
 }
 
 /** Bounds for the tick's work limits: at least one check (Workers allow 1000 subrequests), and a budget from 1 s to 5 min. */
@@ -1051,14 +1055,14 @@ export function normalizeConfig(config: StatusPingConfig, options: NormalizeOpti
     problems.push('limits.pingPerIpPerMinute must be a whole number from 1 to 10000')
   }
   const limits = {
-    maxChecksPerTick: boundedInteger(config.limits?.maxChecksPerTick, 35, 'limits.maxChecksPerTick', ...LIMIT_BOUNDS.maxChecksPerTick, problems),
-    tickBudgetMs: boundedInteger(config.limits?.tickBudgetMs, 20_000, 'limits.tickBudgetMs', ...LIMIT_BOUNDS.tickBudgetMs, problems),
+    maxChecksPerTick: boundedNumber(config.limits?.maxChecksPerTick, 35, 'limits.maxChecksPerTick', LIMIT_BOUNDS.maxChecksPerTick, problems, options.save === true),
+    tickBudgetMs: boundedNumber(config.limits?.tickBudgetMs, 20_000, 'limits.tickBudgetMs', LIMIT_BOUNDS.tickBudgetMs, problems, options.save === true),
     maxConfirmationsPerTick: config.limits?.maxConfirmationsPerTick ?? 6,
     pingPerIpPerMinute,
   }
 
-  const access = normalizeAccess(config.access, problems)
-  const pages = normalizePages(config, monitors, access, problems)
+  const access = normalizeAccess(config.access, problems, options.save === true)
+  const pages = normalizePages(config, monitors, access, problems, options.save === true)
   const maintenance = normalizeMaintenance(config.maintenance, monitors, timezone, problems, options.save === true)
   const home = config.home ?? pages.find((p) => p.access === 'public')?.slug ?? null
   if (config.home && !pages.some((p) => p.slug === config.home)) problems.push(`home: unknown page "${config.home}"`)
@@ -1225,6 +1229,7 @@ function normalizePages(
   monitors: Monitor[],
   access: NormalizedAccess | null,
   problems: string[],
+  save = false,
 ): NormalizedPage[] {
   const inputs: PageInput[] = config.pages === undefined ? [
     { slug: 'status', title: config.title, description: config.description, access: 'public', monitors: ['*'] },
@@ -1259,8 +1264,8 @@ function normalizePages(
     if (p.access && p.access !== 'public') {
       if (!access) problems.push(`${where}: restricted access requires an \`access.provider\` config`)
       const sso = access?.provider.type === 'oidc'
-      const match = normalizeMatch(p.access, `${where}: access`, sso, problems)
-      const teams = stringList(p.access.teams, `${where}: access.teams`, problems)
+      const match = normalizeMatch(p.access, `${where}: access`, sso, problems, save)
+      const teams = stringList(p.access.teams, `${where}: access.teams`, problems, save)
       for (const t of teams) if (access && !Object.prototype.hasOwnProperty.call(access.teams, t)) problems.push(`${where}: unknown team "${t}"`)
       if (!match.emails.length && !match.groups.length && !teams.length) {
         problems.push(`${where}: access must list emails${sso ? ', groups' : ''} or teams (or be 'public')`)
@@ -1280,21 +1285,25 @@ function normalizePages(
 
 const EMAIL_PATTERN_RE = /^(\*|[^@\s*]+)@[^@\s*]+\.[^@\s*]+$/
 
-function normalizeMatch(input: MatchInput | undefined, where: string, sso: boolean, problems: string[]): NormalizedMatch {
-  if (input !== undefined && (input === null || typeof input !== 'object' || Array.isArray(input))) problems.push(`${where}: must be an object`)
+/**
+ * Emails must be strings (anything else always failed). The shape of the match and its groups are
+ * checked strictly on save only, since an older release stored them without these checks.
+ */
+function normalizeMatch(input: MatchInput | undefined, where: string, sso: boolean, problems: string[], save = false): NormalizedMatch {
+  if (save && input !== undefined && (input === null || typeof input !== 'object' || Array.isArray(input))) problems.push(`${where}: must be an object`)
   const record = input && typeof input === 'object' ? input : undefined
   const emails = stringList(record?.emails, `${where}.emails`, problems).map((e) => e.trim().toLowerCase())
   for (const e of emails) {
     if (!EMAIL_PATTERN_RE.test(e)) problems.push(`${where}: "${e}" is not an email or *@domain pattern`)
   }
-  const groups = stringList(record?.groups, `${where}.groups`, problems)
+  const groups = stringList(record?.groups, `${where}.groups`, problems, save)
   if (groups.length && !sso) {
     problems.push(`${where}: groups are only available with SSO (provider "oidc"); use emails for basic / cloudflare-access`)
   }
   return { emails, groups }
 }
 
-function normalizeAccess(input: AccessInput | undefined, problems: string[]): NormalizedAccess | null {
+function normalizeAccess(input: AccessInput | undefined, problems: string[], save = false): NormalizedAccess | null {
   if (!input) return null
   if (typeof input !== 'object' || !input.provider || typeof input.provider !== 'object') {
     problems.push('access: must contain a provider object')
@@ -1318,13 +1327,15 @@ function normalizeAccess(input: AccessInput | undefined, problems: string[]): No
     problems.push(`access.provider: unknown type "${(p as { type: string }).type}"`)
   }
   const teams: Record<string, NormalizedMatch> = {}
-  const teamInput = input.teams === undefined ? {} : input.teams && typeof input.teams === 'object' && !Array.isArray(input.teams) ? input.teams : (problems.push('access.teams: must be an object of named member lists'), {})
-  for (const [name, t] of Object.entries(teamInput)) {
-    teams[name] = normalizeMatch(t, `access.teams.${name}`, sso, problems)
+  const validTeams = input.teams && typeof input.teams === 'object' && !Array.isArray(input.teams)
+  if (save && input.teams !== undefined && !validTeams) problems.push('access.teams: must be an object of named member lists')
+  for (const [name, t] of Object.entries(validTeams ? input.teams! : {})) {
+    teams[name] = normalizeMatch(t, `access.teams.${name}`, sso, problems, save)
   }
   let admins: NormalizedAccess['admins'] = null
   if (input.admins !== undefined) {
-    const match = normalizeMatch(input.admins, 'access.admins', sso, problems)
+    const match = normalizeMatch(input.admins, 'access.admins', sso, problems, save)
+    // Non-string admin teams always failed (as unknown teams), so they are reported on load too.
     const adminTeams = stringList(input.admins?.teams, 'access.admins.teams', problems)
     for (const team of adminTeams) if (!Object.prototype.hasOwnProperty.call(teams, team)) problems.push(`access.admins: unknown team "${team}"`)
     if (!match.emails.length && !match.groups.length && !adminTeams.length) {
@@ -1332,11 +1343,8 @@ function normalizeAccess(input: AccessInput | undefined, problems: string[]): No
     }
     admins = { ...match, teams: adminTeams }
   }
-  const sessionHours = input.sessionHours ?? 12
-  if (typeof sessionHours !== 'number' || !Number.isFinite(sessionHours) || sessionHours < SESSION_HOURS_BOUNDS[0] || sessionHours > SESSION_HOURS_BOUNDS[1]) {
-    problems.push(`access.sessionHours must be a number of hours from ${SESSION_HOURS_BOUNDS[0]} to ${SESSION_HOURS_BOUNDS[1]}`)
-  }
-  return { provider: p, teams, sessionHours: typeof sessionHours === 'number' && sessionHours >= SESSION_HOURS_BOUNDS[0] && sessionHours <= SESSION_HOURS_BOUNDS[1] ? sessionHours : 12, admins }
+  const sessionHours = boundedNumber(input.sessionHours, 12, 'access.sessionHours', SESSION_HOURS_BOUNDS, problems, save, false)
+  return { provider: p, teams, sessionHours, admins }
 }
 
 export function isEnvRef(value: unknown): value is EnvRef {
