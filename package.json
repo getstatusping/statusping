@@ -1,6 +1,6 @@
 {
   "name": "@statusping/app",
-  "version": "0.3.7",
+  "version": "0.3.8",
   "statusping": {
     "minimumUpgradeVersion": "0.1.0",
     "breaking": true
