@@ -133,7 +133,8 @@ export function createApp(deps: Deps): Hono {
       if (!configSettled) {
         // Nothing has loaded in this isolate, so deps.config is only the unconfigured placeholder,
         // with no access rules: serving pages from it could show a restricted site to anyone.
-        // Fail closed, except for the health check and the recovery routes.
+        // Fail closed, except for the health check, reset, and /setup/recover (which explains that it
+        // cannot help until the sign-in settings load).
         configUnavailable = true
         if (!CONFIG_INDEPENDENT_PATHS.includes(c.req.path)) {
           return c.text('This StatusPing site cannot load its configuration right now. Try again shortly.', 503, { 'cache-control': 'no-store', 'x-robots-tag': 'noindex', 'retry-after': '30' })

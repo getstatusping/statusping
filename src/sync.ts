@@ -28,7 +28,9 @@ export async function syncConfig(deps: Deps, now: number): Promise<boolean> {
     if (m.kind === 'push' && token) tokenHashes[m.id] = await sha256Hex(token)
   }
   const active = new Set(activeMonitors(config, role).map((m) => m.id))
-  const hash = await sha256Hex(JSON.stringify({ v: 1, role, monitors: config.monitors, tokenHashes }))
+  // The fallback flag is part of the hash: leaving a fallback with the same monitors must still run
+  // the pass below that clears tokens a fallback kept for monitors it paused.
+  const hash = await sha256Hex(JSON.stringify({ v: 1, role, monitors: config.monitors, tokenHashes, fallback: Boolean(deps.configFallback) }))
 
   const current = await db.first<{ value: string }>(`SELECT value FROM meta WHERE key = 'config_hash'`)
   if (current?.value === hash) return false

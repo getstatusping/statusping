@@ -85,7 +85,8 @@ async function readSetupSession(c: Context, state: SetupState): Promise<{ exp: n
     .filter((part) => part.startsWith(`${SETUP_COOKIE}=`)).map((part) => decodeURIComponent(part.slice(SETUP_COOKIE.length + 1)))
   for (const value of values) {
     const s = await unsign<{ exp: number; csrf: string }>(value, state.sessionKey, nowSeconds())
-    if (s) return s
+    // Only a setup session has a CSRF token; other values signed with this key (sign-in cookies) do not.
+    if (s && typeof s.csrf === 'string' && s.csrf) return s
   }
   return null
 }

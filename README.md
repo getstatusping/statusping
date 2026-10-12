@@ -111,8 +111,10 @@ listed for you to apply; they are never overwritten.
   If none loads that way, only the sign-in settings are used and no checks run until you fix or
   import a configuration. Either way `/healthz` answers `ok: false` with `config: "fallback"` or
   `"sign-in-only"`, the tick summary lists `config` in `failedPhases`, and Settings, sign-in,
-  `/setup/recover` and `/setup/reset` stay available. If the database cannot be read at all
-  before a configuration has loaded, pages answer 503 rather than serving an unconfigured site.
+  `/setup/recover` and `/setup/reset` stay available. If even the sign-in settings cannot be
+  loaded, nobody can sign in and `/setup/recover` cannot check who is an administrator: use
+  `/setup/reset`. If the database cannot be read at all before a
+  configuration has loaded, pages answer 503 rather than serving an unconfigured site.
 - **`npm run upgrade` refuses to run:** it names the reason, such as local
   changes, an edited updater-owned file, or a release that requires an
   intermediate version first. Nothing is written until every check passes.

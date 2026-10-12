@@ -47,6 +47,8 @@ const deps = createDeps({
   clientIp: env('STATUSPING_TRUST_PROXY') === 'true'
     ? (request) => forwardedClientIp(request.headers.get('x-forwarded-for'))
     : undefined,
+  // Likewise the Host header: rescue mode may fall back to the request origin as the site address.
+  trustRequestOrigin: env('STATUSPING_TRUST_PROXY') === 'true',
 })
 
 const server = await startNodeServer(deps, { port: Number(env('PORT') ?? 8000) })

@@ -7,8 +7,11 @@ import {
   normalizeConfig,
   parseJsonConfig,
   parsePingTokens,
+  isEnvRef,
   resolveConfigEnv,
 } from './config.ts'
+import { isValidTimeZone } from './util/time.ts'
+import { canonicalJson } from './updates.ts'
 import type { Db } from './db/types.ts'
 import type { CertificateExpiryProvider } from './expiry/types.ts'
 import type { TcpConnector } from './evaluate/tcp.ts'
@@ -65,6 +68,13 @@ export interface Deps {
   waitUntil?: (p: Promise<unknown>) => void
   /** Adapter-owned resolver. Core never trusts forwarding headers itself. */
   clientIp: (request: Request) => string | null
+  /**
+   * Whether the Host of an incoming request can be trusted as this site's address. True on Workers
+   * (Cloudflare only routes the site's own hostnames to it); on Node only behind a trusted reverse
+   * proxy (STATUSPING_TRUST_PROXY=true), since a direct listener accepts any Host header. Rescue
+   * mode uses the request origin as the site address only as a last resort, and only when true.
+   */
+  trustRequestOrigin: boolean
   /** Hosted tenant plan policy from STATUSPING_TENANT (plan 005); undefined when self-hosted. */
   tenant?: TenantPolicy
   /** The newest saved configuration revision (0 before the first). */
@@ -120,6 +130,8 @@ export interface CreateDepsOptions {
   cloudflareEmail?: CloudflareEmailSender
   smtpConnect?: SmtpConnector
   clientIp?: (request: Request) => string | null
+  /** See Deps.trustRequestOrigin; default true. */
+  trustRequestOrigin?: boolean
 }
 
 export const consoleLogger: Logger = (level, message, data) => {
@@ -168,6 +180,7 @@ export function createDeps(opts: CreateDepsOptions): Deps {
     cloudflareEmail: opts.cloudflareEmail,
     smtpConnect: opts.smtpConnect,
     clientIp: opts.clientIp ?? (() => null),
+    trustRequestOrigin: opts.trustRequestOrigin ?? true,
     log: opts.log ?? consoleLogger,
     tenant,
     configRevision: 0,
@@ -325,31 +338,78 @@ function useConfig(deps: Deps, validated: AdminConfigValidation): void {
 const record = (value: unknown): Record<string, unknown> | null =>
   value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null
 
-/** The monitor ids a configuration defines; entries that cannot be read are skipped. */
-function definedMonitorIds(config: Record<string, unknown>): Set<string> {
-  const ids = new Set<string>()
+const httpUrl = (value: unknown): value is string => {
+  if (typeof value !== 'string') return false
+  try { return ['http:', 'https:'].includes(new URL(value).protocol) } catch { return false }
+}
+
+/** The stored title when rescue mode would use it: a non-empty string. */
+const storedTitle = (stored: Record<string, unknown> | null) =>
+  typeof stored?.title === 'string' && stored.title.trim() ? stored.title : undefined
+
+/** The origin of the stored base URL, when it is an http(s) URL. */
+function storedOrigin(stored: Record<string, unknown> | null): string | undefined {
+  return httpUrl(stored?.baseUrl) ? new URL(stored.baseUrl).origin : undefined
+}
+
+/** The stored monitors by id; entries that cannot be read are skipped. */
+function storedMonitors(config: Record<string, unknown>): Map<string, Record<string, unknown>> {
+  const monitors = new Map<string, Record<string, unknown>>()
   for (const group of Array.isArray(config.groups) ? config.groups : []) {
-    const monitors = record(group)?.monitors
-    for (const monitor of Array.isArray(monitors) ? monitors : []) {
-      const id = record(monitor)?.id
-      if (typeof id === 'string') ids.add(id)
+    const list = record(group)?.monitors
+    for (const value of Array.isArray(list) ? list : []) {
+      const monitor = record(value)
+      if (monitor && typeof monitor.id === 'string' && !monitors.has(monitor.id)) monitors.set(monitor.id, monitor)
     }
   }
-  return ids
+  return monitors
+}
+
+const headerValue = (value: unknown) => typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean' || isEnvRef(value)
+
+/**
+ * A monitor from the older version, connecting where the stored monitor of the same id does (url,
+ * headers, host, port) whenever the stored value is well-formed: the older version may point at a
+ * host, or send credentials, that the site no longer uses.
+ */
+function withStoredTarget(monitor: Record<string, unknown>, stored: Record<string, unknown>): Record<string, unknown> {
+  const next = { ...monitor }
+  if (typeof stored.url === 'string' ? httpUrl(stored.url) : isEnvRef(stored.url)) next.url = stored.url
+  if (stored.headers === undefined) delete next.headers
+  else {
+    const headers = record(stored.headers)
+    if (headers && Object.values(headers).every(headerValue)) next.headers = headers
+  }
+  if (typeof stored.host === 'string' && stored.host.trim()) next.host = stored.host
+  if (typeof stored.port === 'number' && Number.isInteger(stored.port) && stored.port >= 1 && stored.port <= 65535) next.port = stored.port
+  return next
 }
 
 /**
  * An earlier saved version, made safe to run in place of a stored configuration that does not
- * load. It fails closed: who may sign in and see what (`access`, the pages with their access
- * rules, and `home`) comes from the stored configuration, never from the older version, the same
- * way a restore keeps today's sign-in method. And nothing deleted since comes back: only monitors
- * and alert channels the stored configuration still defines are kept (the others stay paused).
+ * load. It fails closed:
+ * - Who may sign in and see what (`access`, the pages with their access rules, and `home`) comes
+ *   from the stored configuration, never from the older version, the same way a restore keeps
+ *   today's sign-in method.
+ * - So do `title`, `baseUrl` and `timezone` whenever the stored value is valid (the rule rescue
+ *   mode uses). `baseUrl` decides the sign-in redirect, secure cookies, which origins count as this
+ *   site, and the host in ping and acknowledgement links.
+ * - Nothing deleted or changed since comes back: only monitors the stored configuration still
+ *   defines, with the same kind, are kept, and they connect where the stored one does; an alert
+ *   channel is kept only when it is exactly the stored one. Pages show no monitor targets.
  * The result is validated like any configuration; if it does not load, rescue mode applies.
  */
 export function fallbackFromRevision(revision: AdminConfig, stored: Record<string, unknown>): AdminConfig {
-  const keep = definedMonitorIds(stored)
+  const current = storedMonitors(stored)
   const groups = (revision.groups ?? [])
-    .map((group) => ({ ...group, monitors: (group.monitors ?? []).filter((monitor) => keep.has(monitor.id)) }))
+    .map((group) => ({
+      ...group,
+      monitors: (group.monitors ?? []).flatMap((monitor) => {
+        const now = current.get(monitor.id)
+        if (!now || now.kind !== monitor.kind) return []
+        return [withStoredTarget(monitor as unknown as Record<string, unknown>, now) as unknown as typeof monitor]
+      }),
+    }))
     .filter((group) => group.monitors.length > 0)
   const ids = new Set(groups.flatMap((group) => group.monitors.map((monitor) => monitor.id)))
   const groupNames = new Set(groups.map((group) => group.name))
@@ -357,21 +417,31 @@ export function fallbackFromRevision(revision: AdminConfig, stored: Record<strin
     && (selector === '*' || (selector.startsWith('group:') ? groupNames.has(selector.slice(6)) : ids.has(selector)))
 
   const next: Record<string, unknown> = { ...revision, admin: true, groups }
+  const title = storedTitle(stored)
+  if (title !== undefined) next.title = title
+  if (httpUrl(stored.baseUrl)) next.baseUrl = stored.baseUrl
+  if (stored.timezone === undefined) delete next.timezone
+  else if (typeof stored.timezone === 'string' && isValidTimeZone(stored.timezone)) next.timezone = stored.timezone
   for (const key of ['access', 'pages', 'home'] as const) delete next[key]
   if (stored.access !== undefined) next.access = stored.access
   if (stored.home !== undefined) next.home = stored.home
   if (stored.pages !== undefined) {
-    // The stored pages, listing only the monitors this version has.
+    // The stored pages, listing only the monitors this version has, and never their targets.
     next.pages = Array.isArray(stored.pages)
       ? stored.pages.map((page) => {
           const p = record(page)
-          return p && Array.isArray(p.monitors) ? { ...p, monitors: p.monitors.filter(known) } : page
+          if (!p) return page
+          const out: Record<string, unknown> = { ...p }
+          if (Array.isArray(p.monitors)) out.monitors = p.monitors.filter(known)
+          if (Array.isArray(p.show)) out.show = p.show.filter((item) => item !== 'target')
+          return out
         })
       : stored.pages
   }
   const storedSinks = record(stored.sinks)
   if (revision.sinks) {
-    next.sinks = Object.fromEntries(Object.entries(revision.sinks).filter(([name]) => storedSinks !== null && Object.hasOwn(storedSinks, name)))
+    next.sinks = Object.fromEntries(Object.entries(revision.sinks).filter(([name, sink]) =>
+      storedSinks !== null && Object.hasOwn(storedSinks, name) && canonicalJson(storedSinks[name]) === canonicalJson(sink)))
   }
   if (Array.isArray(revision.maintenance)) {
     next.maintenance = revision.maintenance
@@ -385,11 +455,6 @@ export function fallbackFromRevision(revision: AdminConfig, stored: Record<strin
     next.peer = peer
   }
   return next as unknown as AdminConfig
-}
-
-const httpUrl = (value: unknown): value is string => {
-  if (typeof value !== 'string') return false
-  try { return ['http:', 'https:'].includes(new URL(value).protocol) } catch { return false }
 }
 
 /**
@@ -418,7 +483,10 @@ async function loadFallback(deps: Deps, stored: AdminConfig | undefined, problem
   }
   deps.configFallback = { problem, revision: null }
   deps.log('error', 'The stored configuration could not be loaded and no earlier version loads with its access rules. Only sign-in settings are in use and no checks run until it is fixed in Settings → Configuration (or the site is reset).', { problem })
-  const safeBaseUrl = httpUrl(current?.baseUrl) ? current.baseUrl : httpUrl(origin) ? origin : UNCONFIGURED.baseUrl
+  // The stored address's origin whenever it parses (a bad path or trailing junk must not throw it
+  // away); the address the site was opened at only as a last resort, and only where the Host
+  // header is trustworthy (see Deps.trustRequestOrigin).
+  const safeBaseUrl = storedOrigin(current) ?? (deps.trustRequestOrigin && httpUrl(origin) ? new URL(origin).origin : UNCONFIGURED.baseUrl)
   const attempts: Record<string, unknown>[] = current
     ? [
         { title: current.title, baseUrl: current.baseUrl, timezone: current.timezone, access: current.access, groups: [], admin: true },
@@ -435,7 +503,10 @@ async function loadFallback(deps: Deps, stored: AdminConfig | undefined, problem
       lastProblem = (error as Error).message
     }
   }
-  deps.log('error', 'The sign-in settings could not be loaded either. Reset the site at /setup/reset, or recover sign-in at /setup/recover.', { problem: lastProblem })
+  // /setup/recover cannot help here: it checks the email against the administrators of the loaded
+  // sign-in settings, and there are none. Reading them from the stored row instead would let a
+  // recovery session change the sign-in method on top of a configuration that does not load.
+  deps.log('error', 'The sign-in settings could not be loaded either, so nobody can sign in and /setup/recover cannot be used. Reset the site at /setup/reset, or repair the stored configuration in the database.', { problem: lastProblem })
   // Fail closed: no sign-in method, no monitors, nothing from an earlier configuration.
   useConfig(deps, validateAdminConfig({ title: UNCONFIGURED.title, baseUrl: safeBaseUrl, groups: [], admin: true }, deps.getEnv, 'load'))
 }

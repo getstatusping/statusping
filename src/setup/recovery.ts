@@ -54,6 +54,9 @@ export function mountRecoveryRoutes(app: Hono, deps: Deps): void {
     const token = typeof form.token === 'string' ? form.token.trim() : ''
     const email = typeof form.email === 'string' ? form.email.trim().toLowerCase() : ''
     if (!timingSafeEqual(token, deps.getEnv('STATUSPING_RECOVERY_TOKEN') ?? '')) return c.html(recoverPage({ email, error: 'That recovery token is not correct.' }), 401, headers)
+    // Rescue mode without sign-in settings, or a configuration that has not loaded: there is no
+    // list of administrators to check the email against, so recovery cannot be offered.
+    if (!deps.config.access) return c.html(recoverPage({ email, error: 'This site’s sign-in settings cannot be loaded, so recovery cannot check who is an administrator. Reset the site at /setup/reset, or repair the stored configuration.' }), 503, headers)
     if (!canAcknowledge(viewerFor(deps, email), deps.config.access)) return c.html(recoverPage({ email, error: 'That email is not an administrator of this site.' }), 400, headers)
     const now = nowSeconds()
     await deps.db.run(`INSERT INTO audit_log (actor, action, target, before_json, after_json, at) VALUES (?, 'instance.recover', 'access', NULL, NULL, ?)`, [email, now])

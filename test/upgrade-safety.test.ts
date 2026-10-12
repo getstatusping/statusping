@@ -154,7 +154,8 @@ describe('a stored configuration that cannot load never takes the site down', ()
     expect((await app.request('https://status.example.test/')).status).toBe(200)
     expect(deps.configFallback).toMatchObject({ revision: 2 })
     expect(deps.configFallback!.problem).toContain('ADMIN_TOKEN is a server secret')
-    expect(deps.config.title).toBe('Version two')
+    // Site settings that are valid in the stored row come from it, not from the older version.
+    expect(deps.config.title).toBe('Version three')
     expect(logs.some((l) => l.level === 'error' && /Using saved version 2/.test(l.message))).toBe(true)
 
     // Checks run, but the tick and /healthz say the configuration needs fixing.
@@ -250,7 +251,7 @@ describe('a stored configuration that cannot load never takes the site down', ()
 
     const home = await app.request('https://status.example.test/')
     expect(deps.configFallback).toMatchObject({ revision: 1 })
-    expect(deps.config.title).toBe('Older')
+    expect(deps.config.title).toBe('Today')
     // The home page stays restricted: the older version's public page does not apply.
     expect(home.status).toBe(302)
     expect(home.headers.get('location')).toContain('/auth/login')

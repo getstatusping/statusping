@@ -51,13 +51,21 @@ function fetchJwks(url: string, fetchFn: typeof fetch): Promise<JwksEntry> {
   // A failed fetch still counts against the refresh interval.
   if (previous) previous.fetchedAt = Date.now()
   const run = (async () => {
-    const res = await fetchFn(url, { headers: { accept: 'application/json' } })
-    if (!res.ok) throw new JwtError(`JWKS fetch failed: HTTP ${res.status}`)
-    const body = (await readCappedJson(res, OIDC_MAX_RESPONSE_BYTES)) as { keys?: Jwk[] }
-    const now = Date.now()
-    const entry: JwksEntry = { keys: Array.isArray(body.keys) ? body.keys : [], expires: now + JWKS_TTL_MS, fetchedAt: now }
-    jwksCache.set(url, entry)
-    return entry
+    try {
+      const res = await fetchFn(url, { headers: { accept: 'application/json' } })
+      if (!res.ok) throw new JwtError(`JWKS fetch failed: HTTP ${res.status}`)
+      const body = (await readCappedJson(res, OIDC_MAX_RESPONSE_BYTES)) as { keys?: Jwk[] }
+      const now = Date.now()
+      const entry: JwksEntry = { keys: Array.isArray(body.keys) ? body.keys : [], expires: now + JWKS_TTL_MS, fetchedAt: now }
+      jwksCache.set(url, entry)
+      return entry
+    } catch (err) {
+      // With nothing cached, remember the failure as an empty, already-expired set: until the
+      // refresh interval passes, tokens are refused without another fetch (a cold isolate during
+      // an outage would otherwise fetch once per forged token).
+      if (!jwksCache.has(url)) jwksCache.set(url, { keys: [], expires: 0, fetchedAt: Date.now() })
+      throw err
+    }
   })()
   jwksInFlight.set(url, run)
   return run.finally(() => jwksInFlight.delete(url))

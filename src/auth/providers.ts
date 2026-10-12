@@ -270,26 +270,68 @@ async function cookieSecret(deps: Deps): Promise<string | null> {
 
 const secureCookies = (deps: Deps) => deps.config.baseUrl.startsWith('https://')
 
+/**
+ * Both cookies are signed with the same secret, so each says what it is: `kind` is checked on
+ * read, and a payload is used only if it has the shape its purpose needs. Without this the
+ * short-lived OIDC login cookie (`sp_oidc`, issued to anyone who opens /auth/login) verified as a
+ * session cookie. Sessions issued before `kind` existed carry no kind; they still load when they
+ * have a session's shape (every release has written email, groups and provider), and a login
+ * cookie never does (it has no email).
+ */
 interface SessionPayload {
+  kind: 'session'
   exp: number
   email: string
   groups: string[]
   provider: Viewer['provider']
 }
 
+interface LoginPayload {
+  kind: 'login'
+  exp: number
+  state: string
+  nonce: string
+  verifier: string
+  next: string
+}
+
+const VIEWER_PROVIDERS: ReadonlySet<string> = new Set<Viewer['provider']>(['basic', 'cloudflare-access', 'oidc'])
+
+/** A session cookie payload, or null when it is another kind of signed value or malformed. */
+export function sessionFromPayload(s: unknown): Viewer | null {
+  if (!s || typeof s !== 'object') return null
+  const p = s as Record<string, unknown>
+  if (p.kind !== undefined && p.kind !== 'session') return null
+  if (typeof p.email !== 'string' || !p.email) return null
+  if (!Array.isArray(p.groups) || !p.groups.every((g) => typeof g === 'string')) return null
+  if (typeof p.provider !== 'string' || !VIEWER_PROVIDERS.has(p.provider)) return null
+  return { email: p.email, groups: [...p.groups] as string[], provider: p.provider as Viewer['provider'] }
+}
+
+/** An OIDC login cookie payload, or null (a session cookie or anything else never qualifies). */
+function loginFromPayload(s: unknown): LoginPayload | null {
+  if (!s || typeof s !== 'object') return null
+  const p = s as Record<string, unknown>
+  // In-flight logins started before the upgrade carry no kind; they expire within ten minutes.
+  if (p.kind !== undefined && p.kind !== 'login') return null
+  if (p.email !== undefined) return null
+  for (const k of ['state', 'nonce', 'verifier', 'next'] as const) if (typeof p[k] !== 'string') return null
+  return { ...(p as unknown as LoginPayload), kind: 'login' }
+}
+
 async function sessionViewer(c: Context, deps: Deps, provider: Viewer['provider']): Promise<Viewer | null> {
   const secret = await cookieSecret(deps)
   if (!secret) return null
-  const s = await unsign<SessionPayload>(getCookie(c, SESSION_COOKIE), secret, nowSeconds())
-  if (!s || (s.provider ?? 'oidc') !== provider) return null
-  return { email: s.email, groups: s.groups, provider }
+  const viewer = sessionFromPayload(await unsign<{ exp: number }>(getCookie(c, SESSION_COOKIE), secret, nowSeconds()))
+  if (!viewer || viewer.provider !== provider) return null
+  return viewer
 }
 
 export async function setSession(c: Context, deps: Deps, viewer: Viewer): Promise<void> {
   const secret = await cookieSecret(deps)
   if (!secret) return
   const hours = deps.config.access?.sessionHours ?? 12
-  const payload: SessionPayload = { email: viewer.email, groups: viewer.groups, provider: viewer.provider, exp: nowSeconds() + hours * 3600 }
+  const payload: SessionPayload = { kind: 'session', email: viewer.email, groups: viewer.groups, provider: viewer.provider, exp: nowSeconds() + hours * 3600 }
   setCookie(c, SESSION_COOKIE, await sign({ ...payload }, secret), {
     httpOnly: true,
     secure: secureCookies(deps),
@@ -315,7 +357,7 @@ function oidcHandlers(deps: Deps, p: Oidc) {
     const verifier = randomToken(64)
     const challenge = b64urlEncode(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier))))
     const next = safeNext(c.req.query('next'))
-    setCookie(c, LOGIN_COOKIE, await sign({ state, nonce, verifier, next, exp: nowSeconds() + 600 }, await sessionSecret(deps)), {
+    setCookie(c, LOGIN_COOKIE, await sign({ kind: 'login', state, nonce, verifier, next, exp: nowSeconds() + 600 } satisfies LoginPayload, await sessionSecret(deps)), {
       httpOnly: true,
       secure: secureCookies(deps),
       sameSite: 'Lax',
@@ -339,11 +381,7 @@ function oidcHandlers(deps: Deps, p: Oidc) {
   const callback = async (c: Context) => {
     const secret = await sessionSecret(deps)
     const now = nowSeconds()
-    const login = await unsign<{ exp: number; state: string; nonce: string; verifier: string; next: string }>(
-      getCookie(c, LOGIN_COOKIE),
-      secret,
-      now,
-    )
+    const login = loginFromPayload(await unsign<{ exp: number }>(getCookie(c, LOGIN_COOKIE), secret, now))
     deleteCookie(c, LOGIN_COOKIE, { path: '/auth' })
     const code = c.req.query('code')
     if (!login || !code || !timingSafeEqual(c.req.query('state') ?? '', login.state)) {
