@@ -14,9 +14,9 @@ import type { CertificateExpiryProvider } from './expiry/types.ts'
 import type { TcpConnector } from './evaluate/tcp.ts'
 import type { ConfirmationProbe } from './confirmation.ts'
 import type { CloudflareEmailSender } from './notify/sinks.ts'
-import { currentRevision, ensureBaselineRevision, loadAdminConfig, seedAdminConfig } from './admin/service.ts'
+import { currentRevision, ensureBaselineRevision, KEEP_REVISIONS, loadAdminConfig, seedAdminConfig } from './admin/service.ts'
 import { beginSetup, loadSetupState } from './setup/state.ts'
-import { validateAdminConfig } from './admin/security.ts'
+import { type AdminConfig, type AdminConfigValidation, validateAdminConfig } from './admin/security.ts'
 import { normalizeClientIp } from './rate-limit.ts'
 import { type TenantPolicy, TENANT_ENV, clampToTenantPolicy, parseTenantPolicy } from './platform.ts'
 import { type HostResolver, type TargetGuard, blockPrivateTargets, privateTargetGuard } from './util/private-targets.ts'
@@ -72,10 +72,25 @@ export interface Deps {
   /** What the last refreshAdminConfig() saw; an unchanged stamp skips reloading and re-validating. */
   configStamp?: string
   configLoaded: boolean
+  /**
+   * Set while the stored configuration cannot be loaded. `revision` is the earlier saved version in
+   * use instead, or null when none loads either: then only the sign-in settings are in use and the
+   * tick runs no checks, so the owner can still sign in to Settings (or reset) and fix it.
+   */
+  configFallback?: ConfigFallback
+  /** What loading the configuration in use dropped or clamped (see NormalizeOptions.warnings). */
+  configWarnings: string[]
   /** A deployed site: configured only through its database. */
   fromDatabase: boolean
   /** Reads an old statusping.config.ts, if the repository still has one (migration source only). */
   legacyConfig?: () => Promise<StatusPingConfig | undefined>
+}
+
+export interface ConfigFallback {
+  /** Why the stored configuration was refused (validation problems; never secret values). */
+  problem: string
+  /** The earlier revision in use, or null when only the sign-in settings could be loaded. */
+  revision: number | null
 }
 
 /** What a site serves before setup or a migration has stored its configuration. */
@@ -157,6 +172,7 @@ export function createDeps(opts: CreateDepsOptions): Deps {
     tenant,
     configRevision: 0,
     configLoaded: false,
+    configWarnings: [],
   }
   return deps
 }
@@ -279,13 +295,53 @@ async function loadAdminState(deps: Deps, now: number): Promise<{ loaded: boolea
     stored = await loadAdminConfig(deps.db)
     wrote = true
   }
-  if (!stored) throw new Error('admin config seed was not stored')
-  if (deps.configRevision === 0) {
+  if (deps.configRevision === 0 && stored) {
     await ensureBaselineRevision(deps.db)
     wrote = true
   }
-  const validated = validateAdminConfig(stored.config, deps.getEnv, 'load')
+  let validated: AdminConfigValidation
+  try {
+    // A row that is not a JSON object loads as null (and the seed above cannot replace it).
+    if (!stored) throw new Error('The stored configuration is not a JSON object.')
+    validated = validateAdminConfig(stored.config, deps.getEnv, 'load')
+  } catch (error) {
+    // Never let a stored configuration take the whole site down (this runs in front of every
+    // request and at the top of every tick): fall back, and keep Settings and reset reachable.
+    await loadFallback(deps, stored?.config, (error as Error).message)
+    return { loaded: true, wrote }
+  }
+  useConfig(deps, validated)
+  deps.configFallback = undefined
+  return { loaded: true, wrote }
+}
+
+function useConfig(deps: Deps, validated: AdminConfigValidation): void {
   deps.config = validated.normalized
   deps.configInput = validated.config
-  return { loaded: true, wrote }
+  deps.configWarnings = validated.warnings
+  if (validated.warnings.length) deps.log('warn', 'The stored configuration loaded with settings left out or adjusted. Saving it in Settings shows what to fix.', { warnings: validated.warnings })
+}
+
+/**
+ * The stored configuration failed to load. Use the newest earlier revision that still loads; if
+ * none does, keep only the sign-in settings (title, address, access) so an administrator can sign in
+ * and fix or import a configuration, while the tick runs no checks (see tick()).
+ */
+async function loadFallback(deps: Deps, stored: AdminConfig | undefined, problem: string): Promise<void> {
+  const rows = await deps.db.all<{ id: number; config_json: string }>(`SELECT id, config_json FROM config_revisions ORDER BY id DESC LIMIT ?`, [KEEP_REVISIONS])
+  for (const row of rows) {
+    let validated: AdminConfigValidation
+    try { validated = validateAdminConfig(JSON.parse(row.config_json), deps.getEnv, 'load') } catch { continue }
+    useConfig(deps, validated)
+    deps.configFallback = { problem, revision: row.id }
+    deps.log('error', `The stored configuration could not be loaded. Using saved version ${row.id} until it is fixed in Settings → Configuration.`, { problem })
+    return
+  }
+  deps.configFallback = { problem, revision: null }
+  deps.log('error', 'The stored configuration could not be loaded and no earlier version loads either. Only sign-in settings are in use and no checks run until it is fixed in Settings → Configuration (or the site is reset).', { problem })
+  if (!stored) return
+  const rescue = { title: stored.title, baseUrl: stored.baseUrl, timezone: stored.timezone, access: stored.access, groups: [], admin: true }
+  try { useConfig(deps, validateAdminConfig(rescue, deps.getEnv, 'load')) } catch (error) {
+    deps.log('error', 'The sign-in settings could not be loaded either. Reset the site at /setup/reset, or recover sign-in at /setup/recover.', { problem: (error as Error).message })
+  }
 }

@@ -1,0 +1,45 @@
+{
+  "note": "tick limits and session length outside the ranges 0.3.12 introduced (refused on load by 0.3.12)",
+  "config": {
+    "title": "Example Status",
+    "baseUrl": "https://status.example.test",
+    "timezone": "UTC",
+    "admin": true,
+    "access": {
+      "provider": {
+        "type": "basic"
+      },
+      "admins": {
+        "emails": [
+          "owner@example.test"
+        ]
+      },
+      "sessionHours": 0.25
+    },
+    "limits": {
+      "maxChecksPerTick": 5000,
+      "tickBudgetMs": 900000
+    },
+    "groups": [
+      {
+        "name": "Web",
+        "monitors": [
+          {
+            "id": "site",
+            "kind": "http",
+            "name": "Site",
+            "url": "https://www.example.test/health",
+            "interval": "1m"
+          },
+          {
+            "id": "nightly",
+            "kind": "push",
+            "name": "Nightly job",
+            "schedule": "0 3 * * *",
+            "grace": "30m"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -179,10 +179,31 @@ export function mountAdminRoutes(app: Hono, deps: Deps): void {
 Alert links, ping URLs and sign-in callbacks use ${esc(configured)}. If the site has moved, <a href="/admin">change the address</a>.${oidc ? ` Single sign-on also needs the new callback URL, <code>${esc(here)}/auth/callback</code>, registered with your identity provider.` : ''}</div>`
   }
 
+  /**
+   * Says when the stored configuration could not be loaded (an earlier version, or only the sign-in
+   * settings, are in use), or loaded with settings an older release accepted left out or adjusted.
+   */
+  const configBanner = (): string => {
+    const esc = (v: string) => v.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+    const list = (items: string[]) => `<ul>${items.slice(0, 20).map((item) => `<li>${esc(item)}</li>`).join('')}</ul>`
+    const fallback = deps.configFallback
+    if (fallback) {
+      const problems = fallback.problem.split('\n').map((line) => line.replace(/^\s*-\s*/, '').trim()).filter((line) => line && !/^(Invalid StatusPing config|Unsafe admin config):?$/.test(line))
+      const using = fallback.revision === null
+        ? 'No earlier version loads either, so only the sign-in settings are in use and <strong>no checks are running</strong>.'
+        : `Version ${fallback.revision} from <a href="/admin/configuration">Configuration → History</a> is in use until it is fixed.`
+      return `<div class="alert error banner" role="alert"><strong>The stored configuration is invalid and could not be loaded.</strong> ${using}
+Fix it in <a href="/admin/configuration">Configuration</a> (edit or import the YAML), or restore a version from History.${list(problems)}</div>`
+    }
+    if (!deps.configWarnings.length) return ''
+    return `<div class="alert warning banner" role="status"><strong>Some stored settings were left out or adjusted so the configuration could load.</strong>
+They are refused when saving, so fix them in <a href="/admin/configuration">Configuration</a>.${list(deps.configWarnings)}</div>`
+  }
+
   /** Every form carries the revision it was rendered from, next to its CSRF value. */
   const html = (c: Context, body: string, status: 200 | 400 | 429 = 200) => {
     const revision = formRevision.get(c.req.raw) ?? deps.configRevision
-    const page = body.replace(/(<input type="hidden" name="csrf" value="[^"]*">)/g, `$1<input type="hidden" name="revision" value="${revision}">`).replace('<!--banner-->', addressBanner(c))
+    const page = body.replace(/(<input type="hidden" name="csrf" value="[^"]*">)/g, `$1<input type="hidden" name="revision" value="${revision}">`).replace('<!--banner-->', () => configBanner() + addressBanner(c))
     return c.html(page, status, noStore)
   }
   const formValues = (form: Form): Record<string, string> =>

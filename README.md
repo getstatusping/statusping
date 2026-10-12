@@ -101,6 +101,13 @@ listed for you to apply; they are never overwritten.
   it. Revert the upgrade, then wait for a fixed release (StatusPing ships a
   repair migration rather than editing the failed one). Error responses never
   include configuration or secret values.
+- **The stored configuration no longer loads:** a release never refuses, on load, a
+  configuration an earlier release accepted: a setting that is now refused when saving (such as a
+  `defaults.notify` entry naming a channel that does not exist) is left out or clamped and listed
+  in a Settings banner. If the configuration still cannot be loaded, StatusPing uses the newest
+  earlier version from Configuration → History that loads, and Settings says so; if none loads,
+  only the sign-in settings are used and no checks run until you fix or import a configuration.
+  Settings, sign-in, `/setup/recover` and `/setup/reset` stay available either way.
 - **`npm run upgrade` refuses to run:** it names the reason, such as local
   changes, an edited updater-owned file, or a release that requires an
   intermediate version first. Nothing is written until every check passes.
@@ -203,7 +210,8 @@ you create in the browser:
    STATUSPING_RESET_TOKEN`; Node: add it to `.env` and restart).
 2. Open `/setup/reset`, enter the token, and type `reset`. The site switches to setup mode:
    every page shows "being set up", `/healthz` reports `"setup": "required"`, and no checks run.
-   Everyone is signed out. The previous configuration and all monitor history are kept.
+   Everyone is signed out, and acknowledgement links in alerts already sent stop working. The
+   previous configuration and all monitor history are kept.
 3. Open `/setup` and enter the **setup code**. StatusPing writes it to the logs every minute
    while setup is pending (Cloudflare: the Worker's **Logs**, or `npx wrangler tail`). To choose
    your own code instead, set the `STATUSPING_SETUP_TOKEN` secret.
@@ -232,6 +240,12 @@ it with an administrator's email. That session can only change the sign-in metho
 Access); everything else stays closed until you switch, and the recovery is recorded in
 Activity. Remove the secret afterwards. On Node, `npm run cli -- recover you@example.com`
 switches the site to email + password and prints a new password.
+
+**Acknowledgement links** in escalation alerts are signed with the `ACK_SECRET` secret when it
+is set, otherwise with a key the site generates and keeps in its database. Setting, changing or
+removing `ACK_SECRET` switches keys, so links in alerts already sent stop working (each link
+expires after 24 hours anyway); acknowledge those incidents from the monitor page instead. A
+reset and a finished setup replace the generated key in the same way.
 
 After setup, the configuration lives in the database and is edited in Settings or as YAML.
 Passwords chosen in the wizard are stored as

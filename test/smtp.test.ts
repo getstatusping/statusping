@@ -105,12 +105,19 @@ describe('SMTP email', () => {
     const mail = (to: string[], from: string) => testConfig({ sinks: { mail: { type: 'email', to, via: { provider: 'smtp', host: 'smtp.test', port: 587, security: 'starttls', from } as never } } })
     expect(() => normalizeConfig(mail(['ops@example.test'], 'StatusPing <alerts@example.test>'))).not.toThrow()
     for (const to of ['ops@example.test\r\nRCPT TO:<evil@example.test>', 'ops@example.test\nBcc: evil@example.test', 'ops@exa\u0000mple.test', 'ops@example.test>', 'a,b@example.test']) {
-      expect(() => normalizeConfig(mail([to], 'alerts@example.test')), JSON.stringify(to)).toThrow(/sinks\.mail\.to/)
+      expect(() => normalizeConfig(mail([to], 'alerts@example.test'), { save: true }), JSON.stringify(to)).toThrow(/sinks\.mail\.to/)
+      // A stored configuration (saved before 0.3.11 tightened these checks) still loads, with the channel off.
+      const warnings: string[] = []
+      expect(normalizeConfig(mail([to], 'alerts@example.test'), { warnings }).sinks.mail, JSON.stringify(to)).toBeUndefined()
+      expect(warnings.join('\n')).toMatch(/sinks\.mail\.to: .*the channel is off/)
     }
     for (const from of ['alerts@example.test\r\nDATA', 'Ops\r\nBcc: evil@example.test <alerts@example.test>', 'Ops <alerts@example.test\n>', 'Ops\u0007 <alerts@example.test>']) {
-      expect(() => normalizeConfig(mail(['ops@example.test'], from)), JSON.stringify(from)).toThrow(/via\.from/)
+      expect(() => normalizeConfig(mail(['ops@example.test'], from), { save: true }), JSON.stringify(from)).toThrow(/via\.from/)
+      expect(normalizeConfig(mail(['ops@example.test'], from)).sinks.mail, JSON.stringify(from)).toBeUndefined()
     }
-    expect(() => normalizeConfig(testConfig({ subscribers: { provider: 'resend', apiKey: 're_test_key', from: 'Status\r\nBcc: x@example.test <status@example.com>' } }))).toThrow(/subscribers\.from/)
+    const badSender = testConfig({ subscribers: { provider: 'resend', apiKey: 're_test_key', from: 'Status\r\nBcc: x@example.test <status@example.com>' } })
+    expect(() => normalizeConfig(badSender, { save: true })).toThrow(/subscribers\.from/)
+    expect(normalizeConfig(badSender).subscribers).toBeNull()
 
     // The client refuses them too, before it connects, whatever path the address came by.
     const server = fakeServer()

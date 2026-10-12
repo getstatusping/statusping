@@ -70,6 +70,8 @@ textarea.code { min-height: 24rem; font: 13px/1.5 ui-monospace, SFMono-Regular, 
 .alert { margin: 0 0 16px; padding: 10px 12px; border: 1px solid var(--border); border-radius: calc(var(--radius) - 2px); font-size: 14px; }
 .alert.warning { border-color: color-mix(in oklab, var(--warning) 55%, var(--border)); background: color-mix(in oklab, var(--warning) 8%, var(--card)); }
 .alert.success { border-color: color-mix(in oklab, var(--success) 55%, var(--border)); background: color-mix(in oklab, var(--success) 8%, var(--card)); }
+.alert.error { border-color: color-mix(in oklab, var(--destructive) 55%, var(--border)); background: color-mix(in oklab, var(--destructive) 8%, var(--card)); }
+.alert ul { margin: 8px 0 0; padding-left: 20px; overflow-wrap: anywhere; }
 .table { width: 100%; border-collapse: collapse; font-size: 14px; }
 .table th { padding: 0 12px 8px 0; text-align: left; font-weight: 500; color: var(--muted-foreground); border-bottom: 1px solid var(--border); }
 .table td { padding: 10px 12px 10px 0; border-bottom: 1px solid var(--border); vertical-align: middle; overflow-wrap: normal; }

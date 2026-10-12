@@ -1,0 +1,60 @@
+{
+  "note": "defaults.notify names a channel that was later removed; every monitor sets its own notify (refused on load by 0.3.12-0.3.13)",
+  "config": {
+    "title": "Example Status",
+    "baseUrl": "https://status.example.test",
+    "timezone": "UTC",
+    "admin": true,
+    "access": {
+      "provider": {
+        "type": "basic"
+      },
+      "admins": {
+        "emails": [
+          "owner@example.test"
+        ]
+      }
+    },
+    "sinks": {
+      "ops": {
+        "type": "slack",
+        "webhookUrl": {
+          "$env": "SINK_OPS_WEBHOOKURL"
+        }
+      }
+    },
+    "defaults": {
+      "notify": [
+        "ops",
+        "pager-old"
+      ]
+    },
+    "groups": [
+      {
+        "name": "Web",
+        "monitors": [
+          {
+            "id": "site",
+            "kind": "http",
+            "name": "Site",
+            "url": "https://www.example.test/health",
+            "interval": "1m",
+            "notify": [
+              "ops"
+            ]
+          },
+          {
+            "id": "nightly",
+            "kind": "push",
+            "name": "Nightly job",
+            "schedule": "0 3 * * *",
+            "grace": "30m",
+            "notify": [
+              "ops"
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

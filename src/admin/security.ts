@@ -168,6 +168,8 @@ export function envReferences(value: unknown): Array<{ name: string; paths: stri
 export interface AdminConfigValidation {
   config: AdminConfig
   normalized: NormalizedConfig
+  /** Loading only: settings an older release accepted that were dropped or clamped to load. */
+  warnings: string[]
 }
 
 /**
@@ -190,10 +192,36 @@ function withNormalizedSchedules(config: Record<string, unknown>): Record<string
   return changed ? { ...config, maintenance } : config
 }
 
+/**
+ * Releases before 0.2.24 stored HTTP monitor header values that were numbers or booleans (sent as
+ * text). Loading reads them as the strings they were sent as, so such a site keeps loading; the
+ * credential-name check below still applies to them. Saving refuses them.
+ */
+function withLegacyHeaderValues(config: Record<string, unknown>): Record<string, unknown> {
+  if (!Array.isArray(config.groups)) return config
+  let changed = false
+  const groups = config.groups.map((groupValue: unknown) => {
+    const group = record(groupValue)
+    if (!group || !Array.isArray(group.monitors)) return groupValue
+    let groupChanged = false
+    const monitors = group.monitors.map((monitorValue: unknown) => {
+      const monitor = record(monitorValue)
+      const headers = record(monitor?.headers)
+      if (!monitor || !headers || !Object.values(headers).some((v) => typeof v === 'number' || typeof v === 'boolean')) return monitorValue
+      groupChanged = true
+      return { ...monitor, headers: Object.fromEntries(Object.entries(headers).map(([k, v]) => [k, typeof v === 'number' || typeof v === 'boolean' ? String(v) : v])) }
+    })
+    if (!groupChanged) return groupValue
+    changed = true
+    return { ...group, monitors }
+  })
+  return changed ? { ...config, groups } : config
+}
+
 export function validateAdminConfig(value: unknown, getEnv: EnvGetter, mode: 'save' | 'load' = 'save'): AdminConfigValidation {
   const input = record(value)
   if (!input) throw new Error('config: must be an object')
-  const config = mode === 'save' ? withNormalizedSchedules(input) : input
+  const config = mode === 'save' ? withNormalizedSchedules(input) : withLegacyHeaderValues(input)
   const admin = config.admin
   if (admin !== undefined && typeof admin !== 'boolean') throw new Error('admin: must be a boolean')
   const problems = validateAdminSecrets(config)
@@ -212,14 +240,15 @@ export function validateAdminConfig(value: unknown, getEnv: EnvGetter, mode: 'sa
   try {
     // Environment-backed monitor URLs need a harmless placeholder during validation.  Their
     // actual value stays in the environment and is resolved only when the config becomes active.
-    const normalized = normalizeConfig(resolveConfigEnv(config as unknown as StatusPingConfig, getEnv, true), { save: mode === 'save' })
+    const warnings: string[] = []
+    const normalized = normalizeConfig(resolveConfigEnv(config as unknown as StatusPingConfig, getEnv, true), { save: mode === 'save', warnings })
     const tenant = parseTenantPolicy(getEnv(TENANT_ENV))
-    if (!tenant) return { config: config as unknown as AdminConfig, normalized }
+    if (!tenant) return { config: config as unknown as AdminConfig, normalized, warnings }
     if (mode === 'save') {
       const overLimit = tenantPolicyProblems(normalized, tenant, explicitIntervalIds(config as unknown as StatusPingConfig))
       if (overLimit.length) throw new Error(`Over your plan's limits:\n  - ${overLimit.join('\n  - ')}`)
     }
-    return { config: config as unknown as AdminConfig, normalized: clampToTenantPolicy(normalized, tenant) }
+    return { config: config as unknown as AdminConfig, normalized: clampToTenantPolicy(normalized, tenant), warnings }
   } catch (error) {
     throw error instanceof Error ? error : new Error(String(error))
   }

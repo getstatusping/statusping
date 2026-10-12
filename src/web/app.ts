@@ -1,6 +1,6 @@
 import { Hono } from 'hono'
 import { readCappedText, readTruncatedText } from '../util/capped-body.ts'
-import { bodyLimit, bodyLimitFor, carriesCredentials } from './body-limit.ts'
+import { BODY_LIMITS, bodyLimit, bodyLimitFor, capDependsOnCredentials, verifiedCredentials } from './body-limit.ts'
 import type { Context } from 'hono'
 import { currentViewer, hasCredentials, mountAuthRoutes, fromThisSite, signInResponse } from '../auth/providers.ts'
 import { type Viewer, canAcknowledge, canOpen } from '../auth/viewer.ts'
@@ -84,6 +84,12 @@ function runAfterResponse(c: Context, deps: Deps, p: Promise<unknown>) {
   }
 }
 
+/**
+ * The acknowledgement page's URL is a bearer capability: it must not leak through a Referer header
+ * (the page loads a stylesheet and links back to the site) or be indexed by a crawler.
+ */
+const ACK_HEADERS = { 'cache-control': 'no-store', 'referrer-policy': 'no-referrer', 'x-robots-tag': 'noindex' }
+
 const CONFIRM_BODY_LIMIT = 1024
 /**
  * Pings from clients whose address the adapter cannot tell (Node without STATUSPING_TRUST_PROXY)
@@ -103,7 +109,14 @@ export function createApp(deps: Deps): Hono {
 
   app.use('*', async (c, next) => {
     await ensureSchema(deps.db)
-    await refreshAdminConfig(deps, nowSeconds())
+    try {
+      await refreshAdminConfig(deps, nowSeconds())
+    } catch (error) {
+      // A stored configuration that cannot be loaded falls back inside refreshAdminConfig; anything
+      // else that goes wrong here must still not take Settings, sign-in and reset down with it.
+      // The site keeps the configuration it last loaded and tries again on the next request.
+      deps.log('error', 'loading the configuration failed', { error: (error as Error).message })
+    }
     // Setup mode: only the health check and the wizard respond until setup is finished. Page
     // visits (most likely the owner) go straight to the wizard; pings and API calls get a 503.
     if (deps.setupPending && c.req.path !== '/healthz' && c.req.path !== '/api/setup' && !PLATFORM_PATHS.includes(c.req.path) && c.req.path !== '/setup' && !c.req.path.startsWith('/setup/') && !SETUP_AUTH_PATHS.includes(c.req.path)) {
@@ -123,7 +136,13 @@ export function createApp(deps: Deps): Hono {
   // Cap every request body before anything parses it (see body-limit.ts); /ping caps its own.
   // It runs after the setup check above (which reads no body) so the cap knows whether setup is
   // pending: only then may an anonymous client send a whole configuration to the setup routes.
-  app.use('*', bodyLimit((method, path, c) => bodyLimitFor(method, path, { credentials: carriesCredentials(c), setupPending: deps.setupPending })))
+  // Credentials are verified (not just present) before a configuration route gets the larger cap.
+  app.use('*', bodyLimit(async (method, path, c) => {
+    const context = { setupPending: deps.setupPending }
+    const cautious = bodyLimitFor(method, path, context)
+    if (cautious === BODY_LIMITS.config || !capDependsOnCredentials(method, path)) return cautious
+    return bodyLimitFor(method, path, { ...context, credentials: await verifiedCredentials(c, deps) })
+  }))
 
   app.onError((err, c) => {
     // A deliberate response from deep inside a handler, such as the 429 for a rate-limited Basic header.
@@ -392,28 +411,28 @@ export function createApp(deps: Deps): Hono {
   // signed and expires, while acknowledgements.incident_id makes the POST single-use.
   app.get('/ack/:token', async (c) => {
     const secret = await acknowledgeSecret(deps, false)
-    if (!secret) return c.text('Not found', 404)
+    if (!secret) return c.text('Not found', 404, ACK_HEADERS)
     const incidentId = await verifyAcknowledgeToken(c.req.param('token'), nowSeconds(), secret)
-    if (!incidentId) return c.text('Not found', 404)
+    if (!incidentId) return c.text('Not found', 404, ACK_HEADERS)
     const incident = await deps.db.first<{ monitor_id: string; name: string; resolved_at: number | null }>(
       `SELECT i.monitor_id, m.name, i.resolved_at FROM incidents i JOIN monitors m ON m.id = i.monitor_id WHERE i.id = ?`, [incidentId],
     )
-    if (!incident || incident.resolved_at !== null) return c.text('Not found', 404)
+    if (!incident || incident.resolved_at !== null) return c.text('Not found', 404, ACK_HEADERS)
     const chrome = await buildChrome(deps, { viewer: null, current: c.req.path })
-    return c.html(acknowledgePage(chrome, c.req.param('token'), incident.name), 200, { 'cache-control': 'no-store' })
+    return c.html(acknowledgePage(chrome, c.req.param('token'), incident.name), 200, ACK_HEADERS)
   })
   app.post('/ack', async (c) => {
     const secret = await acknowledgeSecret(deps, false)
-    if (!secret) return c.text('Not found', 404)
+    if (!secret) return c.text('Not found', 404, ACK_HEADERS)
     const body = await c.req.parseBody()
     const token = typeof body.token === 'string' ? body.token : ''
     const incidentId = await verifyAcknowledgeToken(token, nowSeconds(), secret)
-    if (!incidentId) return c.text('Not found', 404)
+    if (!incidentId) return c.text('Not found', 404, ACK_HEADERS)
     const incident = await deps.db.first<{ monitor_id: string; resolved_at: number | null }>(`SELECT monitor_id, resolved_at FROM incidents WHERE id = ?`, [incidentId])
-    if (!incident || incident.resolved_at !== null) return c.text('Not found', 404)
+    if (!incident || incident.resolved_at !== null) return c.text('Not found', 404, ACK_HEADERS)
     const created = await acknowledgeIncident(deps.db, incidentId, 'alert-link', 'alert-link', nowSeconds())
     const chrome = await buildChrome(deps, { viewer: null, current: c.req.path })
-    return c.html(messagePage(chrome, created ? 'Incident acknowledged' : 'Already acknowledged', created ? 'Further escalation alerts have been stopped.' : 'This incident was already acknowledged.'), 200, { 'cache-control': 'no-store' })
+    return c.html(messagePage(chrome, created ? 'Incident acknowledged' : 'Already acknowledged', created ? 'Further escalation alerts have been stopped.' : 'This incident was already acknowledged.'), 200, ACK_HEADERS)
   })
 
   /** "Not found" page with the shared header/footer (personalized only if signed in). */

@@ -33,6 +33,9 @@ export const ACK_KEY_NAME = 'ack_key'
  * key this site generates once and keeps in `instance_secrets` (like the session key setup
  * stores), so escalation works without an extra secret and can never sign with an empty key.
  * With `create: false` (verifying a link) a missing key returns null: no link was ever signed.
+ *
+ * Setting, changing or clearing ACK_SECRET switches the signing key, so every link already sent
+ * stops verifying; so does a reset or a finished setup, which delete the generated key.
  */
 export async function acknowledgeSecret(deps: { db: Db; getEnv: (name: string) => string | undefined }, create = true): Promise<string | null> {
   const explicit = deps.getEnv('ACK_SECRET')

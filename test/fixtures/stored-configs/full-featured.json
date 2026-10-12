@@ -1,0 +1,161 @@
+{
+  "note": "a broad configuration using most features, as an early admin-mode site stored it",
+  "config": {
+    "title": "Example Status",
+    "baseUrl": "https://status.example.test",
+    "timezone": "UTC",
+    "admin": true,
+    "access": {
+      "provider": {
+        "type": "basic"
+      },
+      "admins": {
+        "emails": [
+          "owner@example.test"
+        ]
+      }
+    },
+    "description": "Everything we run",
+    "sinks": {
+      "ops": {
+        "type": "slack",
+        "webhookUrl": {
+          "$env": "SINK_OPS_WEBHOOKURL"
+        }
+      },
+      "hook": {
+        "type": "webhook",
+        "url": "https://hooks.example.test/statusping",
+        "headers": {
+          "Authorization": {
+            "$env": "HOOK_AUTH"
+          }
+        }
+      }
+    },
+    "announcements": {
+      "notify": [
+        "ops"
+      ]
+    },
+    "defaults": {
+      "notify": [
+        "ops"
+      ],
+      "grace": "10m",
+      "renotifyMax": 3
+    },
+    "groups": [
+      {
+        "name": "Web",
+        "monitors": [
+          {
+            "id": "site",
+            "kind": "http",
+            "name": "Site",
+            "url": "https://www.example.test/health",
+            "interval": "2m",
+            "timeout": "15s",
+            "expectStatus": "200-299",
+            "keyword": "ok",
+            "retries": 2,
+            "confirm": {
+              "regions": 2,
+              "quorum": 2
+            },
+            "json": [
+              {
+                "path": "$.status",
+                "equals": "ok"
+              }
+            ],
+            "renotifyEvery": "1h"
+          },
+          {
+            "id": "api",
+            "kind": "http",
+            "name": "API",
+            "url": {
+              "$env": "API_HEALTH_URL"
+            },
+            "headers": {
+              "X-Token": {
+                "$env": "API_TOKEN"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "Infra",
+        "monitors": [
+          {
+            "id": "db",
+            "kind": "tcp",
+            "name": "Database",
+            "host": "db.example.test",
+            "port": 5432,
+            "interval": "1m"
+          },
+          {
+            "id": "backup",
+            "kind": "push",
+            "name": "Backup",
+            "period": "1d",
+            "grace": "1h",
+            "maxRuntime": "2h",
+            "escalation": [
+              {
+                "after": "0s",
+                "notify": [
+                  "ops"
+                ]
+              },
+              {
+                "after": "30m",
+                "notify": [
+                  "hook"
+                ]
+              }
+            ],
+            "notify": [
+              "ops"
+            ]
+          }
+        ]
+      }
+    ],
+    "pages": [
+      {
+        "slug": "status",
+        "title": "Status",
+        "monitors": [
+          "*"
+        ]
+      },
+      {
+        "slug": "internal",
+        "title": "Internal",
+        "monitors": [
+          "group:Infra"
+        ],
+        "access": {
+          "emails": [
+            "*@example.test"
+          ]
+        },
+        "show": "all"
+      }
+    ],
+    "home": "status",
+    "limits": {
+      "maxChecksPerTick": 20,
+      "tickBudgetMs": 15000,
+      "maxConfirmationsPerTick": 4,
+      "pingPerIpPerMinute": 120
+    },
+    "updates": {
+      "enabled": true
+    }
+  }
+}

@@ -1,0 +1,57 @@
+{
+  "note": "email addresses the pre-0.3.11 check accepted (a comma and a semicolon)",
+  "config": {
+    "title": "Example Status",
+    "baseUrl": "https://status.example.test",
+    "timezone": "UTC",
+    "admin": true,
+    "access": {
+      "provider": {
+        "type": "basic"
+      },
+      "admins": {
+        "emails": [
+          "owner@example.test"
+        ]
+      }
+    },
+    "sinks": {
+      "mail": {
+        "type": "email",
+        "to": [
+          "ops@example.test",
+          "a,b@example.test"
+        ],
+        "via": "cloudflare"
+      }
+    },
+    "subscribers": {
+      "provider": "resend",
+      "apiKey": {
+        "$env": "RESEND_KEY"
+      },
+      "from": "status;team@example.test"
+    },
+    "groups": [
+      {
+        "name": "Web",
+        "monitors": [
+          {
+            "id": "site",
+            "kind": "http",
+            "name": "Site",
+            "url": "https://www.example.test/health",
+            "interval": "1m"
+          },
+          {
+            "id": "nightly",
+            "kind": "push",
+            "name": "Nightly job",
+            "schedule": "0 3 * * *",
+            "grace": "30m"
+          }
+        ]
+      }
+    ]
+  }
+}

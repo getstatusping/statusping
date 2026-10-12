@@ -34,6 +34,11 @@ export interface TickSummary {
   checks: number
   skippedChecks: string[]
   notifications: number
+  /**
+   * Phases that failed this tick (logged, then skipped so the rest still ran). 'config' means the
+   * stored configuration could not be loaded and no checks ran. Non-empty means an unhealthy tick.
+   */
+  failedPhases: string[]
   /** Hosted tenant suspended by the platform: no checks or alerts ran. */
   suspended?: boolean
 }
@@ -49,12 +54,16 @@ function boundedResult(r: CheckResult): CheckResult {
   return typeof r.err === 'string' && r.err.length > MAX_CHECK_ERROR ? { ...r, err: clipText(r.err, MAX_CHECK_ERROR) } : r
 }
 
-/** Runs one tick phase; a failure is logged and never skips the phases after it. */
-async function phase<T>(deps: Deps, name: string, fallback: T, run: () => Promise<T>): Promise<T> {
+/**
+ * Runs one tick phase; a failure is logged, recorded in the summary's failedPhases, and never skips
+ * the phases after it.
+ */
+async function phase<T>(deps: Deps, summary: TickSummary, name: string, fallback: T, run: () => Promise<T>): Promise<T> {
   try {
     return await run()
   } catch (e) {
     deps.log('error', `tick: ${name} failed`, { error: (e as Error)?.message ?? String(e) })
+    summary.failedPhases.push(name)
     return fallback
   }
 }
@@ -122,13 +131,20 @@ export async function tick(deps: Deps, nowMs: number = Date.now()): Promise<Tick
   const startedMs = Date.now()
   const now = nowSeconds(nowMs)
   const tickAt = now - (now % 60)
-  const summary: TickSummary = { tickAt, duplicate: false, transitions: 0, checks: 0, skippedChecks: [], notifications: 0 }
+  const summary: TickSummary = { tickAt, duplicate: false, transitions: 0, checks: 0, skippedChecks: [], notifications: 0, failedPhases: [] }
 
   await ensureSchema(deps.db)
   await refreshAdminConfig(deps, now)
   if (deps.setupPending) {
     // No checks until setup finishes. The code is the only thing logged, and only now.
     await logSetupCode(deps)
+    return summary
+  }
+  if (deps.configFallback?.revision === null) {
+    // No saved configuration loads: only the sign-in settings are in use. Syncing that would pause
+    // every monitor, so nothing runs until an administrator fixes the configuration.
+    deps.log('error', 'tick: no checks ran because the stored configuration could not be loaded', { problem: deps.configFallback.problem })
+    summary.failedPhases.push('config')
     return summary
   }
   await syncConfig(deps, now)
@@ -221,27 +237,27 @@ export async function tick(deps: Deps, nowMs: number = Date.now()): Promise<Tick
     if (await applyCheckResult(deps, m, s, r, now)) summary.transitions++
   }
   if (results.length) {
-    await phase(deps, 'check results', undefined, async () => {
+    await phase(deps, summary, 'check results', undefined, async () => {
       await deps.db.run(`UPDATE tick_results SET results_json = ? WHERE tick_at = ?`, [JSON.stringify(results), tickAt])
     })
   }
 
   // From here on each phase is independent: one that throws (a database error, a bad channel)
   // is logged and the rest still run, so a failure can never silently cost the alerts after it.
-  await phase(deps, 'latency rollup', undefined, () => rollupLatency(
+  await phase(deps, summary, 'latency rollup', undefined, () => rollupLatency(
     deps.db,
     monitors.filter((m): m is HttpMonitor => m.kind === 'http'),
     now,
   ))
 
   await pingPeer(deps)
-  summary.notifications = await phase(deps, 'notifications', 0, () => dispatchNotifications(deps, now))
-  summary.notifications += await phase(deps, 'announcement notifications', 0, () => dispatchAnnouncementNotifications(deps, now))
-  await phase(deps, 'subscriber enqueue', undefined, () => enqueueIncidentSubscribers(deps, now))
-  await phase(deps, 'subscriber delivery', undefined, () => dispatchSubscriberOutbox(deps, now))
+  summary.notifications = await phase(deps, summary, 'notifications', 0, () => dispatchNotifications(deps, now))
+  summary.notifications += await phase(deps, summary, 'announcement notifications', 0, () => dispatchAnnouncementNotifications(deps, now))
+  await phase(deps, summary, 'subscriber enqueue', undefined, () => enqueueIncidentSubscribers(deps, now))
+  await phase(deps, summary, 'subscriber delivery', undefined, () => dispatchSubscriberOutbox(deps, now))
   // Expiry lookups call third parties (crt.sh, RDAP) that can be slow, so they run only after this
   // tick's alerts are out. A new expiry warning is notified by the next tick's dispatch.
-  await phase(deps, 'expiry checks', undefined, () => runExpiryChecks(deps, now))
-  await phase(deps, 'retention', undefined, () => maybeRunRetention(deps, now))
+  await phase(deps, summary, 'expiry checks', undefined, () => runExpiryChecks(deps, now))
+  await phase(deps, summary, 'retention', undefined, () => maybeRunRetention(deps, now))
   return summary
 }

@@ -11,6 +11,9 @@ import { formatMailbox } from '../src/util/email.ts'
 import { clipText, MAX_CHECK_ERROR } from '../src/util/text.ts'
 import { loadMonitorDetail } from '../src/web/data.ts'
 import { BODY_LIMITS } from '../src/web/body-limit.ts'
+import { sign } from '../src/auth/session.ts'
+import { createApiToken } from '../src/mcp/tokens.ts'
+import { nowSeconds } from '../src/util/time.ts'
 import { createApp, PER_MONITOR_PING_LIMIT } from '../src/web/app.ts'
 import type { Db } from '../src/db/types.ts'
 import { DB_KINDS, type DbKind, TEST_TOKENS, at, createTestDb, fakeFetch, makeDeps, sec, testConfig } from './helpers.ts'
@@ -229,15 +232,34 @@ describe('hardening: request body caps before sign-in', () => {
   const ORIGIN = 'http://localhost'
   const big = () => 'x'.repeat(BODY_LIMITS.public + 1024)
 
-  it('gives anonymous requests the public cap on configuration routes, and signed requests the config cap', async () => {
+  it('gives anonymous requests and made-up credentials the public cap on configuration routes, and verified ones the config cap', async () => {
     const db = await testDb()
-    const app = createApp(makeDeps(db, { env: { ADMIN_TOKEN: 'admin-token-0123456789' } }))
-    const put = (headers: Record<string, string>) => app.request(`${ORIGIN}/api/admin/config`, { method: 'PUT', headers: { 'content-type': 'application/yaml', ...headers }, body: big() })
+    const SESSION_SECRET = 'session-secret-0123456789abcdefghijklmnop'
+    const config = { ...testConfig({ sinks: {}, access: { provider: { type: 'basic' }, admins: { emails: ['admin@example.test'] } } }), admin: true }
+    const app = createApp(makeDeps(db, { config, env: { ADMIN_TOKEN: 'admin-token-0123456789', SESSION_SECRET } }))
+    const send = (method: string, path: string, headers: Record<string, string>) =>
+      app.request(`${ORIGIN}${path}`, { method, headers: { 'content-type': 'application/yaml', origin: ORIGIN, ...headers }, body: big() })
+    const put = (headers: Record<string, string>) => send('PUT', '/api/admin/config', headers)
     expect((await put({})).status).toBe(413)
     expect((await put({ cookie: 'other=1' })).status).toBe(413)
     expect((await put({ authorization: 'Bearer admin-token-0123456789' })).status).not.toBe(413)
-    expect((await put({ cookie: 'sp_session=abc' })).status).not.toBe(413)
-    expect((await put({ cookie: 'CF_Authorization=abc' })).status).not.toBe(413)
+    // Presence is not enough: a wrong bearer token, or a cookie that does not verify, gets the public cap.
+    expect((await put({ authorization: 'Bearer not-the-admin-token' })).status).toBe(413)
+    expect((await put({ cookie: 'sp_session=abc' })).status).toBe(413)
+    expect((await put({ cookie: 'CF_Authorization=abc' })).status).toBe(413)
+
+    const session = await sign({ exp: nowSeconds() + 3600, email: 'admin@example.test', groups: [], provider: 'basic' }, SESSION_SECRET)
+    const forged = await sign({ exp: nowSeconds() + 3600, email: 'admin@example.test', groups: [], provider: 'basic' }, 'some-other-secret-0123456789abcdefghij')
+    const importForm = (cookie: string) => send('POST', '/admin/import', { cookie, 'content-type': 'application/x-www-form-urlencoded' })
+    expect((await importForm('sp_session=abc')).status).toBe(413)
+    expect((await importForm(`sp_session=${forged}`)).status).toBe(413)
+    expect((await importForm(`sp_session=${session}`)).status).not.toBe(413)
+
+    const mcp = (authorization: string) => send('POST', '/mcp', { authorization, 'content-type': 'application/json' })
+    expect((await mcp(`Bearer spm_${'a'.repeat(40)}`)).status).toBe(413)
+    const token = await createApiToken(db, 'test', ['read'], 'admin@example.test', nowSeconds())
+    expect((await mcp(`Bearer ${token}`)).status).not.toBe(413)
+
     const setupApi = await app.request(`${ORIGIN}/api/setup`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: big() })
     expect(setupApi.status).toBe(413)
   })
@@ -311,14 +333,14 @@ describe('hardening: numeric settings and list validation', () => {
   it('reports non-string entries in notify, emails and teams lists instead of throwing', () => {
     const notify = testConfig()
     notify.groups[0]!.monitors[0] = { ...notify.groups[0]!.monitors[0]!, notify: [42 as never] }
-    expect(problems(notify)).toContain('monitor "backup-db".notify: every entry must be a string')
+    expect(problems(notify, true)).toContain('monitor "backup-db".notify: every entry must be a string')
 
     const defaults = testConfig({ defaults: { notify: 'ntfy' as never } })
-    expect(problems(defaults)).toContain('defaults.notify: must be a list of strings')
+    expect(problems(defaults, true)).toContain('defaults.notify: must be a list of strings')
 
     const escalation = testConfig()
     escalation.groups[0]!.monitors[1] = { ...escalation.groups[0]!.monitors[1]!, escalation: [{ after: '0s', notify: [{}] as never }] }
-    expect(problems(escalation)).toContain('monitor "heartbeat": escalation[0].notify: every entry must be a string')
+    expect(problems(escalation, true)).toContain('monitor "heartbeat": escalation[0].notify: every entry must be a string')
 
     const emails = testConfig({ access: { provider: { type: 'basic' }, admins: { emails: [1 as never] } } })
     expect(problems(emails)).toContain('access.admins.emails: every entry must be a string')
@@ -338,7 +360,9 @@ describe('hardening: numeric settings and list validation', () => {
 
     const proto = testConfig()
     proto.groups[0]!.monitors[0] = { ...proto.groups[0]!.monitors[0]!, notify: ['toString'] }
-    expect(problems(proto)).toContain('monitor "backup-db": notify references unknown sink "toString"')
+    expect(problems(proto, true)).toContain('monitor "backup-db": notify references unknown sink "toString"')
+    // Before 0.3.12 a prototype name resolved, so a stored configuration may hold one: it loads without it.
+    expect(normalizeConfig(proto).monitors.find((m) => m.id === 'backup-db')!.notify).toEqual([])
   })
 })
 

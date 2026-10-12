@@ -434,9 +434,10 @@ describe('bar popovers', () => {
 })
 
 describe('page config validation', () => {
+  // What saving refuses; loading a stored configuration drops an unknown team instead (upgrade-safety.test.ts).
   const problems = (cfg: StatusPingConfig) => {
     try {
-      normalizeConfig(cfg)
+      normalizeConfig(cfg, { save: true })
       return []
     } catch (e) {
       return (e as { problems: string[] }).problems

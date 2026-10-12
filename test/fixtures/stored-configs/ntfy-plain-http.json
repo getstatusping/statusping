@@ -1,0 +1,49 @@
+{
+  "note": "an ntfy channel on a plain-http server, accepted before 0.3.7",
+  "config": {
+    "title": "Example Status",
+    "baseUrl": "https://status.example.test",
+    "timezone": "UTC",
+    "admin": true,
+    "access": {
+      "provider": {
+        "type": "basic"
+      },
+      "admins": {
+        "emails": [
+          "owner@example.test"
+        ]
+      }
+    },
+    "sinks": {
+      "push": {
+        "type": "ntfy",
+        "topic": {
+          "$env": "SINK_PUSH_TOPIC"
+        },
+        "server": "http://ntfy.internal.example.test"
+      }
+    },
+    "groups": [
+      {
+        "name": "Web",
+        "monitors": [
+          {
+            "id": "site",
+            "kind": "http",
+            "name": "Site",
+            "url": "https://www.example.test/health",
+            "interval": "1m"
+          },
+          {
+            "id": "nightly",
+            "kind": "push",
+            "name": "Nightly job",
+            "schedule": "0 3 * * *",
+            "grace": "30m"
+          }
+        ]
+      }
+    ]
+  }
+}

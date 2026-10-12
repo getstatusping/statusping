@@ -12,6 +12,7 @@ import { hashUserPassword, fromThisSite, setSession } from '../auth/providers.ts
 import { sign, unsign } from '../auth/session.ts'
 import type { AdminConfig } from '../admin/security.ts'
 import { validateAdminConfig } from '../admin/security.ts'
+import { ACK_KEY_NAME } from '../acknowledgements.ts'
 import { locateProblems, parseAdminYaml, stringifyAdminYaml } from '../admin/yaml.ts'
 import { FormError, monitorRows, pageList, SINK_FIELDS, sinkFromForm, type SinkType } from '../admin/forms.ts'
 import { revisionStatements, sendSinkTest } from '../admin/service.ts'
@@ -196,6 +197,9 @@ export async function completeSetup(deps: Deps, config: AdminConfig, who: { emai
       : []),
     { sql: `INSERT INTO instance_secrets (name, value, created_at) VALUES ('session_key', ?, ?)
             ON CONFLICT(name) DO UPDATE SET value = excluded.value, created_at = excluded.created_at`, params: [randomToken(48), now] },
+    // Like the session key, the generated acknowledgement key starts fresh with the new owner; the
+    // next escalation alert creates a new one (see acknowledgeSecret).
+    { sql: `DELETE FROM instance_secrets WHERE name = ?`, params: [ACK_KEY_NAME] },
     { sql: `INSERT INTO audit_log (actor, action, target, before_json, after_json, at) VALUES (?, 'setup.complete', 'setup', NULL, ?, ?)`,
       params: [who.actor ?? who.email, JSON.stringify({ method: who.method }), now] },
     { sql: `UPDATE setup_state SET status = 'complete', code = NULL, session_key = NULL, draft_json = '{}', failed_attempts = 0, updated_at = ? WHERE id = 1 AND status = 'pending'`, params: [now] },

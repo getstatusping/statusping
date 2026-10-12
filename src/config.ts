@@ -654,6 +654,11 @@ export interface NormalizeOptions {
    * of recurring maintenance.
    */
   save?: boolean
+  /**
+   * Loading only: what was dropped or clamped so a stored configuration an older release accepted
+   * still loads (an unknown sink name, an out-of-range limit). Saving refuses these instead.
+   */
+  warnings?: string[]
 }
 
 /**
@@ -677,30 +682,45 @@ function stringList(value: unknown, where: string, problems: string[], report = 
  * stored configuration is only loaded, so an out-of-range value saved by an older release is
  * clamped (or a non-number replaced by the default) instead of making the whole site fail to load.
  */
-function boundedNumber(value: unknown, fallback: number, where: string, [min, max]: readonly [number, number], problems: string[], save: boolean, integer = true): number {
+function boundedNumber(value: unknown, fallback: number, where: string, [min, max]: readonly [number, number], problems: string[], save: boolean, integer = true, warnings?: string[]): number {
   if (value === undefined) return fallback
   const valid = typeof value === 'number' && Number.isFinite(value) && (!integer || Number.isInteger(value))
   if (valid && value >= min && value <= max) return value
-  if (save) problems.push(`${where} must be ${integer ? 'a whole number' : 'a number'} from ${min} to ${max}`)
-  return valid ? Math.min(max, Math.max(min, value)) : fallback
+  const message = `${where} must be ${integer ? 'a whole number' : 'a number'} from ${min} to ${max}`
+  const used = valid ? Math.min(max, Math.max(min, value)) : fallback
+  if (save) problems.push(message)
+  else warnings?.push(`${message} (using ${used})`)
+  return used
 }
 
 /** Bounds for the tick's work limits: at least one check (Workers allow 1000 subrequests), and a budget from 1 s to 5 min. */
-export const LIMIT_BOUNDS = { maxChecksPerTick: [1, 1000], tickBudgetMs: [1000, 300_000] } as const
+export const LIMIT_BOUNDS = { maxChecksPerTick: [1, 1000], tickBudgetMs: [1000, 300_000], maxConfirmationsPerTick: [1, 35], pingPerIpPerMinute: [1, 10_000] } as const
 /** Session length bounds, in hours: from one hour to 30 days. */
 export const SESSION_HOURS_BOUNDS = [1, 720] as const
 
 export function normalizeConfig(config: StatusPingConfig, options: NormalizeOptions = {}): NormalizedConfig {
   const problems: string[] = []
-  const sinks = config.sinks && typeof config.sinks === 'object' && !Array.isArray(config.sinks) ? config.sinks : {}
-  // Own keys only: a name such as "toString" must not resolve to an Object.prototype member.
-  const isSink = (name: string) => Object.prototype.hasOwnProperty.call(sinks, name)
-  if (config.sinks !== undefined && sinks !== config.sinks) problems.push('sinks: must be an object')
+  const save = options.save === true
+  /**
+   * A rule an older release did not enforce (or enforced more loosely). Saving refuses the value;
+   * loading a stored configuration drops or clamps it and records a warning, so an upgrade never
+   * makes a site that was working fail to load.
+   */
+  const lenient = (message: string, onLoad = '') => {
+    if (save) problems.push(message)
+    else options.warnings?.push(`${message}${onLoad}`)
+  }
+  const configuredSinks = config.sinks && typeof config.sinks === 'object' && !Array.isArray(config.sinks) ? config.sinks : {}
+  if (config.sinks !== undefined && configuredSinks !== config.sinks) problems.push('sinks: must be an object')
+  /** Channels a stored configuration keeps but that cannot be used safely; they are left out on load. */
+  const disabledSinks = new Set<string>()
   let subscribers: SubscriberConfigInput | null = null
   if (config.subscribers !== undefined) {
     const value = config.subscribers
     if (!value || typeof value !== 'object' || value.provider !== 'resend') problems.push('subscribers.provider: must be "resend"')
-    else if (typeof value.from !== 'string' || !isMailbox(value.from)) problems.push('subscribers.from: must be an email address')
+    // 0.3.11 tightened address checks (header injection). A stored sender that no longer passes
+    // turns subscriber email off rather than taking the site down.
+    else if (typeof value.from !== 'string' || !isMailbox(value.from)) lenient('subscribers.from: must be an email address', ' (subscriber email is off until it is fixed)')
     else subscribers = value
   }
   const groups = Array.isArray(config.groups) ? config.groups : []
@@ -748,7 +768,7 @@ export function normalizeConfig(config: StatusPingConfig, options: NormalizeOpti
       }
     }
   }
-  for (const [name, sink] of Object.entries(sinks)) {
+  for (const [name, sink] of Object.entries(configuredSinks)) {
     if (!(SINK_TYPES as readonly string[]).includes(sink.type)) {
       problems.push(`sinks.${name}: unknown type "${(sink as { type: string }).type}"`)
     }
@@ -774,13 +794,18 @@ export function normalizeConfig(config: StatusPingConfig, options: NormalizeOpti
       }
     }
     if (sink.type === 'email') {
-      if (!Array.isArray(sink.to) || sink.to.length === 0 || sink.to.some((address) => !isEmail(address))) {
-        problems.push(`sinks.${name}.to: must contain one or more email addresses`)
+      // 0.3.11 tightened address checks (no control characters or header delimiters). An address
+      // stored before then disables just this channel on load; saving still refuses it.
+      const disable = (message: string) => {
+        lenient(message, ' (the channel is off until it is fixed)')
+        if (!save) disabledSinks.add(name)
       }
+      if (!Array.isArray(sink.to) || sink.to.length === 0) problems.push(`sinks.${name}.to: must contain one or more email addresses`)
+      else if (sink.to.some((address) => !isEmail(address))) disable(`sinks.${name}.to: must contain one or more email addresses`)
       if (sink.via !== 'cloudflare') {
         if (!sink.via || (sink.via.provider !== 'resend' && sink.via.provider !== 'smtp')) problems.push(`sinks.${name}.via: provider must be "resend" or "smtp"`)
         else if (typeof sink.via.from !== 'string' || !isMailbox(sink.via.from)) {
-          problems.push(`sinks.${name}.via.from: must be an email address`)
+          disable(`sinks.${name}.via.from: must be an email address`)
         }
         if (sink.via && typeof sink.via === 'object' && sink.via.provider === 'smtp') {
           const smtp = sink.via
@@ -795,20 +820,36 @@ export function normalizeConfig(config: StatusPingConfig, options: NormalizeOpti
     }
   }
 
+  const sinks: Record<string, SinkInput> = disabledSinks.size
+    ? Object.fromEntries(Object.entries(configuredSinks).filter(([name]) => !disabledSinks.has(name)))
+    : configuredSinks
+  // Own keys only: a name such as "toString" must not resolve to an Object.prototype member.
+  const isSink = (name: string) => Object.prototype.hasOwnProperty.call(sinks, name)
+  /**
+   * Sink names from a notify list. Releases before 0.3.12 did not check every list (defaults.notify
+   * not at all) and resolved names through the prototype, so a stored list may name a channel that
+   * does not exist: loading drops the name with a warning, saving refuses it.
+   */
+  const knownSinks = (names: string[], unknown: (name: string) => string): string[] => names.filter((name) => {
+    if (isSink(name)) return true
+    lenient(unknown(name), disabledSinks.has(name) ? ' (the channel is off)' : ' (left out)')
+    return false
+  })
+
   let announcementNotify: string[] = []
   if (config.announcements !== undefined) {
     const notify = config.announcements?.notify
     if (!Array.isArray(notify) || notify.length === 0 || notify.some((sink) => typeof sink !== 'string')) {
-      problems.push('announcements.notify: must name one or more sinks')
+      lenient('announcements.notify: must name one or more sinks', ' (announcement alerts are off)')
     } else {
-      if (new Set(notify).size !== notify.length) problems.push('announcements.notify: must not contain duplicates')
-      for (const sink of notify) if (!isSink(sink)) problems.push(`announcements.notify references unknown sink "${sink}"`)
-      announcementNotify = notify
+      if (new Set(notify).size !== notify.length) lenient('announcements.notify: must not contain duplicates')
+      announcementNotify = knownSinks([...new Set(notify)], (sink) => `announcements.notify references unknown sink "${sink}"`)
     }
   }
 
-  const defaultNotify = config.defaults?.notify === undefined ? Object.keys(sinks) : stringList(config.defaults.notify, 'defaults.notify', problems)
-  for (const s of config.defaults?.notify === undefined ? [] : defaultNotify) if (!isSink(s)) problems.push(`defaults.notify references unknown sink "${s}"`)
+  const defaultNotify = config.defaults?.notify === undefined
+    ? Object.keys(sinks)
+    : knownSinks(stringList(config.defaults.notify, 'defaults.notify', problems, save), (s) => `defaults.notify references unknown sink "${s}"`)
   let defaultGrace = 300
   let defaultRenotifyEvery: number | null = null
   let defaultRenotifyMax: number | null = null
@@ -855,8 +896,7 @@ export function normalizeConfig(config: StatusPingConfig, options: NormalizeOpti
       }
       if (seen.has(input.id)) fail('duplicate id')
       seen.add(input.id)
-      const notify = input.notify === undefined ? defaultNotify : stringList(input.notify, `${where}.notify`, problems)
-      for (const s of notify) if (!isSink(s)) fail(`notify references unknown sink "${s}"`)
+      const notify = input.notify === undefined ? defaultNotify : knownSinks(stringList(input.notify, `${where}.notify`, problems, save), (s) => `${where}: notify references unknown sink "${s}"`)
 
       let renotifyEvery = defaultRenotifyEvery
       if (input.renotifyEvery !== undefined) {
@@ -893,10 +933,11 @@ export function normalizeConfig(config: StatusPingConfig, options: NormalizeOpti
             } catch (error) {
               fail((error as Error).message)
             }
-            const notifyStep = stringList(step.notify, `${where}: ${stepWhere}.notify`, problems)
-            if (!notifyStep.length) fail(`${stepWhere}.notify must name one or more sinks`)
-            if (new Set(notifyStep).size !== notifyStep.length) fail(`${stepWhere}.notify must not contain duplicates`)
-            for (const sink of notifyStep) if (!isSink(sink)) fail(`${stepWhere}.notify references unknown sink "${sink}"`)
+            const listed = stringList(step.notify, `${where}: ${stepWhere}.notify`, problems, save)
+            if (!listed.length) fail(`${stepWhere}.notify must name one or more sinks`)
+            if (new Set(listed).size !== listed.length) fail(`${stepWhere}.notify must not contain duplicates`)
+            // A step left with no known channel on load still gates escalation; it just sends nothing.
+            const notifyStep = knownSinks(listed, (sink) => `${where}: ${stepWhere}.notify references unknown sink "${sink}"`)
             if (after !== null) {
               if (stepIndex === 0 && after !== 0) fail('escalation[0].after must be 0s')
               if (after <= previous) fail(`${stepWhere}.after must be strictly greater than the previous step`)
@@ -1046,24 +1087,19 @@ export function normalizeConfig(config: StatusPingConfig, options: NormalizeOpti
     problems.push(`peer.healthMonitor: "${peer.healthMonitor}" must be an http monitor`)
   }
 
-  const maxConfirmationsPerTick = config.limits?.maxConfirmationsPerTick ?? 6
-  if (!Number.isInteger(maxConfirmationsPerTick) || maxConfirmationsPerTick < 1 || maxConfirmationsPerTick > 35) {
-    problems.push('limits.maxConfirmationsPerTick must be a whole number from 1 to 35')
-  }
-  const pingPerIpPerMinute = config.limits?.pingPerIpPerMinute ?? 60
-  if (!Number.isInteger(pingPerIpPerMinute) || pingPerIpPerMinute < 1 || pingPerIpPerMinute > 10_000) {
-    problems.push('limits.pingPerIpPerMinute must be a whole number from 1 to 10000')
-  }
+  const limitsInput = config.limits && typeof config.limits === 'object' ? config.limits : undefined
+  const bounded = (key: keyof typeof LIMIT_BOUNDS, fallback: number) =>
+    boundedNumber(limitsInput?.[key], fallback, `limits.${key}`, LIMIT_BOUNDS[key], problems, save, true, options.warnings)
   const limits = {
-    maxChecksPerTick: boundedNumber(config.limits?.maxChecksPerTick, 35, 'limits.maxChecksPerTick', LIMIT_BOUNDS.maxChecksPerTick, problems, options.save === true),
-    tickBudgetMs: boundedNumber(config.limits?.tickBudgetMs, 20_000, 'limits.tickBudgetMs', LIMIT_BOUNDS.tickBudgetMs, problems, options.save === true),
-    maxConfirmationsPerTick: config.limits?.maxConfirmationsPerTick ?? 6,
-    pingPerIpPerMinute,
+    maxChecksPerTick: bounded('maxChecksPerTick', 35),
+    tickBudgetMs: bounded('tickBudgetMs', 20_000),
+    maxConfirmationsPerTick: bounded('maxConfirmationsPerTick', 6),
+    pingPerIpPerMinute: bounded('pingPerIpPerMinute', 60),
   }
 
-  const access = normalizeAccess(config.access, problems, options.save === true)
-  const pages = normalizePages(config, monitors, access, problems, options.save === true)
-  const maintenance = normalizeMaintenance(config.maintenance, monitors, timezone, problems, options.save === true)
+  const access = normalizeAccess(config.access, problems, save, options.warnings)
+  const pages = normalizePages(config, monitors, access, problems, save, options.warnings)
+  const maintenance = normalizeMaintenance(config.maintenance, monitors, timezone, problems, save)
   const home = config.home ?? pages.find((p) => p.access === 'public')?.slug ?? null
   if (config.home && !pages.some((p) => p.slug === config.home)) problems.push(`home: unknown page "${config.home}"`)
 
@@ -1230,6 +1266,7 @@ function normalizePages(
   access: NormalizedAccess | null,
   problems: string[],
   save = false,
+  warnings?: string[],
 ): NormalizedPage[] {
   const inputs: PageInput[] = config.pages === undefined ? [
     { slug: 'status', title: config.title, description: config.description, access: 'public', monitors: ['*'] },
@@ -1265,11 +1302,13 @@ function normalizePages(
       if (!access) problems.push(`${where}: restricted access requires an \`access.provider\` config`)
       const sso = access?.provider.type === 'oidc'
       const match = normalizeMatch(p.access, `${where}: access`, sso, problems, save)
-      const teams = stringList(p.access.teams, `${where}: access.teams`, problems, save)
-      for (const t of teams) if (access && !Object.prototype.hasOwnProperty.call(access.teams, t)) problems.push(`${where}: unknown team "${t}"`)
-      if (!match.emails.length && !match.groups.length && !teams.length) {
+      const listed = stringList(p.access.teams, `${where}: access.teams`, problems, save)
+      if (!match.emails.length && !match.groups.length && !listed.length) {
         problems.push(`${where}: access must list emails${sso ? ', groups' : ''} or teams (or be 'public')`)
       }
+      // Before 0.3.12 a team named like an Object.prototype member ("constructor") resolved, so a
+      // stored page may list one. Loading drops it; the page stays restricted to whoever is left.
+      const teams = access ? knownTeams(listed, access.teams, where, problems, save, warnings) : listed
       pageAccess = { ...match, teams }
     }
     return {
@@ -1280,6 +1319,18 @@ function normalizePages(
       show: resolveFields(p.show ?? (pageAccess === 'public' ? DEFAULT_PUBLIC_FIELDS : 'all'), `${where}: show`, problems),
       monitorIds: ids,
     }
+  })
+}
+
+/** The listed teams that exist. An unknown one is refused when saving and dropped (with a warning) when loading. */
+function knownTeams(listed: string[], teams: Record<string, NormalizedMatch>, where: string, problems: string[], save: boolean, warnings?: string[]): string[] {
+  return listed.filter((team) => {
+    // Own keys only: "constructor" is not a team.
+    if (Object.prototype.hasOwnProperty.call(teams, team)) return true
+    const message = `${where}: unknown team "${team}"`
+    if (save) problems.push(message)
+    else warnings?.push(`${message} (left out)`)
+    return false
   })
 }
 
@@ -1303,7 +1354,7 @@ function normalizeMatch(input: MatchInput | undefined, where: string, sso: boole
   return { emails, groups }
 }
 
-function normalizeAccess(input: AccessInput | undefined, problems: string[], save = false): NormalizedAccess | null {
+function normalizeAccess(input: AccessInput | undefined, problems: string[], save = false, warnings?: string[]): NormalizedAccess | null {
   if (!input) return null
   if (typeof input !== 'object' || !input.provider || typeof input.provider !== 'object') {
     problems.push('access: must contain a provider object')
@@ -1336,14 +1387,15 @@ function normalizeAccess(input: AccessInput | undefined, problems: string[], sav
   if (input.admins !== undefined) {
     const match = normalizeMatch(input.admins, 'access.admins', sso, problems, save)
     // Non-string admin teams always failed (as unknown teams), so they are reported on load too.
-    const adminTeams = stringList(input.admins?.teams, 'access.admins.teams', problems)
-    for (const team of adminTeams) if (!Object.prototype.hasOwnProperty.call(teams, team)) problems.push(`access.admins: unknown team "${team}"`)
-    if (!match.emails.length && !match.groups.length && !adminTeams.length) {
+    const listedTeams = stringList(input.admins?.teams, 'access.admins.teams', problems)
+    if (!match.emails.length && !match.groups.length && !listedTeams.length) {
       problems.push(`access.admins: must list emails${sso ? ', groups' : ''} or teams`)
     }
+    // As for pages: a prototype-named team an older release accepted is dropped on load.
+    const adminTeams = knownTeams(listedTeams, teams, 'access.admins', problems, save, warnings)
     admins = { ...match, teams: adminTeams }
   }
-  const sessionHours = boundedNumber(input.sessionHours, 12, 'access.sessionHours', SESSION_HOURS_BOUNDS, problems, save, false)
+  const sessionHours = boundedNumber(input.sessionHours, 12, 'access.sessionHours', SESSION_HOURS_BOUNDS, problems, save, false, warnings)
   return { provider: p, teams, sessionHours, admins }
 }
 

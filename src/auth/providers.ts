@@ -435,6 +435,20 @@ export async function currentViewer(c: Context, deps: Deps): Promise<Viewer | nu
   return sessionViewer(c, deps, 'oidc')
 }
 
+/**
+ * A browser credential that verifies, without a database read beyond the stored session key and
+ * without checking a password: the signed `sp_session` cookie (email + password and SSO), or a
+ * Cloudflare Access token whose signature, issuer, audience and expiry check out (the JWKS is
+ * cached, so a forged token costs at most one key fetch per cache period). An `Authorization:
+ * Basic` header is not counted: checking it costs a PBKDF2 derivation and a rate-limit write.
+ */
+export async function hasVerifiedSignIn(c: Context, deps: Deps): Promise<boolean> {
+  const p = deps.config.access?.provider
+  if (!p) return false
+  if (p.type === 'cloudflare-access') return (await cloudflareViewer(c, deps, p)) !== null
+  return (await sessionViewer(c, deps, p.type)) !== null
+}
+
 /** Cheap check before doing any crypto: does the request carry sign-in credentials at all? */
 export function hasCredentials(c: Context): boolean {
   return Boolean(

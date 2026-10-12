@@ -118,8 +118,11 @@ describe('config validation', () => {
     const config = normalizeConfig(testConfig({ announcements: { notify: ['ntfy'] } }))
     expect(config.announcements.notify).toEqual(['ntfy'])
     expect(normalizeConfig(testConfig()).announcements.notify).toEqual([])
-    expect(() => normalizeConfig(testConfig({ announcements: { notify: ['ntfy', 'ntfy', 'missing'] } }))).toThrow(/announcements\.notify: must not contain duplicates[\s\S]*announcements\.notify references unknown sink "missing"/)
-    expect(() => normalizeConfig(testConfig({ announcements: { notify: [] } }))).toThrow('announcements.notify: must name one or more sinks')
+    expect(() => normalizeConfig(testConfig({ announcements: { notify: ['ntfy', 'ntfy', 'missing'] } }), { save: true })).toThrow(/announcements\.notify: must not contain duplicates[\s\S]*announcements\.notify references unknown sink "missing"/)
+    expect(() => normalizeConfig(testConfig({ announcements: { notify: [] } }), { save: true })).toThrow('announcements.notify: must name one or more sinks')
+    // Loading a stored configuration keeps the known, de-duplicated names instead of failing.
+    expect(normalizeConfig(testConfig({ announcements: { notify: ['ntfy', 'ntfy', 'missing'] } })).announcements.notify).toEqual(['ntfy'])
+    expect(normalizeConfig(testConfig({ announcements: { notify: [] } })).announcements.notify).toEqual([])
   })
 
   it('validates email sink recipients and Resend provider settings', () => {
@@ -151,7 +154,7 @@ describe('config validation', () => {
       ],
     })
     try {
-      normalizeConfig(bad)
+      normalizeConfig(bad, { save: true })
       expect.unreachable()
     } catch (e) {
       const problems = (e as ConfigError).problems.join('\n')

@@ -1,0 +1,52 @@
+{
+  "note": "access.teams as a list and a non-string SSO group, accepted before 0.3.12",
+  "config": {
+    "title": "Example Status",
+    "baseUrl": "https://status.example.test",
+    "timezone": "UTC",
+    "admin": true,
+    "access": {
+      "provider": {
+        "type": "oidc",
+        "issuer": "https://id.example.test",
+        "clientId": {
+          "$env": "OIDC_CLIENT_ID"
+        },
+        "clientSecret": {
+          "$env": "OIDC_CLIENT_SECRET"
+        }
+      },
+      "teams": [],
+      "admins": {
+        "emails": [
+          "owner@example.test"
+        ],
+        "groups": [
+          "ops",
+          5
+        ]
+      }
+    },
+    "groups": [
+      {
+        "name": "Web",
+        "monitors": [
+          {
+            "id": "site",
+            "kind": "http",
+            "name": "Site",
+            "url": "https://www.example.test/health",
+            "interval": "1m"
+          },
+          {
+            "id": "nightly",
+            "kind": "push",
+            "name": "Nightly job",
+            "schedule": "0 3 * * *",
+            "grace": "30m"
+          }
+        ]
+      }
+    ]
+  }
+}
