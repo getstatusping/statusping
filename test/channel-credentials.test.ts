@@ -117,6 +117,20 @@ describe('stored channel credentials', () => {
     expect((await s.putConfig(sink('https://elsewhere.example.test'))).status).toBe(200)
   })
 
+  it('does not store a value entered for a credential that is a real Worker secret', async () => {
+    const s = await setup({ SINK_OPS_TOKEN: 'from-the-environment' })
+    // MCP and the Settings form both enter the credential; neither stores it.
+    expect((await s.tool('add_channel', { name: 'ops', type: 'gotify', settings: { server: 'https://gotify.example.test', token: 'typed-over-the-secret' } })).error).toBeUndefined()
+    expect(await s.secret('env:SINK_OPS_TOKEN')).toBeUndefined()
+    await s.send('/admin/channels/ops')
+    expect((await s.post('/admin/channels/ops', { server: 'https://gotify.example.test', token: 'typed-again' })).res.status).toBe(303)
+    expect(await s.secret('env:SINK_OPS_TOKEN')).toBeUndefined()
+    expect(await s.db.first(`SELECT name FROM instance_secrets WHERE value IN ('typed-over-the-secret', 'typed-again')`)).toBeNull()
+    // A credential without a Worker secret is still stored as before.
+    expect((await s.tool('add_channel', { name: 'other', type: 'gotify', settings: { server: 'https://gotify.example.test', token: 'stored-token' } })).error).toBeUndefined()
+    expect(await s.secret('env:SINK_OTHER_TOKEN')).toBe('stored-token')
+  })
+
   it('refuses channel names that would share stored credentials, and deletes by exact name', async () => {
     const s = await setup()
     expect((await s.tool('add_channel', { name: 'foo', type: 'slack', settings: { webhookUrl: 'https://hooks.slack.test/foo' } })).error).toBeUndefined()

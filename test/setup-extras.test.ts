@@ -60,6 +60,14 @@ describe('setup wizard: alerts, import, unattended setup, and recovery', () => {
     return { b, csrf, password }
   }
 
+  it('does not store a channel credential that is a real Worker secret', async () => {
+    const { app, db } = await instance({ SINK_SLACK_WEBHOOKURL: 'https://hooks.slack.test/T0/B0/from-env' })
+    const { b, csrf } = await toMonitorStep(app, db)
+    expect((await b.post('/setup/monitor', { csrf, skip: '1' })).res.status).toBe(303)
+    expect((await b.post('/setup/channel', { csrf, type: 'slack', webhookUrl: 'https://hooks.slack.test/T0/B0/typed' })).res.status).toBe(303)
+    expect(await db.first(`SELECT name FROM instance_secrets WHERE name = 'env:SINK_SLACK_WEBHOOKURL'`)).toBeNull()
+  })
+
   it('sets up an alert channel, sends a test, and keeps its secret out of the draft', async () => {
     const { app, db, calls } = await instance()
     const { b, csrf } = await toMonitorStep(app, db)

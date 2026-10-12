@@ -13,7 +13,7 @@ import type { AuthProviderInput } from '../config.ts'
 import { type Deps, refreshAdminConfig, storedEnvKey } from '../deps.ts'
 import { ACCESS_DOCS_URL, OIDC_PRESETS, presetById, TEAM_DOMAIN } from '../setup/instructions.ts'
 import { readRecoverySession, RECOVERY_COOKIE } from '../setup/recovery.ts'
-import { randomToken, timingSafeEqual } from '../util/crypto.ts'
+import { randomToken, sha256Hex, timingSafeEqual } from '../util/crypto.ts'
 import { consumeAttempt } from '../rate-limit.ts'
 import { nowSeconds } from '../util/time.ts'
 import type { Form } from './forms.ts'
@@ -29,6 +29,9 @@ const DRAFT_KEY = 'access_switch'
 const LOGIN_COOKIE = 'sp_method_oidc'
 const DRAFT_SECONDS = 60 * 60
 const pendingKey = (name: string) => `pending:${name}`
+/** A digest of a value entered to confirm a Worker secret; the value itself is never stored. */
+const confirmKey = (name: string) => `pending:confirm:${name}`
+const confirmDigest = (value: string) => sha256Hex(`statusping-confirm:${value}`)
 
 export interface SwitchDraft {
   method: Method
@@ -86,14 +89,15 @@ async function credentials(deps: Deps, draft: Pick<SwitchDraft, 'method' | 'issu
   const out: Record<string, Credential> = {}
   const same = keepsIssuer(deps, draft)
   for (const name of SECRETS[draft.method]) {
-    const pending = (await deps.db.first<{ value: string }>(`SELECT value FROM instance_secrets WHERE name = ?`, [pendingKey(name)]))?.value
     if (deps.hasRealEnv(name)) {
       // A Worker secret always wins at sign-in, so for a new issuer it counts only once the
       // administrator has entered the same value (proving it is meant for that issuer).
       const env = deps.getEnv(name)!
-      out[name] = same || (pending !== undefined && timingSafeEqual(pending, env)) ? { value: env, source: 'env' } : { source: false, envSet: true }
+      const confirmed = same ? undefined : (await deps.db.first<{ value: string }>(`SELECT value FROM instance_secrets WHERE name = ?`, [confirmKey(name)]))?.value
+      out[name] = same || (confirmed !== undefined && timingSafeEqual(confirmed, await confirmDigest(env))) ? { value: env, source: 'env' } : { source: false, envSet: true }
       continue
     }
+    const pending = (await deps.db.first<{ value: string }>(`SELECT value FROM instance_secrets WHERE name = ?`, [pendingKey(name)]))?.value
     if (pending) { out[name] = { value: pending, source: 'pending' }; continue }
     const current = same ? deps.getEnv(name) : undefined
     out[name] = current ? { value: current, source: 'current' } : { source: false }
@@ -258,9 +262,16 @@ export function mountAccessSwitch(app: Hono, deps: Deps, h: SwitchHelpers): void
     const next: SwitchDraft = { ...draft, verifiedEmail: undefined }
     const stash = async (name: string, newIssuer = false) => {
       const value = text(p.form, name)
-      // A Worker secret wins anyway; entering it again only confirms it for a new issuer.
-      if (!value || value.length > 2048 || (deps.hasRealEnv(name) && !newIssuer)) return
-      await deps.db.run(`INSERT INTO instance_secrets (name, value, created_at) VALUES (?, ?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value, created_at = excluded.created_at`, [pendingKey(name), value, now])
+      if (!value || value.length > 2048) return
+      const put = (key: string, stored: string) => deps.db.run(`INSERT INTO instance_secrets (name, value, created_at) VALUES (?, ?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value, created_at = excluded.created_at`, [key, stored, now])
+      if (deps.hasRealEnv(name)) {
+        // A Worker secret wins anyway; entering it again only confirms it for a new issuer. Only
+        // a digest is kept, so the value can never be promoted to a stored credential that would
+        // silently take over if the Worker secret were later deleted.
+        if (newIssuer) await put(confirmKey(name), await confirmDigest(value))
+        return
+      }
+      await put(pendingKey(name), value)
     }
     if (draft.method === 'basic') {
       const password = typeof p.form.password === 'string' ? p.form.password : ''

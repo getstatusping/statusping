@@ -187,7 +187,10 @@ export async function saveAdminConfig(
   getEnv: (name: string) => string | undefined,
   opts: SaveOptions = {},
 ): Promise<StoredAdminConfig & { revision: number }> {
-  const secrets = opts.secrets ?? []
+  // A value entered for a name that is also a real Worker secret / environment variable is not
+  // stored: the real one wins, and a stale stored copy would silently take over if the operator
+  // later deleted the Worker secret.
+  const secrets = (opts.secrets ?? []).filter((s) => !opts.hasRealEnv?.(s.name))
   const pending = new Map(secrets.map((s) => [s.name, s.value]))
   const env = pending.size
     ? (name: string) => (opts.hasRealEnv?.(name) ? getEnv(name) : pending.get(name) ?? getEnv(name))

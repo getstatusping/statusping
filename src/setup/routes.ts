@@ -554,7 +554,10 @@ export function mountSetupRoutes(app: Hono, deps: Deps): void {
     const values = Object.fromEntries(Object.entries(r.form).filter(([key, value]) => key !== 'csrf' && typeof value === 'string' && !SINK_FIELDS[type].fields.some((f) => f.secret && f.key === key) && key !== 'password' && key !== 'apiKey')) as Record<string, string>
     let error: string
     try {
-      const { sink, secrets } = sinkFromForm(r.form, name, existing)
+      const { sink, secrets: entered } = sinkFromForm(r.form, name, existing)
+      // A value for a name that is also a real Worker secret is not stored: the real one wins,
+      // and a stale stored copy would take over if the Worker secret were later deleted.
+      const secrets = entered.filter((secret) => !deps.hasRealEnv(secret.name))
       const pending = Object.fromEntries(secrets.map((secret) => [secret.name, secret.value]))
       try { validateAdminConfig(draftConfig({ ...draft, channel: { name, sink } }), (env) => pending[env] ?? deps.getEnv(env)) } catch (e) { throw new FormError((e as Error).message) }
       const now = nowSeconds()

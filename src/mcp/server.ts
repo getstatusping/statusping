@@ -56,7 +56,8 @@ export function mountMcp(app: Hono, deps: Deps): void {
   const save = async (token: ApiToken, next: AdminConfig, secrets: Array<{ name: string; value: string }> = [], opts: SaveOptions = {}) => {
     // Credentials are checked against the values about to be stored, and stored in the same batch as the config.
     const pending = new Map(secrets.map((s) => [s.name, s.value]))
-    const getEnv = (name: string) => pending.get(name) ?? deps.getEnv(name)
+    // A real Worker secret wins over an entered value, which is then not stored either.
+    const getEnv = (name: string) => (deps.hasRealEnv(name) ? deps.getEnv(name) : pending.get(name) ?? deps.getEnv(name))
     try { validateAdminConfig({ ...next, admin: true }, getEnv) } catch (error) { throw new ToolError(opts.yaml ? locateProblems(opts.yaml, (error as Error).message) : (error as Error).message) }
     const now = nowSeconds()
     if (opts.base !== undefined && opts.base !== await currentRevision(deps.db)) throw new ToolError(`The configuration changed after revision ${opts.base}. Call get_configuration again and retry.`)

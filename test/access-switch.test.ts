@@ -219,6 +219,8 @@ describe('changing the sign-in method from Settings', () => {
     expect(await start()).toBe('/admin/access/method?notice=method-saved')
     // The same value does.
     await s.post('/admin/access/method/settings', { preset: 'other', issuer: 'https://evil.test', OIDC_CLIENT_ID: 'env-client', OIDC_CLIENT_SECRET: 'env-secret' })
+    // Only a digest of the confirming value is kept, never the value itself.
+    expect(await s.db.first(`SELECT name FROM instance_secrets WHERE value IN ('env-secret', 'env-client', 'other-secret')`)).toBeNull()
     const authorize = new URL(await start())
     nonce = authorize.searchParams.get('nonce')!
     expect((await s.get(`/auth/callback?code=c&state=${authorize.searchParams.get('state')}`)).res.headers.get('location')).toBe('/admin/access/method')
