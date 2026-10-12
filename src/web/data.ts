@@ -2,7 +2,7 @@ import type { Monitor } from '../config.ts'
 import { listAnnouncements, type Announcement } from '../announcements.ts'
 import type { Deps } from '../deps.ts'
 import type { CheckResult } from '../evaluate/http.ts'
-import { activeMaintenance as activeMaintenanceForMonitor, maintenanceOccurrences, type MaintenanceOccurrence } from '../maintenance.ts'
+import { maintenanceAppliesTo, maintenanceOccurrencesLenient, type MaintenanceOccurrence } from '../maintenance.ts'
 import type { IncidentReason, MonitorStateRow, Status } from '../state.ts'
 import { DAY } from '../util/time.ts'
 
@@ -134,10 +134,47 @@ function mergedSeconds(intervals: readonly { start: number; end: number }[], fro
   return total
 }
 
-/** Planned exclusion is intentionally applied to the denominator and outages separately. */
+interface Interval {
+  start: number
+  end: number
+}
+
+function excludesUptime(occurrence: MaintenanceOccurrence): boolean {
+  return (occurrence.window as { excludeFromUptime?: boolean }).excludeFromUptime !== false
+}
+
+/** Sorted, disjoint union of intervals. */
+function mergeIntervals(intervals: readonly Interval[]): Interval[] {
+  const sorted = [...intervals].sort((a, b) => a.start - b.start || a.end - b.end)
+  const merged: Interval[] = []
+  for (const interval of sorted) {
+    const last = merged.at(-1)
+    if (last && interval.start <= last.end) last.end = Math.max(last.end, interval.end)
+    else merged.push({ start: interval.start, end: interval.end })
+  }
+  return merged
+}
+
+/** Index of the first sorted, disjoint interval ending after `at`. */
+function firstEndingAfter(intervals: readonly Interval[], at: number): number {
+  let low = 0
+  let high = intervals.length
+  while (low < high) {
+    const mid = (low + high) >>> 1
+    if (intervals[mid]!.end > at) high = mid
+    else low = mid + 1
+  }
+  return low
+}
+
+/**
+ * Planned exclusion is intentionally applied to the denominator and outages separately.
+ * `excluded` is the sorted, disjoint union of uptime-excluding maintenance, so a day's share is
+ * found by binary search instead of scanning every occurrence in the 90-day history.
+ */
 function uptimeBetween(
   incidents: IncidentView[],
-  maintenance: readonly MaintenanceOccurrence[],
+  excluded: readonly Interval[],
   createdAt: number,
   from: number,
   to: number,
@@ -146,31 +183,23 @@ function uptimeBetween(
   const start = Math.max(from, createdAt)
   const end = Math.min(to, now)
   if (end <= start) return { uptime: null, down: 0 }
-  const excluded = maintenance.filter((window) => (window.window as { excludeFromUptime?: boolean }).excludeFromUptime !== false)
-  const excludedSeconds = mergedSeconds(excluded, start, end)
+  let excludedSeconds = 0
+  for (let i = firstEndingAfter(excluded, start); i < excluded.length && excluded[i]!.start < end; i++) {
+    excludedSeconds += Math.min(end, excluded[i]!.end) - Math.max(start, excluded[i]!.start)
+  }
   const eligible = Math.max(0, end - start - excludedSeconds)
   if (eligible === 0) return { uptime: null, down: 0 }
 
   // Intersect every outage with the *complement* of the union of excluded windows. Splitting
   // avoids double-counting both overlapping incidents and overlapping maintenance windows.
-  const excludedIntervals = excluded
-    .map((window) => ({ start: Math.max(start, window.start), end: Math.min(end, window.end) }))
-    .filter((window) => window.end > window.start)
-    .sort((a, b) => a.start - b.start || a.end - b.end)
-  const mergedExcluded: { start: number; end: number }[] = []
-  for (const interval of excludedIntervals) {
-    const last = mergedExcluded.at(-1)
-    if (last && interval.start <= last.end) last.end = Math.max(last.end, interval.end)
-    else mergedExcluded.push({ ...interval })
-  }
-  const outageIntervals: { start: number; end: number }[] = []
+  const outageIntervals: Interval[] = []
   for (const incident of incidents) {
     if (incident.severity !== 'outage') continue
     let cursor = Math.max(start, incident.startedAt)
     const outageEnd = Math.min(end, incident.resolvedAt ?? now)
     if (outageEnd <= cursor) continue
-    for (const excludedInterval of mergedExcluded) {
-      if (excludedInterval.end <= cursor) continue
+    for (let i = firstEndingAfter(excluded, cursor); i < excluded.length; i++) {
+      const excludedInterval = excluded[i]!
       if (excludedInterval.start >= outageEnd) break
       if (excludedInterval.start > cursor) outageIntervals.push({ start: cursor, end: Math.min(outageEnd, excludedInterval.start) })
       cursor = Math.max(cursor, excludedInterval.end)
@@ -182,15 +211,37 @@ function uptimeBetween(
   return { uptime: 1 - down / eligible, down }
 }
 
-function maintenanceForDay(windows: readonly MaintenanceOccurrence[], from: number, to: number): DayMaintenance[] {
-  return windows
-    .filter((window) => window.start < to && window.end > from)
-    .map((window) => ({
-      title: window.title,
-      start: window.start,
-      end: window.end,
-      excludeFromUptime: (window.window as { excludeFromUptime?: boolean }).excludeFromUptime !== false,
-    }))
+/** Maintenance as seen by every monitor sharing the same set of windows. */
+interface MaintenanceScope {
+  /** Occurrences overlapping the history, the present, and the upcoming week. */
+  occurrences: MaintenanceOccurrence[]
+  /** Union of uptime-excluding occurrences that began before now. */
+  excluded: Interval[]
+  /** Per history bar (oldest first), the occurrences overlapping that day. */
+  days: DayMaintenance[][]
+}
+
+function maintenanceScope(
+  occurrences: MaintenanceOccurrence[],
+  firstDay: number,
+  now: number,
+): MaintenanceScope {
+  const history = occurrences.filter((occurrence) => occurrence.start < now)
+  const excluded = mergeIntervals(history.filter(excludesUptime))
+  const days: DayMaintenance[][] = Array.from({ length: HISTORY_DAYS }, () => [])
+  for (const occurrence of history) {
+    const first = Math.max(0, Math.floor((occurrence.start - firstDay) / DAY))
+    const last = Math.min(HISTORY_DAYS - 1, Math.floor((occurrence.end - 1 - firstDay) / DAY))
+    if (last < first) continue
+    const view: DayMaintenance = {
+      title: occurrence.title,
+      start: occurrence.start,
+      end: occurrence.end,
+      excludeFromUptime: excludesUptime(occurrence),
+    }
+    for (let day = first; day <= last; day++) days[day]!.push(view)
+  }
+  return { occurrences, excluded, days }
 }
 
 function pageMaintenance(
@@ -214,7 +265,7 @@ function pageMaintenance(
       start: occurrence.start,
       end: occurrence.end,
       recurring: occurrence.recurring,
-      excludeFromUptime: (occurrence.window as { excludeFromUptime?: boolean }).excludeFromUptime !== false,
+      excludeFromUptime: excludesUptime(occurrence),
       monitorIds,
       monitorNames: monitorIds.map((id) => names.get(id) ?? id),
     }
@@ -290,25 +341,44 @@ export async function loadStatusData(deps: Deps, now: number, monitorIds?: reado
   const openIncidents: StatusData['openIncidents'] = []
   const openWarnings: StatusData['openWarnings'] = []
 
+  // Expand each maintenance window once for the whole page, then share the derived history
+  // between monitors affected by the same windows. A window whose stored schedule overflows
+  // the occurrence cap is skipped with a warning instead of failing the page.
+  const horizon = now + 7 * DAY
+  const perWindow = config.maintenance.map((window) => maintenanceOccurrencesLenient([window], since, horizon))
+  const firstDay = todayStart - (HISTORY_DAYS - 1) * DAY
+  const scopes = new Map<string, MaintenanceScope>()
+  const scopeFor = (monitorId: string): MaintenanceScope => {
+    const indices = config.maintenance.flatMap((window, index) => (maintenanceAppliesTo(window, monitorId) ? [index] : []))
+    const key = indices.join(',')
+    let scope = scopes.get(key)
+    if (!scope) {
+      const occurrences = indices.flatMap((index) => perWindow[index]!)
+        .sort((a, b) => a.start - b.start || a.end - b.end || a.title.localeCompare(b.title))
+      scopes.set(key, (scope = maintenanceScope(occurrences, firstDay, now)))
+    }
+    return scope
+  }
+
   for (const monitor of config.monitors) {
     if (wanted && !wanted.has(monitor.id)) continue
     const createdAt = created.get(monitor.id)
     const state = stateById.get(monitor.id)
     if (createdAt === undefined || !state || state.status === 'paused') continue
     const incidents = incidentsBy.get(monitor.id) ?? []
-    const historyMaintenance = maintenanceOccurrences(config.maintenance, since, now, monitor.id)
-    const currentMaintenance = activeMaintenanceForMonitor(config.maintenance, monitor.id, now)
+    const scope = scopeFor(monitor.id)
+    const currentMaintenance = scope.occurrences.filter((occurrence) => occurrence.start <= now && now < occurrence.end)
     const dailyLatency = dailyByMonitor.get(monitor.id)
     const bars: DayBar[] = []
     for (let d = HISTORY_DAYS - 1; d >= 0; d--) {
       const from = todayStart - d * DAY
-      const { uptime, down } = uptimeBetween(incidents, historyMaintenance, createdAt, from, from + DAY, now)
+      const { uptime, down } = uptimeBetween(incidents, scope.excluded, createdAt, from, from + DAY, now)
       bars.push({
         day: new Date(from * 1000).toISOString().slice(0, 10),
         uptime,
         downSeconds: down,
         outages: down > 0 ? outagesOn(incidents, from, from + DAY, now) : [],
-        maintenance: maintenanceForDay(historyMaintenance, from, from + DAY),
+        maintenance: scope.days[HISTORY_DAYS - 1 - d]!,
         avgLatencyMs: dailyLatency?.get(from)?.avg_ms ?? null,
       })
     }
@@ -327,8 +397,8 @@ export async function loadStatusData(deps: Deps, now: number, monitorIds?: reado
       state,
       createdAt,
       bars,
-      uptime90: uptimeBetween(incidents, historyMaintenance, createdAt, since, now, now).uptime,
-      uptime24h: uptimeBetween(incidents, historyMaintenance, createdAt, now - DAY, now, now).uptime,
+      uptime90: uptimeBetween(incidents, scope.excluded, createdAt, since, now, now).uptime,
+      uptime24h: uptimeBetween(incidents, scope.excluded, createdAt, now - DAY, now, now).uptime,
       latency24h: Array.from({ length: 24 }, (_, index) => {
         const hour = hourStart + index * 3600
         const bucket = hourlyByMonitor.get(monitor.id)?.get(hour)
@@ -339,7 +409,9 @@ export async function loadStatusData(deps: Deps, now: number, monitorIds?: reado
     })
   }
   const pageMonitors = groups.flatMap((group) => group.monitors.map((view) => view.monitor))
-  const pageWindows = maintenanceOccurrences(config.maintenance, now, now + 7 * DAY)
+  const pageWindows = perWindow.flat()
+    .filter((occurrence) => occurrence.end > now && occurrence.start < horizon)
+    .sort((a, b) => a.start - b.start || a.end - b.end || a.title.localeCompare(b.title))
   const activeMaintenance = pageMaintenance(pageWindows.filter((window) => window.start <= now && window.end > now), pageMonitors)
   const upcomingMaintenance = pageMaintenance(pageWindows.filter((window) => window.start > now), pageMonitors)
   const pageMonitorIds = new Set(pageMonitors.map((monitor) => monitor.id))

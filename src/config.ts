@@ -1,5 +1,6 @@
 import { Cron } from 'croner'
 import { parseJsonPath } from './evaluate/json.ts'
+import { recurringScheduleProblem } from './maintenance.ts'
 import { isValidTimeZone, parseDuration } from './util/time.ts'
 import { OFFICIAL_MANIFEST_URL, OFFICIAL_RELEASE_PUBLIC_KEY } from './updates.ts'
 
@@ -646,7 +647,16 @@ function normalizeJsonAssertions(input: unknown, fail: (message: string) => void
   return assertions
 }
 
-export function normalizeConfig(config: StatusPingConfig): NormalizedConfig {
+export interface NormalizeOptions {
+  /**
+   * Saving a config (rather than loading a stored one) also enforces rules that would make an
+   * already-running site fail to load if applied retroactively, such as the minimum cadence
+   * of recurring maintenance.
+   */
+  save?: boolean
+}
+
+export function normalizeConfig(config: StatusPingConfig, options: NormalizeOptions = {}): NormalizedConfig {
   const problems: string[] = []
   const sinks = config.sinks && typeof config.sinks === 'object' && !Array.isArray(config.sinks) ? config.sinks : {}
   if (config.sinks !== undefined && sinks !== config.sinks) problems.push('sinks: must be an object')
@@ -1016,7 +1026,7 @@ export function normalizeConfig(config: StatusPingConfig): NormalizedConfig {
 
   const access = normalizeAccess(config.access, problems)
   const pages = normalizePages(config, monitors, access, problems)
-  const maintenance = normalizeMaintenance(config.maintenance, monitors, timezone, problems)
+  const maintenance = normalizeMaintenance(config.maintenance, monitors, timezone, problems, options.save === true)
   const home = config.home ?? pages.find((p) => p.access === 'public')?.slug ?? null
   if (config.home && !pages.some((p) => p.slug === config.home)) problems.push(`home: unknown page "${config.home}"`)
 
@@ -1073,6 +1083,7 @@ function normalizeMaintenance(
   monitors: Monitor[],
   defaultTimezone: string,
   problems: string[],
+  save: boolean,
 ): NormalizedMaintenance[] {
   if (input === undefined) return []
   if (!Array.isArray(input)) {
@@ -1158,6 +1169,9 @@ function normalizeMaintenance(
         } catch (error) {
           problems.push(`${where}.schedule: invalid cron expression "${schedule}": ${(error as Error).message}`)
         }
+        // A stored window that breaks this still loads; rendering skips it if it overflows.
+        const cadence = save ? recurringScheduleProblem(schedule, isValidTimeZone(tz) ? tz : 'UTC') : null
+        if (cadence) problems.push(`${where}.schedule: "${schedule}" ${cadence}`)
       }
       if (!title || !ids.length || !schedule || !duration || duration <= 0 || !isValidTimeZone(tz)) continue
       normalized.push({ kind: 'recurring', title, monitors: ids, excludeFromUptime, schedule, tz, duration })

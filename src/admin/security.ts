@@ -195,7 +195,7 @@ export function validateAdminConfig(value: unknown, getEnv: EnvGetter, mode: 'sa
   try {
     // Environment-backed monitor URLs need a harmless placeholder during validation.  Their
     // actual value stays in the environment and is resolved only when the config becomes active.
-    const normalized = normalizeConfig(resolveConfigEnv(config as unknown as StatusPingConfig, getEnv, true))
+    const normalized = normalizeConfig(resolveConfigEnv(config as unknown as StatusPingConfig, getEnv, true), { save: mode === 'save' })
     const tenant = parseTenantPolicy(getEnv(TENANT_ENV))
     if (!tenant) return { config: config as unknown as AdminConfig, normalized }
     if (mode === 'save') {

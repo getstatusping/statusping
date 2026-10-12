@@ -322,6 +322,42 @@ describe('HTTP routes (no sign-in configured)', () => {
     expect(json.monitors.find((monitor) => monitor.id === 'site')).toMatchObject({ uptime24h: 1, maintenance: [{ title: 'Live deploy' }] })
   })
 
+  it('a stored maintenance window that runs every five minutes does not take the pages down', async () => {
+    const config = testConfig({ maintenance: [{ title: 'Frequent deploys', monitors: '*', schedule: '*/5 * * * *', duration: '2m' }] })
+    const { app } = await setup({ config })
+    for (const path of ['/', '/api/status', '/pages/status/m/site', '/badge/status/site.svg']) {
+      const response = await app.request(`https://dense.status.test${path}`)
+      expect(response.status, path).toBe(200)
+    }
+    const json = (await (await app.request('https://dense.status.test/api/status')).json()) as { maintenance: { upcoming: unknown[] } }
+    expect(json.maintenance.upcoming).toEqual([])
+  })
+
+  it('renders an hourly maintenance window into every history bar and the uptime', async () => {
+    const config = testConfig({ maintenance: [{ title: 'Hourly sync', monitors: ['site'], schedule: '0 * * * *', duration: '10m' }] })
+    const { app, deps } = await setup({ config })
+    const now = Math.floor(Date.now() / 1000)
+    const todayStart = now - (now % 86_400)
+    const yesterday = todayStart - 86_400
+    await db.run(`UPDATE monitors SET created_at = ? WHERE id = ?`, [todayStart - 3 * 86_400, 'site'])
+    // Two hours down yesterday, of which 2 x 10 minutes fall inside maintenance.
+    await db.run(
+      `INSERT INTO incidents (monitor_id, reason, detail, started_at, resolved_at) VALUES (?, ?, ?, ?, ?)`,
+      ['site', 'check_failed', 'outage', yesterday + 5 * 3600, yesterday + 7 * 3600],
+    )
+    const data = await loadStatusData(deps, now, ['site', 'heartbeat'])
+    const site = data.groups.flatMap((group) => group.monitors).find((view) => view.monitor.id === 'site')!
+    const bar = site.bars.at(-2)!
+    expect(bar.maintenance).toHaveLength(24)
+    expect(bar.downSeconds).toBe(2 * 3600 - 2 * 600)
+    expect(bar.uptime).toBeCloseTo(1 - 6000 / (86_400 - 24 * 600), 10)
+    expect(site.bars.at(-1)!.maintenance).toHaveLength(Math.floor((now - todayStart - 1) / 3600) + 1)
+    const heartbeat = data.groups.flatMap((group) => group.monitors).find((view) => view.monitor.id === 'heartbeat')!
+    expect(heartbeat.bars.every((day) => day.maintenance.length === 0)).toBe(true)
+    expect(data.upcomingMaintenance.length).toBeGreaterThanOrEqual(7 * 24 - 1)
+    expect((await app.request('https://hourly.status.test/')).status).toBe(200)
+  })
+
   it('JSON API follows the page fields', async () => {
     const { app } = await setup()
     const json = (await (await app.request('/api/status')).json()) as {
