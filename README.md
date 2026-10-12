@@ -321,14 +321,18 @@ Custom domain** at `app.statusp.ing`:
 1. Enter the domain, such as `status.example.com`, and choose **Connect domain**.
 2. At your DNS provider, add a `CNAME` record from `status` to `cname.statusp.ing`.
    With Cloudflare DNS, leave the record **DNS only** (grey cloud).
-3. StatusPing checks every minute and shows **Connected** once the name resolves
-   and its certificate is issued. **Check now** checks at once.
-4. Update **Address** in the site's Settings as above. The `<name>.statusp.ing`
+3. Add the `TXT` record shown on the page: name `_statusping-challenge.status`
+   (in full, `_statusping-challenge.status.example.com`) with the value shown. It
+   proves the domain is yours. Keep it while the domain is connected: StatusPing
+   checks it daily, and if it goes missing the domain stops working after 3 days.
+4. StatusPing checks every minute and shows **Live** once the name resolves, its
+   certificate is issued and the `TXT` record is found. **Check now** checks at once.
+5. Update **Address** in the site's Settings as above. The `<name>.statusp.ing`
    address keeps working.
 
 A domain at the zone apex (`example.com` itself) needs a DNS provider that supports
 CNAME flattening or `ALIAS` records; a subdomain is simpler. If a domain shows
-**Could not connect**, check its record, remove it, and add it again. If the
+**Could not connect**, check its records and choose **Check now**. Someone else's unproven claim on your domain doesn't block you: adding it and publishing your `TXT` record takes it over. If the
 domain has `CAA` records, they must allow one of the certificate authorities
 Cloudflare uses (Let's Encrypt, Google Trust Services or SSL.com).
 
