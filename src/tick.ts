@@ -36,7 +36,8 @@ export interface TickSummary {
   notifications: number
   /**
    * Phases that failed this tick (logged, then skipped so the rest still ran). 'config' means the
-   * stored configuration could not be loaded and no checks ran. Non-empty means an unhealthy tick.
+   * stored configuration could not be loaded: checks ran on an earlier saved version, or (with
+   * only the sign-in settings loadable) none ran. Non-empty means an unhealthy tick.
    */
   failedPhases: string[]
   /** Hosted tenant suspended by the platform: no checks or alerts ran. */
@@ -146,6 +147,12 @@ export async function tick(deps: Deps, nowMs: number = Date.now()): Promise<Tick
     deps.log('error', 'tick: no checks ran because the stored configuration could not be loaded', { problem: deps.configFallback.problem })
     summary.failedPhases.push('config')
     return summary
+  }
+  if (deps.configFallback) {
+    // An earlier saved version is in use (with the stored access rules): checks run, but the tick
+    // is reported as failed so the owner and the hosted control plane see that it needs fixing.
+    deps.log('error', `tick: the stored configuration could not be loaded; running saved version ${deps.configFallback.revision}`, { problem: deps.configFallback.problem })
+    summary.failedPhases.push('config')
   }
   await syncConfig(deps, now)
   if (deps.tenant?.suspended) {

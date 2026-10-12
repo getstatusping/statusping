@@ -165,9 +165,35 @@ async function cloudflareViewer(c: Context, deps: Deps, p: CfAccess): Promise<Vi
     const email = typeof claims.email === 'string' ? claims.email.toLowerCase() : null
     return email ? { email, groups: [], provider: 'cloudflare-access' } : null
   } catch (e) {
-    deps.log('warn', 'Cloudflare Access token rejected', { error: (e as Error).message })
+    noteRejectedAccessToken(deps, (e as Error).message)
     return null
   }
+}
+
+/**
+ * Anyone can send a made-up Access token, so rejections are logged at most once a minute per
+ * reason (in this isolate), with the number left out since.
+ */
+const ACCESS_REJECT_LOG_INTERVAL_MS = 60 * 1000
+const accessRejections = new Map<string, { loggedAt: number; suppressed: number }>()
+
+function noteRejectedAccessToken(deps: Deps, reason: string): void {
+  // JwtError messages are fixed phrases, except an unsupported alg, which echoes the token header.
+  const key = reason.startsWith('unsupported alg') ? 'unsupported alg' : reason.slice(0, 80)
+  const now = Date.now()
+  const seen = accessRejections.get(key)
+  if (seen && now - seen.loggedAt < ACCESS_REJECT_LOG_INTERVAL_MS) {
+    seen.suppressed++
+    return
+  }
+  if (!seen && accessRejections.size >= 50) accessRejections.clear()
+  accessRejections.set(key, { loggedAt: now, suppressed: 0 })
+  deps.log('warn', 'Cloudflare Access token rejected', { error: key, ...(seen?.suppressed ? { similarSinceLastLog: seen.suppressed } : {}) })
+}
+
+/** For tests: log the next Access token rejection again. */
+export function clearAccessRejectionLog(): void {
+  accessRejections.clear()
 }
 
 // ── OIDC ──────────────────────────────────────────────────────────────────────────────────────
@@ -438,8 +464,9 @@ export async function currentViewer(c: Context, deps: Deps): Promise<Viewer | nu
 /**
  * A browser credential that verifies, without a database read beyond the stored session key and
  * without checking a password: the signed `sp_session` cookie (email + password and SSO), or a
- * Cloudflare Access token whose signature, issuer, audience and expiry check out (the JWKS is
- * cached, so a forged token costs at most one key fetch per cache period). An `Authorization:
+ * Cloudflare Access token whose signature, issuer, audience and expiry check out. The JWKS is
+ * cached; a token naming an unknown key refetches it at most once a minute per JWKS URL (see
+ * JWKS_REFRESH_INTERVAL_MS), so forged tokens cannot turn into a key fetch each. An `Authorization:
  * Basic` header is not counted: checking it costs a PBKDF2 derivation and a rate-limit write.
  */
 export async function hasVerifiedSignIn(c: Context, deps: Deps): Promise<boolean> {

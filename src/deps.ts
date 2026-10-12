@@ -215,11 +215,11 @@ async function configStamp(deps: Deps): Promise<{ stamp: string; revision: numbe
  * (see firstRun). Tests that inject a config without `admin: true` keep it as is. Call after migrations, before work that reads `deps.config`. Nothing is reloaded
  * or re-validated while the revision, setup state and stored settings are unchanged.
  */
-export async function refreshAdminConfig(deps: Deps, now: number): Promise<boolean> {
+export async function refreshAdminConfig(deps: Deps, now: number, origin?: string): Promise<boolean> {
   const { stamp, revision } = await configStamp(deps)
   if (stamp === deps.configStamp) return deps.configLoaded
   deps.configRevision = revision
-  const loaded = await loadAdminState(deps, now)
+  const loaded = await loadAdminState(deps, now, origin)
   deps.configLoaded = loaded.loaded
   if (loaded.wrote) deps.configRevision = await currentRevision(deps.db)
   // A refresh that wrote (a seed, a baseline revision) is read again next time.
@@ -272,7 +272,7 @@ async function firstRun(deps: Deps, now: number): Promise<void> {
   deps.log('info', 'The old configuration has no administrators. Open /setup to choose how to sign in; your monitors are already imported.')
 }
 
-async function loadAdminState(deps: Deps, now: number): Promise<{ loaded: boolean; wrote: boolean }> {
+async function loadAdminState(deps: Deps, now: number, origin?: string): Promise<{ loaded: boolean; wrote: boolean }> {
   await loadStoredEnv(deps)
   let setup = await loadSetupState(deps.db)
   let wrote = false
@@ -307,7 +307,7 @@ async function loadAdminState(deps: Deps, now: number): Promise<{ loaded: boolea
   } catch (error) {
     // Never let a stored configuration take the whole site down (this runs in front of every
     // request and at the top of every tick): fall back, and keep Settings and reset reachable.
-    await loadFallback(deps, stored?.config, (error as Error).message)
+    await loadFallback(deps, stored?.config, (error as Error).message, origin)
     return { loaded: true, wrote }
   }
   useConfig(deps, validated)
@@ -322,26 +322,120 @@ function useConfig(deps: Deps, validated: AdminConfigValidation): void {
   if (validated.warnings.length) deps.log('warn', 'The stored configuration loaded with settings left out or adjusted. Saving it in Settings shows what to fix.', { warnings: validated.warnings })
 }
 
+const record = (value: unknown): Record<string, unknown> | null =>
+  value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null
+
+/** The monitor ids a configuration defines; entries that cannot be read are skipped. */
+function definedMonitorIds(config: Record<string, unknown>): Set<string> {
+  const ids = new Set<string>()
+  for (const group of Array.isArray(config.groups) ? config.groups : []) {
+    const monitors = record(group)?.monitors
+    for (const monitor of Array.isArray(monitors) ? monitors : []) {
+      const id = record(monitor)?.id
+      if (typeof id === 'string') ids.add(id)
+    }
+  }
+  return ids
+}
+
 /**
- * The stored configuration failed to load. Use the newest earlier revision that still loads; if
- * none does, keep only the sign-in settings (title, address, access) so an administrator can sign in
- * and fix or import a configuration, while the tick runs no checks (see tick()).
+ * An earlier saved version, made safe to run in place of a stored configuration that does not
+ * load. It fails closed: who may sign in and see what (`access`, the pages with their access
+ * rules, and `home`) comes from the stored configuration, never from the older version, the same
+ * way a restore keeps today's sign-in method. And nothing deleted since comes back: only monitors
+ * and alert channels the stored configuration still defines are kept (the others stay paused).
+ * The result is validated like any configuration; if it does not load, rescue mode applies.
  */
-async function loadFallback(deps: Deps, stored: AdminConfig | undefined, problem: string): Promise<void> {
-  const rows = await deps.db.all<{ id: number; config_json: string }>(`SELECT id, config_json FROM config_revisions ORDER BY id DESC LIMIT ?`, [KEEP_REVISIONS])
-  for (const row of rows) {
-    let validated: AdminConfigValidation
-    try { validated = validateAdminConfig(JSON.parse(row.config_json), deps.getEnv, 'load') } catch { continue }
-    useConfig(deps, validated)
-    deps.configFallback = { problem, revision: row.id }
-    deps.log('error', `The stored configuration could not be loaded. Using saved version ${row.id} until it is fixed in Settings → Configuration.`, { problem })
-    return
+export function fallbackFromRevision(revision: AdminConfig, stored: Record<string, unknown>): AdminConfig {
+  const keep = definedMonitorIds(stored)
+  const groups = (revision.groups ?? [])
+    .map((group) => ({ ...group, monitors: (group.monitors ?? []).filter((monitor) => keep.has(monitor.id)) }))
+    .filter((group) => group.monitors.length > 0)
+  const ids = new Set(groups.flatMap((group) => group.monitors.map((monitor) => monitor.id)))
+  const groupNames = new Set(groups.map((group) => group.name))
+  const known = (selector: unknown) => typeof selector === 'string'
+    && (selector === '*' || (selector.startsWith('group:') ? groupNames.has(selector.slice(6)) : ids.has(selector)))
+
+  const next: Record<string, unknown> = { ...revision, admin: true, groups }
+  for (const key of ['access', 'pages', 'home'] as const) delete next[key]
+  if (stored.access !== undefined) next.access = stored.access
+  if (stored.home !== undefined) next.home = stored.home
+  if (stored.pages !== undefined) {
+    // The stored pages, listing only the monitors this version has.
+    next.pages = Array.isArray(stored.pages)
+      ? stored.pages.map((page) => {
+          const p = record(page)
+          return p && Array.isArray(p.monitors) ? { ...p, monitors: p.monitors.filter(known) } : page
+        })
+      : stored.pages
+  }
+  const storedSinks = record(stored.sinks)
+  if (revision.sinks) {
+    next.sinks = Object.fromEntries(Object.entries(revision.sinks).filter(([name]) => storedSinks !== null && Object.hasOwn(storedSinks, name)))
+  }
+  if (Array.isArray(revision.maintenance)) {
+    next.maintenance = revision.maintenance
+      .map((window) => (Array.isArray(window.monitors) ? { ...window, monitors: window.monitors.filter((id) => ids.has(id)) } : window))
+      .filter((window) => window.monitors === '*' || window.monitors.length > 0)
+  }
+  if (revision.peer) {
+    const peer = { ...revision.peer }
+    if (peer.heartbeatMonitor !== undefined && !ids.has(peer.heartbeatMonitor)) delete peer.heartbeatMonitor
+    if (peer.healthMonitor !== undefined && !ids.has(peer.healthMonitor)) delete peer.healthMonitor
+    next.peer = peer
+  }
+  return next as unknown as AdminConfig
+}
+
+const httpUrl = (value: unknown): value is string => {
+  if (typeof value !== 'string') return false
+  try { return ['http:', 'https:'].includes(new URL(value).protocol) } catch { return false }
+}
+
+/**
+ * The stored configuration failed to load. Use the newest earlier revision that still loads, with
+ * the stored configuration's access rules (see fallbackFromRevision); if none does, keep only the
+ * sign-in settings (title, address, access) so an administrator can sign in and fix or import a
+ * configuration, while the tick runs no checks (see tick()). A stored row that is not even an
+ * object says nothing about who may see what, so it goes straight to that rescue mode.
+ */
+async function loadFallback(deps: Deps, stored: AdminConfig | undefined, problem: string, origin?: string): Promise<void> {
+  const current = record(stored)
+  if (current) {
+    const rows = await deps.db.all<{ id: number; config_json: string }>(`SELECT id, config_json FROM config_revisions ORDER BY id DESC LIMIT ?`, [KEEP_REVISIONS])
+    for (const row of rows) {
+      let revision: AdminConfigValidation
+      let validated: AdminConfigValidation
+      try {
+        revision = validateAdminConfig(JSON.parse(row.config_json), deps.getEnv, 'load')
+        validated = validateAdminConfig(fallbackFromRevision(revision.config, current), deps.getEnv, 'load')
+      } catch { continue }
+      useConfig(deps, validated)
+      deps.configFallback = { problem, revision: row.id }
+      deps.log('error', `The stored configuration could not be loaded. Using saved version ${row.id}, with the stored access rules and without monitors or channels deleted since, until it is fixed in Settings → Configuration.`, { problem })
+      return
+    }
   }
   deps.configFallback = { problem, revision: null }
-  deps.log('error', 'The stored configuration could not be loaded and no earlier version loads either. Only sign-in settings are in use and no checks run until it is fixed in Settings → Configuration (or the site is reset).', { problem })
-  if (!stored) return
-  const rescue = { title: stored.title, baseUrl: stored.baseUrl, timezone: stored.timezone, access: stored.access, groups: [], admin: true }
-  try { useConfig(deps, validateAdminConfig(rescue, deps.getEnv, 'load')) } catch (error) {
-    deps.log('error', 'The sign-in settings could not be loaded either. Reset the site at /setup/reset, or recover sign-in at /setup/recover.', { problem: (error as Error).message })
+  deps.log('error', 'The stored configuration could not be loaded and no earlier version loads with its access rules. Only sign-in settings are in use and no checks run until it is fixed in Settings → Configuration (or the site is reset).', { problem })
+  const safeBaseUrl = httpUrl(current?.baseUrl) ? current.baseUrl : httpUrl(origin) ? origin : UNCONFIGURED.baseUrl
+  const attempts: Record<string, unknown>[] = current
+    ? [
+        { title: current.title, baseUrl: current.baseUrl, timezone: current.timezone, access: current.access, groups: [], admin: true },
+        // A bad timezone or address must not lock the owner out as well.
+        { title: typeof current.title === 'string' && current.title.trim() ? current.title : UNCONFIGURED.title, baseUrl: safeBaseUrl, timezone: 'UTC', access: current.access, groups: [], admin: true },
+      ]
+    : []
+  let lastProblem = 'The stored configuration is not a JSON object.'
+  for (const rescue of attempts) {
+    try {
+      useConfig(deps, validateAdminConfig(rescue, deps.getEnv, 'load'))
+      return
+    } catch (error) {
+      lastProblem = (error as Error).message
+    }
   }
+  deps.log('error', 'The sign-in settings could not be loaded either. Reset the site at /setup/reset, or recover sign-in at /setup/recover.', { problem: lastProblem })
+  // Fail closed: no sign-in method, no monitors, nothing from an earlier configuration.
+  useConfig(deps, validateAdminConfig({ title: UNCONFIGURED.title, baseUrl: safeBaseUrl, groups: [], admin: true }, deps.getEnv, 'load'))
 }

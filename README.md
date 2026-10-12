@@ -105,9 +105,14 @@ listed for you to apply; they are never overwritten.
   configuration an earlier release accepted: a setting that is now refused when saving (such as a
   `defaults.notify` entry naming a channel that does not exist) is left out or clamped and listed
   in a Settings banner. If the configuration still cannot be loaded, StatusPing uses the newest
-  earlier version from Configuration → History that loads, and Settings says so; if none loads,
-  only the sign-in settings are used and no checks run until you fix or import a configuration.
-  Settings, sign-in, `/setup/recover` and `/setup/reset` stay available either way.
+  earlier version from Configuration → History that loads, and Settings says so. That version
+  never widens access: sign-in, administrators and status pages (with their access rules) still
+  come from the stored configuration, and monitors or alert channels deleted since stay deleted.
+  If none loads that way, only the sign-in settings are used and no checks run until you fix or
+  import a configuration. Either way `/healthz` answers `ok: false` with `config: "fallback"` or
+  `"sign-in-only"`, the tick summary lists `config` in `failedPhases`, and Settings, sign-in,
+  `/setup/recover` and `/setup/reset` stay available. If the database cannot be read at all
+  before a configuration has loaded, pages answer 503 rather than serving an unconfigured site.
 - **`npm run upgrade` refuses to run:** it names the reason, such as local
   changes, an edited updater-owned file, or a release that requires an
   intermediate version first. Nothing is written until every check passes.
@@ -153,6 +158,8 @@ Credentials are named, never written: webhook URLs and header values, HTTP monit
 A channel credential saved in Settings or through MCP (`SINK_<CHANNEL>_<FIELD>`) stays with the destination it was entered for: the ntfy or Gotify server, the Matrix homeserver, or the SMTP server and username. A save that points the channel somewhere else, from YAML, the API or MCP, is refused until the credential is entered again. Credentials set as Worker secrets or environment variables are not tied to a destination. The ntfy server must be an `https://` URL. A new channel's name may not differ from an existing one only in case or in `-`, `_` and `.`, because their stored credentials would share names.
 
 Every save is kept as a version (the newest 50). **Configuration → History** shows who changed what, a line diff against the current version, and **Restore**. If someone else saved after you opened a page, your save is refused with a note instead of overwriting their change. Exported YAML starts with a `# yaml-language-server: $schema=…` line pointing at `/admin/schema.json` ([`statusping.schema.json`](statusping.schema.json), generated from the config types with `npm run schema:generate`), so editors validate and complete it. Validation errors name the line.
+
+The **Import** form at `/admin/import` takes a configuration of up to 1 MiB from a signed-in browser (a session cookie or a verified Cloudflare Access token). A script that posts to `/admin/import` with an `Authorization: Basic` header gets the 16 KiB limit of public forms, because checking a password before reading the body would cost a slow hash for every request; scripts, and large configurations in particular, should use `PUT /api/admin/config` with `ADMIN_TOKEN` instead.
 
 Automation uses the same API with `ADMIN_TOKEN`: `GET /api/admin/config` returns JSON, or YAML with `Accept: application/yaml`, and an `ETag` with the revision; `PUT` accepts either, and with `If-Match: "<revision>"` it answers 412 when the configuration changed since. Like an import, `PUT` keeps the current sign-in method (`access.provider`); change it in Settings → Access → **Change sign-in method**. From a checkout:
 

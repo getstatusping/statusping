@@ -38,6 +38,8 @@ import { exportTenantData } from '../export.ts'
 const STALE_TICK_SECONDS = 180
 /** Signed hosted-platform routes; they answer in setup mode too (tick and export handle it). */
 const PLATFORM_PATHS = ['/internal/tick', '/internal/export']
+/** Answered even when no configuration could be loaded at all (see the first middleware). */
+const CONFIG_INDEPENDENT_PATHS = ['/healthz', '/setup/recover', '/setup/reset']
 const PUBLIC_MAX_AGE = 30
 
 type Cacheable = { cacheable: boolean }
@@ -104,18 +106,39 @@ export function createApp(deps: Deps): Hono {
   const app = new Hono()
   let config = deps.config
 
+  /**
+   * Whether a real configuration (or the setup state) has loaded in this isolate. A deployed site
+   * starts with only the unconfigured placeholder; a configuration passed in directly (tests, an
+   * old config-as-code site) is validated when the deps are created.
+   */
+  let configSettled = !deps.fromDatabase
+  /** The last attempt to load it failed before anything had loaded: /healthz reports it. */
+  let configUnavailable = false
+
   // An admins list also needs a sign-in affordance on otherwise-public monitor pages.
   let hasRestricted = config.pages.some((p) => p.access !== 'public') || Boolean(config.access?.admins)
 
   app.use('*', async (c, next) => {
     await ensureSchema(deps.db)
     try {
-      await refreshAdminConfig(deps, nowSeconds())
+      await refreshAdminConfig(deps, nowSeconds(), new URL(c.req.url).origin)
+      configSettled = true
+      configUnavailable = false
     } catch (error) {
       // A stored configuration that cannot be loaded falls back inside refreshAdminConfig; anything
-      // else that goes wrong here must still not take Settings, sign-in and reset down with it.
-      // The site keeps the configuration it last loaded and tries again on the next request.
+      // else that goes wrong here (the database, say) must still not take Settings, sign-in and
+      // reset down with it once a configuration has loaded: the site keeps the configuration it
+      // last loaded and tries again on the next request.
       deps.log('error', 'loading the configuration failed', { error: (error as Error).message })
+      if (!configSettled) {
+        // Nothing has loaded in this isolate, so deps.config is only the unconfigured placeholder,
+        // with no access rules: serving pages from it could show a restricted site to anyone.
+        // Fail closed, except for the health check and the recovery routes.
+        configUnavailable = true
+        if (!CONFIG_INDEPENDENT_PATHS.includes(c.req.path)) {
+          return c.text('This StatusPing site cannot load its configuration right now. Try again shortly.', 503, { 'cache-control': 'no-store', 'x-robots-tag': 'noindex', 'retry-after': '30' })
+        }
+      }
     }
     // Setup mode: only the health check and the wizard respond until setup is finished. Page
     // visits (most likely the owner) go straight to the wizard; pings and API calls get a 503.
@@ -213,6 +236,15 @@ export function createApp(deps: Deps): Hono {
       // While setup is pending no checks run, yet the deployment is healthy (plan 011 D4).
       if (deps.setupPending) {
         return c.json({ ok: true, setup: 'required', version: APP_VERSION, schemaVersion: SCHEMA_VERSION, channel, templateVersion, instanceId, role: deps.role, lastTickAt: last, lagSeconds: lag }, 200, {
+          'cache-control': 'no-store',
+          'access-control-allow-origin': '*',
+        })
+      }
+      // A configuration that does not load (an earlier saved version or only the sign-in settings
+      // in use, or nothing loaded at all) is an unhealthy site even while ticks keep running.
+      const config = configUnavailable ? 'unavailable' : deps.configFallback ? (deps.configFallback.revision === null ? 'sign-in-only' : 'fallback') : undefined
+      if (config) {
+        return c.json({ ok: false, config, version: APP_VERSION, schemaVersion: SCHEMA_VERSION, channel, templateVersion, instanceId, role: deps.role, lastTickAt: last, lagSeconds: lag }, 503, {
           'cache-control': 'no-store',
           'access-control-allow-origin': '*',
         })

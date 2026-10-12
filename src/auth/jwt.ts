@@ -27,17 +27,59 @@ export interface Jwk extends JsonWebKey {
 export class JwtError extends Error {}
 
 const JWKS_TTL_MS = 60 * 60 * 1000
-const jwksCache = new Map<string, { keys: Jwk[]; expires: number }>()
+/**
+ * A token whose key id is not in the cached set may mean the issuer rotated its keys, so the set
+ * is fetched again, but at most this often per JWKS URL: anyone can send a token with a made-up
+ * `kid`, and without the limit every such request would cost a key fetch.
+ */
+export const JWKS_REFRESH_INTERVAL_MS = 60 * 1000
 
-async function getJwks(url: string, fetchFn: typeof fetch, force: boolean): Promise<Jwk[]> {
+interface JwksEntry {
+  keys: Jwk[]
+  expires: number
+  /** When the set was last fetched (or a fetch last started); refreshes wait for the interval. */
+  fetchedAt: number
+}
+const jwksCache = new Map<string, JwksEntry>()
+/** One fetch per URL at a time: concurrent requests share it. */
+const jwksInFlight = new Map<string, Promise<JwksEntry>>()
+
+function fetchJwks(url: string, fetchFn: typeof fetch): Promise<JwksEntry> {
+  const pending = jwksInFlight.get(url)
+  if (pending) return pending
+  const previous = jwksCache.get(url)
+  // A failed fetch still counts against the refresh interval.
+  if (previous) previous.fetchedAt = Date.now()
+  const run = (async () => {
+    const res = await fetchFn(url, { headers: { accept: 'application/json' } })
+    if (!res.ok) throw new JwtError(`JWKS fetch failed: HTTP ${res.status}`)
+    const body = (await readCappedJson(res, OIDC_MAX_RESPONSE_BYTES)) as { keys?: Jwk[] }
+    const now = Date.now()
+    const entry: JwksEntry = { keys: Array.isArray(body.keys) ? body.keys : [], expires: now + JWKS_TTL_MS, fetchedAt: now }
+    jwksCache.set(url, entry)
+    return entry
+  })()
+  jwksInFlight.set(url, run)
+  return run.finally(() => jwksInFlight.delete(url))
+}
+
+/** The cached key set, fetched when missing or expired. */
+async function getJwks(url: string, fetchFn: typeof fetch): Promise<JwksEntry> {
   const cached = jwksCache.get(url)
-  if (cached && !force && cached.expires > Date.now()) return cached.keys
-  const res = await fetchFn(url, { headers: { accept: 'application/json' } })
-  if (!res.ok) throw new JwtError(`JWKS fetch failed: HTTP ${res.status}`)
-  const body = (await readCappedJson(res, OIDC_MAX_RESPONSE_BYTES)) as { keys?: Jwk[] }
-  const keys = body.keys ?? []
-  jwksCache.set(url, { keys, expires: Date.now() + JWKS_TTL_MS })
-  return keys
+  const now = Date.now()
+  // An expired set whose refetch just failed stays in use until the next attempt is allowed.
+  if (cached && (cached.expires > now || now - cached.fetchedAt < JWKS_REFRESH_INTERVAL_MS)) return cached
+  return fetchJwks(url, fetchFn)
+}
+
+/**
+ * The key set fetched again because a token named a key it lacks (rotation), or null when the
+ * last fetch was too recent. Every key id the current set lacks is thereby treated as unknown,
+ * without a fetch, until the next refresh is allowed.
+ */
+async function refreshJwks(url: string, fetchFn: typeof fetch, entry: JwksEntry): Promise<JwksEntry | null> {
+  if (Date.now() - entry.fetchedAt < JWKS_REFRESH_INTERVAL_MS) return null
+  return fetchJwks(url, fetchFn)
 }
 
 const ALGS = {
@@ -74,8 +116,13 @@ export async function verifyJwt(token: string, opts: VerifyOptions): Promise<Jwt
   if (!alg) throw new JwtError(`unsupported alg ${header.alg}`)
 
   const pick = (keys: Jwk[]) => keys.find((k) => (header.kid ? k.kid === header.kid : true) && (!k.alg || k.alg === header.alg))
-  let jwk = pick(await getJwks(opts.jwksUrl, opts.fetch, false))
-  if (!jwk) jwk = pick(await getJwks(opts.jwksUrl, opts.fetch, true)) // key rotation
+  const entry = await getJwks(opts.jwksUrl, opts.fetch)
+  let jwk = pick(entry.keys)
+  if (!jwk) {
+    // Possibly a key rotation; refreshed at most once per JWKS_REFRESH_INTERVAL_MS.
+    const fresh = await refreshJwks(opts.jwksUrl, opts.fetch, entry)
+    if (fresh) jwk = pick(fresh.keys)
+  }
   if (!jwk) throw new JwtError('signing key not found')
 
   const { kid: _kid, alg: _alg, use: _use, key_ops: _ops, ...keyData } = jwk as Jwk & { use?: string }
@@ -96,6 +143,7 @@ export async function verifyJwt(token: string, opts: VerifyOptions): Promise<Jwt
 /** For tests: forget cached JWKS. */
 export function clearJwksCache() {
   jwksCache.clear()
+  jwksInFlight.clear()
 }
 
 /**

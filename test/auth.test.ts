@@ -1,6 +1,6 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { b64urlEncode, clearJwksCache, verifyJwt } from '../src/auth/jwt.ts'
-import { discover, hashPassword, safeNext } from '../src/auth/providers.ts'
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
+import { JWKS_REFRESH_INTERVAL_MS, b64urlEncode, clearJwksCache, verifyJwt } from '../src/auth/jwt.ts'
+import { clearAccessRejectionLog, discover, hashPassword, safeNext } from '../src/auth/providers.ts'
 import type { AuthProviderInput, StatusPingConfig } from '../src/config.ts'
 import { tick } from '../src/tick.ts'
 import { createApp } from '../src/web/app.ts'
@@ -53,7 +53,10 @@ async function setup(config: StatusPingConfig, env: Record<string, string>, hand
   return { app: createApp(deps), close, f }
 }
 
-beforeEach(() => clearJwksCache())
+beforeEach(() => {
+  clearJwksCache()
+  clearAccessRejectionLog()
+})
 
 describe('JWT verification', () => {
   it.each(['RS256', 'ES256'] as const)('%s: valid, bad signature, wrong audience, expired', async (alg) => {
@@ -67,6 +70,63 @@ describe('JWT verification', () => {
     await expect(verifyJwt(await k.signJwt({ ...claims, aud: 'other' }), opts)).rejects.toThrow('wrong audience')
     await expect(verifyJwt(await k.signJwt({ ...claims, exp: now() - 3600 }), opts)).rejects.toThrow('expired')
     await expect(verifyJwt(await k.signJwt({ ...claims, iss: 'https://evil.test' }), opts)).rejects.toThrow('wrong issuer')
+  })
+})
+
+describe('JWKS refreshes for unknown key ids are throttled', () => {
+  afterEach(() => vi.useRealTimers())
+
+  it('refetches at most once a minute per JWKS URL, and still accepts a rotated key after that', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    const k1 = await keyPair('ES256', 'k1')
+    const k2 = await keyPair('ES256', 'k2')
+    let keys = [k1.jwk]
+    const f = fakeFetch(() => Response.json({ keys }))
+    const opts = () => ({ jwksUrl: 'https://idp.test/jwks', issuer: 'https://idp.test', audience: 'app', fetch: f.fn, now: now() })
+    const claims = () => ({ iss: 'https://idp.test', aud: 'app', exp: now() + 300, email: 'a@b.test' })
+    const forged = async (i: number) => (await keyPair('ES256', `forged-${i}`)).signJwt(claims())
+
+    expect((await verifyJwt(await k1.signJwt(claims()), opts())).email).toBe('a@b.test')
+    expect(f.calls).toHaveLength(1)
+    // 20 tokens naming made-up keys, one after another and then all at once: no further fetch.
+    for (let i = 0; i < 20; i++) await expect(verifyJwt(await forged(i), opts())).rejects.toThrow('signing key not found')
+    const burst = await Promise.all(Array.from({ length: 20 }, (_, i) => forged(100 + i)))
+    await Promise.all(burst.map((t) => expect(verifyJwt(t, opts())).rejects.toThrow('signing key not found')))
+    expect(f.calls).toHaveLength(1)
+
+    // The issuer rotates its key. Within the minute the new key id is refused like any unknown one...
+    keys = [k1.jwk, k2.jwk]
+    await expect(verifyJwt(await k2.signJwt(claims()), opts())).rejects.toThrow('signing key not found')
+    expect(f.calls).toHaveLength(1)
+    // ...and once the interval has passed, one refresh picks it up.
+    vi.setSystemTime(Date.now() + JWKS_REFRESH_INTERVAL_MS + 1)
+    expect((await verifyJwt(await k2.signJwt(claims()), opts())).email).toBe('a@b.test')
+    expect(f.calls).toHaveLength(2)
+    // A refresh does not reopen the door: an id still unknown after it waits for the next one.
+    vi.setSystemTime(Date.now() + JWKS_REFRESH_INTERVAL_MS + 1)
+    const stillForged = await forged(999)
+    await expect(verifyJwt(stillForged, opts())).rejects.toThrow('signing key not found')
+    await expect(verifyJwt(stillForged, opts())).rejects.toThrow('signing key not found')
+    expect(f.calls).toHaveLength(3)
+  })
+
+  it('forged Access tokens on page views cost one key fetch and one log line, not one each', async () => {
+    const team = 'statusping.cloudflareaccess.com'
+    const k = await keyPair('ES256', 'k1')
+    const { db, close } = await createTestDb('libsql')
+    onTestFinished(close)
+    const f = fakeFetch((c) => (c.url === `https://${team}/cdn-cgi/access/certs` ? Response.json({ keys: [k.jwk] }) : new Response('ok')))
+    const deps = makeDeps(db, { config: pagesConfig({ type: 'cloudflare-access', teamDomain: team, audience: 'aud-tag-123' }), fetch: f.fn })
+    const warnings: string[] = []
+    deps.log = (level, message) => { if (level === 'warn' && message.includes('Access token rejected')) warnings.push(message) }
+    const app = createApp(deps)
+    const jwksFetches = () => f.calls.filter((c) => c.url.endsWith('/cdn-cgi/access/certs')).length
+    for (let i = 0; i < 20; i++) {
+      const token = await (await keyPair('ES256', `forged-${i}`)).signJwt({ iss: `https://${team}`, aud: ['aud-tag-123'], exp: now() + 600, email: 'eve@statusping.test' })
+      expect((await app.request('/pages/ops', { headers: { 'cf-access-jwt-assertion': token } })).status).toBe(403)
+    }
+    expect(jwksFetches()).toBe(1)
+    expect(warnings).toHaveLength(1)
   })
 })
 

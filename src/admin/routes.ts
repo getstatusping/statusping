@@ -191,7 +191,7 @@ Alert links, ping URLs and sign-in callbacks use ${esc(configured)}. If the site
       const problems = fallback.problem.split('\n').map((line) => line.replace(/^\s*-\s*/, '').trim()).filter((line) => line && !/^(Invalid StatusPing config|Unsafe admin config):?$/.test(line))
       const using = fallback.revision === null
         ? 'No earlier version loads either, so only the sign-in settings are in use and <strong>no checks are running</strong>.'
-        : `Version ${fallback.revision} from <a href="/admin/configuration">Configuration → History</a> is in use until it is fixed.`
+        : `Version ${fallback.revision} from <a href="/admin/configuration">Configuration → History</a> is in use until it is fixed, with the sign-in and page access rules of the stored configuration and without monitors or alert channels deleted since.`
       return `<div class="alert error banner" role="alert"><strong>The stored configuration is invalid and could not be loaded.</strong> ${using}
 Fix it in <a href="/admin/configuration">Configuration</a> (edit or import the YAML), or restore a version from History.${list(problems)}</div>`
     }

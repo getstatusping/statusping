@@ -157,9 +157,13 @@ describe('a stored configuration that cannot load never takes the site down', ()
     expect(deps.config.title).toBe('Version two')
     expect(logs.some((l) => l.level === 'error' && /Using saved version 2/.test(l.message))).toBe(true)
 
+    // Checks run, but the tick and /healthz say the configuration needs fixing.
     const summary = await tick(deps, Date.parse('2026-10-12T12:00:00Z'))
-    expect(summary.failedPhases).toEqual([])
+    expect(summary.failedPhases).toEqual(['config'])
     expect(summary.checks).toBe(1)
+    const health = await app.request('https://status.example.test/healthz')
+    expect(health.status).toBe(503)
+    expect(await health.json()).toMatchObject({ ok: false, config: 'fallback' })
 
     const page = await (await app.request('https://status.example.test/admin', { headers: asOwner })).text()
     expect(page).toContain('The stored configuration is invalid and could not be loaded.')
@@ -175,11 +179,15 @@ describe('a stored configuration that cannot load never takes the site down', ()
     expect(fixed).not.toContain('could not be loaded')
   })
 
-  it('treats a stored row that is not JSON the same way', async () => {
-    const { app, deps } = await storedSite([site({ title: 'Good' }), '{not json'])
-    expect((await app.request('https://status.example.test/')).status).toBe(200)
-    expect(deps.configFallback).toMatchObject({ revision: 1, problem: 'The stored configuration is not a JSON object.' })
-    expect(deps.config.title).toBe('Good')
+  it('fails closed on a stored row that is not JSON: it says nothing about access, so no earlier version is used', async () => {
+    const { app, deps } = await storedSite([site({ title: 'Good' }), '{not json'], { STATUSPING_RESET_TOKEN: 'reset-token-0123456789abcdef' })
+    expect((await app.request('https://status.example.test/')).status).not.toBe(500)
+    expect(deps.configFallback).toMatchObject({ revision: null, problem: 'The stored configuration is not a JSON object.' })
+    expect(deps.config.title).not.toBe('Good')
+    expect(deps.config.monitors).toEqual([])
+    expect(deps.config.access).toBeNull()
+    expect((await app.request('https://status.example.test/setup/reset')).status).toBe(200)
+    expect(await (await app.request('https://status.example.test/healthz')).json()).toMatchObject({ ok: false, config: 'sign-in-only' })
   })
 
   it('with no version that loads, keeps sign-in, Settings and reset working and runs no checks', async () => {
@@ -215,6 +223,109 @@ describe('a stored configuration that cannot load never takes the site down', ()
     expect((await app.request('https://status.example.test/setup/reset')).status).toBe(200)
     expect(deps.configFallback).toMatchObject({ revision: null })
     expect((await tick(deps, Date.parse('2026-10-12T12:00:00Z'))).failedPhases).toEqual(['config'])
+  })
+
+  it('a fallback never widens access, and never brings back monitors or channels deleted since', async () => {
+    const restricted = { home: 'home', pages: [{ slug: 'home', title: 'Home', access: { emails: [OWNER] }, monitors: ['*'] }] }
+    const older = site({
+      title: 'Older',
+      sinks: { gone: { type: 'webhook', url: 'https://hooks.example.test/gone' } },
+      defaults: { notify: ['gone'] },
+      groups: [{ name: 'Web', monitors: [{ id: 'site', kind: 'http', name: 'Site', url: 'https://www.example.test/' }, { id: 'old', kind: 'push', name: 'Old job', period: '1h' }] }],
+      maintenance: [{ title: 'Old window', monitors: ['old'], start: '2026-01-01T00:00:00Z', end: '2026-01-02T00:00:00Z' }],
+      pages: [{ slug: 'home', title: 'Home', monitors: ['*'] }],
+    })
+    // Today's configuration restricts the home page, deleted `old` and the `gone` channel, and
+    // added `fresh`, but references a server secret, so it does not load.
+    const today = {
+      ...unsafe('Today'),
+      ...restricted,
+      groups: [{ name: 'Web', monitors: [{ id: 'site', kind: 'http', name: 'Site', url: 'https://www.example.test/' }, { id: 'fresh', kind: 'push', name: 'Fresh job', period: '1h' }] }],
+    }
+    const { app, deps, db, asOwner } = await storedSite([older, today])
+    await db.batch([
+      { sql: `INSERT INTO monitors (id, kind, name, group_name, sort_order, config_json, ping_token_hash, paused, created_at) VALUES ('fresh', 'push', 'Fresh job', 'Web', 1, '{}', 'fresh-token-hash', 0, 1)`, params: [] },
+      { sql: `INSERT INTO monitors (id, kind, name, group_name, sort_order, config_json, ping_token_hash, paused, created_at) VALUES ('old', 'push', 'Old job', 'Web', 2, '{}', NULL, 1, 1)`, params: [] },
+    ])
+
+    const home = await app.request('https://status.example.test/')
+    expect(deps.configFallback).toMatchObject({ revision: 1 })
+    expect(deps.config.title).toBe('Older')
+    // The home page stays restricted: the older version's public page does not apply.
+    expect(home.status).toBe(302)
+    expect(home.headers.get('location')).toContain('/auth/login')
+    expect(deps.config.pages.find((p) => p.slug === 'home')?.access).not.toBe('public')
+    expect((await app.request('https://status.example.test/', { headers: asOwner })).status).toBe(200)
+    // Deleted since: not revived.
+    expect(deps.config.monitors.map((m) => m.id)).toEqual(['site'])
+    expect(Object.keys(deps.config.sinks)).toEqual([])
+    expect(deps.config.maintenance).toEqual([])
+
+    const summary = await tick(deps, Date.parse('2026-10-12T12:00:00Z'))
+    expect(summary.failedPhases).toEqual(['config'])
+    expect(summary.checks).toBe(1)
+    expect(await db.first(`SELECT paused FROM monitors WHERE id = 'old'`)).toEqual({ paused: 1 })
+    // `fresh` is not in the older version: paused for now, but it keeps its ping URL...
+    expect(await db.first(`SELECT paused, ping_token_hash FROM monitors WHERE id = 'fresh'`)).toEqual({ paused: 1, ping_token_hash: 'fresh-token-hash' })
+
+    // ...so fixing the configuration brings it back as it was.
+    const fixed = { ...site({ title: 'Fixed' }), ...restricted, groups: today.groups }
+    await db.run(`UPDATE admin_config SET config_json = ?, updated_at = updated_at + 1 WHERE id = 1`, [JSON.stringify(fixed)])
+    await db.run(`INSERT INTO config_revisions (id, config_json, yaml, actor, action, at) VALUES (3, ?, NULL, 'owner', 'config.save', 1)`, [JSON.stringify(fixed)])
+    const after = await tick(deps, Date.parse('2026-10-12T12:01:00Z'))
+    expect(deps.configFallback).toBeUndefined()
+    expect(after.failedPhases).toEqual([])
+    expect(await db.first(`SELECT paused, ping_token_hash FROM monitors WHERE id = 'fresh'`)).toEqual({ paused: 0, ping_token_hash: 'fresh-token-hash' })
+    expect((await (await app.request('https://status.example.test/healthz')).json() as { config?: string }).config).toBeUndefined()
+  })
+
+  it('uses rescue mode rather than an earlier version when the stored access rules do not load', async () => {
+    const badAccess = { ...site({ title: 'Today' }), access: { provider: { type: 'basic' }, admins: { emails: [OWNER] }, teams: { ops: { emails: 'not-a-list' } } }, pages: [{ slug: 'home', title: 'Home', access: { teams: ['ops'] }, monitors: ['*'] }] }
+    const { app, deps } = await storedSite([site({ title: 'Public older version' }), badAccess])
+    expect((await app.request('https://status.example.test/')).status).not.toBe(500)
+    expect(deps.configFallback).toMatchObject({ revision: null })
+    expect(deps.config.title).not.toBe('Public older version')
+    expect(deps.config.monitors).toEqual([])
+    expect((await tick(deps, Date.parse('2026-10-12T12:00:00Z'))).failedPhases).toEqual(['config'])
+  })
+
+  it('rescue mode survives a bad timezone or address in the stored configuration', async () => {
+    const broken = { ...unsafe('Broken'), timezone: 'Mars/Olympus_Mons', baseUrl: 'not a url' }
+    const { app, deps, asOwner } = await storedSite([broken], { STATUSPING_RESET_TOKEN: 'reset-token-0123456789abcdef' })
+    const admin = await app.request('https://status.example.test/admin', { headers: asOwner })
+    expect(admin.status).toBe(200)
+    expect(deps.configFallback).toMatchObject({ revision: null })
+    expect(deps.config.title).toBe('Broken')
+    expect(deps.config.timezone).toBe('UTC')
+    expect(deps.config.baseUrl).toBe('https://status.example.test')
+    expect(deps.config.access?.provider.type).toBe('basic')
+    expect(await admin.text()).toContain('no checks are running')
+  })
+
+  it('fails closed (503) when nothing has loaded yet and loading throws, but keeps health and recovery up', async () => {
+    const { db } = await storedSite([site({ title: 'Loaded' })], { STATUSPING_RESET_TOKEN: 'reset-token-0123456789abcdef' })
+    const original = db.first.bind(db)
+    let failing = true
+    db.first = (async (sql: string, params?: never[]) => {
+      if (failing && sql.includes('FROM config_revisions) AS rev')) throw new Error('database unavailable')
+      return original(sql, params)
+    }) as typeof db.first
+    // A fresh isolate: nothing loaded yet.
+    const users = JSON.stringify({ [OWNER]: await hashPassword(PASSWORD) })
+    const deps = createDeps({ db, getEnv: (n) => ({ BASIC_AUTH_USERS: users, SESSION_SECRET: 'session-secret-0123456789abcdefghijklmnop', STATUSPING_RESET_TOKEN: 'reset-token-0123456789abcdef' } as Record<string, string>)[n], fetch: fakeFetch().fn, log: () => {} })
+    const app = createApp(deps)
+    for (const path of ['/', '/pages/status', '/admin', '/api/admin/config', '/auth/login']) {
+      expect((await app.request(`https://status.example.test${path}`)).status, path).toBe(503)
+    }
+    const health = await app.request('https://status.example.test/healthz')
+    expect(health.status).toBe(503)
+    expect((await health.json() as { ok: boolean }).ok).toBe(false)
+    expect((await app.request('https://status.example.test/setup/reset')).status).toBe(200)
+    expect((await app.request('https://status.example.test/setup/recover')).status).not.toBe(503)
+
+    failing = false
+    expect((await app.request('https://status.example.test/')).status).toBe(200)
+    expect(deps.config.title).toBe('Loaded')
   })
 
   it('serves requests even if loading the configuration throws for another reason', async () => {

@@ -34,7 +34,7 @@ export async function syncConfig(deps: Deps, now: number): Promise<boolean> {
   if (current?.value === hash) return false
 
   const existing = new Map(
-    (await db.all<{ id: string; paused: number; config_json: string }>(`SELECT id, paused, config_json FROM monitors`)).map(
+    (await db.all<{ id: string; paused: number; config_json: string; ping_token_hash: string | null }>(`SELECT id, paused, config_json, ping_token_hash FROM monitors`)).map(
       (r) => [r.id, r],
     ),
   )
@@ -92,10 +92,18 @@ export async function syncConfig(deps: Deps, now: number): Promise<boolean> {
     }
   }
 
+  // While an earlier saved version stands in for a stored configuration that does not load (see
+  // loadFallback), a monitor it lacks is paused but keeps its ping URL, so fixing the configuration
+  // brings it back as it was. Once a configuration loads again, a deleted monitor's URL is dropped.
+  const fallback = Boolean(deps.configFallback)
   for (const [id, prev] of existing) {
-    if (config.monitors.some((m) => m.id === id) || prev.paused) continue
+    if (config.monitors.some((m) => m.id === id)) continue
+    if (prev.paused) {
+      if (!fallback && prev.ping_token_hash) statements.push({ sql: `UPDATE monitors SET ping_token_hash = NULL WHERE id = ?`, params: [id] })
+      continue
+    }
     statements.push(
-      { sql: `UPDATE monitors SET paused = 1, ping_token_hash = NULL WHERE id = ?`, params: [id] },
+      { sql: fallback ? `UPDATE monitors SET paused = 1 WHERE id = ?` : `UPDATE monitors SET paused = 1, ping_token_hash = NULL WHERE id = ?`, params: [id] },
       {
         sql: `UPDATE monitor_state SET status = 'paused', status_since = ?, down_reason = NULL, version = version + 1
               WHERE monitor_id = ?`,
