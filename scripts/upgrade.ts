@@ -72,7 +72,7 @@ async function checkSourceTree(version: string, files: Map<string, Uint8Array>, 
     if (role === 'target') console.warn(`Warning: v${version} predates signed source trees, so its files could not be checked against the release signature. Review the commit carefully, including .github/, before pushing it.`)
     // The installed release is the merge base: a tampered one could make a file look unedited
     // (so it is replaced or deleted) without any conflict. Removals are left to you (see below).
-    else console.warn(`Warning: your installed release v${version} predates signed source trees, so it could not be checked against the release signature. Review every changed line in the commit, and delete files StatusPing no longer uses by hand (they are listed below).`)
+    else console.warn(`Warning: your installed release v${version} predates signed source trees, so it could not be checked against the release signature. Review every changed line in the commit, every replaced file, and every file left unchanged, and delete files StatusPing no longer uses by hand (all are listed below).`)
     return { release, verified: false }
   }
   const mismatches = await sourceTreeMismatches(files, release.sourceTree)
@@ -151,6 +151,14 @@ async function main() {
     if (plan.merged.length) {
       console.log('\nYour edits were merged with the release in (review these):')
       for (const path of plan.merged) console.log(`  - ${path}`)
+    }
+    if (plan.rewritten.length) {
+      console.log(`\nReplaced with the v${target} version because they match v${installed}, which could not be verified (check you had not edited them):`)
+      for (const path of plan.rewritten) console.log(`  - ${path}`)
+    }
+    if (plan.notWritten.length) {
+      console.log(`\nNot updated: these v${target} files differ from your repository and were left unchanged (compare with ${targetRef}):`)
+      for (const { path, reason } of plan.notWritten) console.log(`  - ${path} (${reason})`)
     }
     if (plan.retired.length) {
       console.log('\nNo longer used by StatusPing (left in place; you can delete them):')

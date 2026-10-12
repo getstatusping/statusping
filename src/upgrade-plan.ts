@@ -32,6 +32,17 @@ export type UpgradePlan = {
   deletes: string[]
   /** Files the customer edited where both sets of edits were combined line by line (included in `writes`). */
   merged: string[]
+  /**
+   * Only with `unverifiedBase`: existing files replaced with the target contents because they
+   * matched the unverified base (included in `writes`). The base decided they were unedited, so
+   * every one is listed for review.
+   */
+  rewritten: string[]
+  /**
+   * Only with `unverifiedBase`: updater-owned files of the target release that differ from the
+   * repository and were not written, each with its reason. Nothing is skipped silently.
+   */
+  notWritten: UpgradeConflict[]
   /** Files left untouched because the customer changed them; resolve by hand. */
   conflicts: UpgradeConflict[]
   /** Customer-owned files the target release no longer uses. Left in place; the customer may delete them. */
@@ -115,6 +126,37 @@ function mergeFile(base: Uint8Array | undefined, target: Uint8Array | undefined,
   return target === undefined ? { kind: 'delete' } : { kind: 'write', content: target }
 }
 
+/**
+ * Plan one updater-owned file when the base could not be verified. The base is never trusted to
+ * say what is unchanged: only `current === target` is. Otherwise the target is written only when
+ * the customer's file matches the base (and is reported as rewritten); any other difference is
+ * a conflict, never a silent write or a line merge.
+ */
+function planUnverifiedFile(base: Uint8Array | undefined, target: Uint8Array | undefined, current: Uint8Array | undefined, region: PreservedRegion | undefined):
+  { kind: 'unchanged' } | { kind: 'write'; content: Uint8Array } | { kind: 'conflict'; reason: UpgradeConflict['reason'] } {
+  if (target === undefined) return current === undefined ? { kind: 'unchanged' } : { kind: 'conflict', reason: 'removed-upstream' }
+  if (current === undefined) return base === undefined ? { kind: 'write', content: target } : { kind: 'conflict', reason: 'deleted-locally' }
+  if (region) {
+    let texts: [string, string] | undefined
+    try { texts = [decoder.decode(target), decoder.decode(current)] } catch { /* binary: compared whole below */ }
+    if (texts && texts[1].includes(region.start)) {
+      try {
+        const [t, c] = texts
+        const next = encoder.encode(preserveMarkedRegion(c, t, region))
+        if (same(next, current)) return { kind: 'unchanged' }
+        const b = base === undefined ? undefined : decoder.decode(base)
+        // The customer's notes are theirs; everything outside them must match the base.
+        if (b !== undefined && (same(base, current) || (b.includes(region.start) && preserveMarkedRegion(c, b, region) === c))) return { kind: 'write', content: next }
+        return { kind: 'conflict', reason: base === undefined ? 'added-locally' : 'modified-locally' }
+      } catch { return { kind: 'conflict', reason: 'modified-locally' } }
+    }
+  }
+  if (same(current, target)) return { kind: 'unchanged' }
+  if (base === undefined) return { kind: 'conflict', reason: 'added-locally' }
+  if (same(current, base)) return { kind: 'write', content: target }
+  return { kind: 'conflict', reason: 'modified-locally' }
+}
+
 export function planUpgrade(input: {
   base: Files
   target: Files
@@ -124,8 +166,11 @@ export function planUpgrade(input: {
   addTemplateVersionLine?: boolean
   /**
    * The base (installed release) files could not be checked against a signature. A crafted base
-   * that matches a customer's file would make it look unchanged and so deletable, so with this
-   * set the plan never deletes: each removal is reported as a `removed-upstream` conflict.
+   * could make a customer's file look unchanged (so deleted or overwritten) or hide a target
+   * change (so a file is silently not written). With this set the base never decides what is
+   * unchanged: every updater-owned file of the target is planned, the plan never deletes (each
+   * removal is a `removed-upstream` conflict), never line-merges, lists every replaced file in
+   * `rewritten`, and lists every target file it did not write in `notWritten`.
    */
   unverifiedBase?: boolean
 }): UpgradePlan {
@@ -133,7 +178,7 @@ export function planUpgrade(input: {
   const targetMarker = json(input.target.get(MARKER_PATH))
   const currentVersion = String(record(baseMarker).release ?? '')
   const targetVersion = String(record(targetMarker).release ?? '')
-  const plan: UpgradePlan = { safe: false, currentVersion, targetVersion, writes: new Map(), deletes: [], merged: [], conflicts: [], retired: [], errors: [] }
+  const plan: UpgradePlan = { safe: false, currentVersion, targetVersion, writes: new Map(), deletes: [], merged: [], rewritten: [], notWritten: [], conflicts: [], retired: [], errors: [] }
 
   // The customer's marker must still describe the release used as the base;
   // otherwise the base contents do not represent what they installed.
@@ -147,11 +192,14 @@ export function planUpgrade(input: {
   const ownership = record(record(targetMarker).ownership)
   const customerPaths = Array.isArray(ownership.customerOwnedPaths) ? ownership.customerOwnedPaths.filter((p): p is string => typeof p === 'string') : []
   const customerOwned = (path: string) => customerPaths.some((p) => path === p || (p.endsWith('/') && path.startsWith(p)))
+  const updaterPaths = Array.isArray(ownership.updaterOwnedPaths) ? ownership.updaterOwnedPaths.filter((p): p is string => typeof p === 'string') : []
+  const updaterOwned = (path: string) => updaterPaths.some((p) => path === p || (p.endsWith('/') && path.startsWith(p)))
   const withoutVersionLine = (bytes: Uint8Array | undefined) => (bytes ? decoder.decode(bytes).replace(TEMPLATE_VERSION_LINE, '') : '')
   const changedPaths: string[] = []
   for (const path of [...new Set([...input.base.keys(), ...input.target.keys()])].sort()) {
     const [base, next] = [input.base.get(path), input.target.get(path)]
-    if (same(base, next)) continue
+    // An unverified base cannot say a target file is unchanged: plan every updater-owned one.
+    if (same(base, next) && !(input.unverifiedBase && next && updaterOwned(path) && !customerOwned(path))) continue
     // A customer file the release stopped using (statusping.config.ts in v0.3.0) is never deleted.
     if (customerOwned(path) && base && !next) { plan.retired.push(path); continue }
     if (!customerOwned(path)) changedPaths.push(path)
@@ -164,6 +212,8 @@ export function planUpgrade(input: {
     return plan
   }
   const target = validateTemplateMarker(targetMarker, targetVersion)
+  // With an unverified base: files the planner found already up to date (allowing for local notes).
+  const upToDate = new Set<string>()
 
   for (const path of preflight.updaterOwnedChanges) {
     let [base, next] = [input.base.get(path), input.target.get(path)]
@@ -172,7 +222,15 @@ export function planUpgrade(input: {
     // A newly added lock file takes the project name from the customer's package.json.
     const projectName = input.current.get('package.json') && packageName(input.current.get('package.json')!)
     if (RENAMED_BY_DEPLOY.has(path) && !base && !current && next && projectName) next = renamePackage(next, packageName(next) ?? projectName, projectName)
-    const result = mergeFile(base, next, current, target.ownership.preservedRegions[path])
+    const region = target.ownership.preservedRegions[path]
+    if (input.unverifiedBase) {
+      const result = planUnverifiedFile(base, next, current, region)
+      if (result.kind === 'write') { plan.writes.set(path, result.content); plan.rewritten.push(path) }
+      else if (result.kind === 'conflict') plan.conflicts.push({ path, reason: result.reason })
+      else upToDate.add(path)
+      continue
+    }
+    const result = mergeFile(base, next, current, region)
     if (result.kind === 'write') { plan.writes.set(path, result.content); if (result.merged) plan.merged.push(path) }
     else if (result.kind === 'delete') {
       if (input.unverifiedBase) plan.conflicts.push({ path, reason: 'removed-upstream' })
@@ -195,6 +253,17 @@ export function planUpgrade(input: {
     plan.writes.set(WRANGLER_PATH, encoder.encode(updated))
   } else {
     plan.conflicts.push({ path: WRANGLER_PATH, reason: 'template-marker-missing' })
+  }
+
+  if (input.unverifiedBase) {
+    // Every updater-owned target file that differs from the repository is either written or
+    // listed here with its reason.
+    const reasons = new Map(plan.conflicts.map((c) => [c.path, c.reason]))
+    for (const [path, next] of [...input.target].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
+      if (!updaterOwned(path) || customerOwned(path) || plan.writes.has(path) || upToDate.has(path) || same(input.current.get(path), next)) continue
+      // A path the planner never reached cannot normally happen; report it rather than drop it.
+      plan.notWritten.push({ path, reason: reasons.get(path) ?? 'modified-locally' })
+    }
   }
 
   plan.safe = plan.errors.length === 0
