@@ -9,7 +9,7 @@ import { nowSeconds } from '../util/time.ts'
 import { b64urlEncode, emailVerified, verifyJwt } from './jwt.ts'
 import { sign, unsign } from './session.ts'
 import { buildChrome } from '../web/chrome.ts'
-import { signInPage, ssoSignInPage } from '../web/pages.ts'
+import { signInPage, signOutPage, ssoSignInPage } from '../web/pages.ts'
 import { type Viewer, referencedGroups } from './viewer.ts'
 import { targetFetch } from '../util/private-targets.ts'
 
@@ -489,12 +489,20 @@ export function mountAuthRoutes(app: Hono, deps: Deps) {
     const p = deps.config.access?.provider
     return p?.type === 'oidc' ? oidcHandlers(deps, p).callback(c) : notFound(c)
   })
-  app.get('/auth/logout', (c) => {
+  // Signing out changes state, so it is a same-site POST; a cross-site link or image cannot sign
+  // an administrator out. GET keeps old links working by showing a confirmation button.
+  app.get('/auth/logout', async (c) => {
+    if (!deps.config.access?.provider) return notFound(c)
+    const viewer = await currentViewer(c, deps)
+    const chrome = await buildChrome(deps, { viewer, current: '/', signIn: false })
+    return c.html(signOutPage(chrome), 200, { 'cache-control': 'no-store' })
+  })
+  app.post('/auth/logout', (c) => {
     const p = deps.config.access?.provider
     if (!p) return notFound(c)
+    if (!fromThisSite(c, deps)) return c.text('Forbidden', 403)
     deleteCookie(c, SESSION_COOKIE, { path: '/' })
-    if (p.type === 'cloudflare-access') return c.redirect(`https://${p.teamDomain}/cdn-cgi/access/logout`, 302)
-    const res = c.redirect('/', 302)
+    const res = c.redirect(p.type === 'cloudflare-access' ? `https://${p.teamDomain}/cdn-cgi/access/logout` : '/', 303)
     res.headers.set('cache-control', 'no-store')
     return res
   })

@@ -213,9 +213,27 @@ describe('Basic auth (email allowlist)', () => {
     expect((await s.app.request('/pages/ops', { headers: { cookie } })).status).toBe(200)
     expect((await s.app.request('/auth/login?next=/pages/ops', { headers: { cookie } })).headers.get('location')).toBe('/pages/ops')
 
+    // The header's Sign out control is a same-site POST form, not a link.
+    expect(homeBody).toContain('<form method="post" action="/auth/logout"')
+    expect(homeBody).not.toContain('href="/auth/logout"')
+
+    // A cross-site link or image (GET) cannot sign anyone out: it shows a confirmation button.
+    const linked = await s.app.request('/auth/logout', { headers: { cookie } })
+    expect(linked.status).toBe(200)
+    expect(linked.headers.get('cache-control')).toBe('no-store')
+    expect(linked.headers.getSetCookie()).toEqual([])
+    expect(await linked.text()).toContain('<form method="post" action="/auth/logout"><button class="btn-primary" type="submit">Sign out</button>')
+    // Nor can a cross-site form post, or one with no origin at all.
+    for (const headers of [{ cookie, origin: 'https://evil.test' }, { cookie }] as Record<string, string>[]) {
+      const forged = await s.app.request('/auth/logout', { method: 'POST', headers })
+      expect(forged.status).toBe(403)
+      expect(forged.headers.getSetCookie()).toEqual([])
+    }
+    expect(await (await s.app.request('/', { headers: { cookie } })).text()).toContain('alice@statusping.test')
+
     // Sign out: session cleared, back to the homepage, signed out for real.
-    const out = await s.app.request('/auth/logout', { headers: { cookie } })
-    expect(out.status).toBe(302)
+    const out = await s.app.request('/auth/logout', { method: 'POST', headers: { cookie, origin: 'http://localhost' } })
+    expect(out.status).toBe(303)
     expect(out.headers.get('location')).toBe('/')
     expect(out.headers.getSetCookie().some((h) => h.startsWith('sp_session=;'))).toBe(true)
     expect(await (await s.app.request('/', { headers: { cookie: 'sp_session=forged.value' } })).text()).toContain('>Sign in<')
@@ -261,6 +279,14 @@ describe('Cloudflare Access (email allowlist)', () => {
     // Token for another Access application:
     const wrongAud = await token('bob@statusping.test', { aud: ['someone-else'] })
     expect((await s.app.request('/pages/ops', { headers: { 'cf-access-jwt-assertion': wrongAud } })).status).toBe(403)
+
+    // Signing out still ends at the team's Access logout, but only from a same-site POST.
+    const signedIn = { cookie: `CF_Authorization=${await token('bob@statusping.test')}` }
+    expect((await s.app.request('/auth/logout', { headers: signedIn })).status).toBe(200)
+    expect((await s.app.request('/auth/logout', { method: 'POST', headers: { ...signedIn, origin: 'https://evil.test' } })).status).toBe(403)
+    const out = await s.app.request('/auth/logout', { method: 'POST', headers: { ...signedIn, origin: 'http://localhost' } })
+    expect(out.status).toBe(303)
+    expect(out.headers.get('location')).toBe(`https://${team}/cdn-cgi/access/logout`)
   })
 })
 

@@ -69,9 +69,12 @@ function barClass(b: DayBar): string {
   return 'down'
 }
 
+/** Sign-out is a same-site POST; the button keeps the look of the former link. */
+const signOutButton = html`<form method="post" action="/auth/logout" style="display:contents"><button class="btn-outline" type="submit">Sign out</button></form>`
+
 function siteHeader(c: Chrome): Html {
   const account = c.viewer
-    ? html`<span class="muted small account-email">${c.viewer.email}</span><a class="btn-outline" href="/auth/logout">Sign out</a>`
+    ? html`<span class="muted small account-email">${c.viewer.email}</span>${signOutButton}`
     : c.signInLink
       ? html`<a class="btn-outline" href="/auth/login?next=${enc(c.current)}">Sign in</a>`
       : ''
@@ -882,6 +885,20 @@ export function ssoSignInPage(chrome: Chrome, opts: { next: string; provider: st
         <h1>Sign in</h1>
         <p class="muted">${opts.reason ?? 'This page is only available to signed-in people.'}</p>
         <a class="btn-primary sso-button" href="/auth/login?go=1&next=${encodeURIComponent(opts.next)}">Continue with ${opts.provider}</a>
+      </section>
+    </div>`,
+    chrome,
+  )
+}
+
+export function signOutPage(chrome: Chrome): Html {
+  return layout(
+    `Sign out · ${chrome.siteTitle}`,
+    html`<div class="auth">
+      <section class="card auth-card">
+        <h1>Sign out</h1>
+        <p class="muted">Sign out of ${chrome.siteTitle} on this device?</p>
+        <form method="post" action="/auth/logout"><button class="btn-primary" type="submit">Sign out</button></form>
       </section>
     </div>`,
     chrome,
