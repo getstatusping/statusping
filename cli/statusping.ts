@@ -22,6 +22,7 @@ import { formatDuration } from '../src/util/time.ts'
 import { hashUserPassword } from '../src/auth/providers.ts'
 import { type AdminConfig, validateAdminConfig } from '../src/admin/security.ts'
 import { revisionStatements } from '../src/admin/service.ts'
+import { rotateSignInEpochStatement } from '../src/auth/epoch.ts'
 import { locateProblems, parseAdminYaml } from '../src/admin/yaml.ts'
 import type { NormalizedConfig } from '../src/config.ts'
 
@@ -129,7 +130,9 @@ async function recover(email: string | undefined): Promise<void> {
     ...revisionStatements(config, address, now, { action: 'config.recover' }),
     { sql: `UPDATE admin_config SET config_json = ?, updated_at = ?, updated_by = ? WHERE id = 1`, params: [JSON.stringify(config), now, address] },
     { sql: `INSERT INTO local_users (email, password_hash, created_at) VALUES (?, ?, ?) ON CONFLICT(email) DO UPDATE SET password_hash = excluded.password_hash`, params: [address, await hashUserPassword(password), now] },
-    { sql: `INSERT INTO instance_secrets (name, value, created_at) VALUES ('session_key', ?, ?) ON CONFLICT(name) DO NOTHING`, params: [randomToken(48), now] },
+    // Like a sign-in method change in Settings, recovering signs everyone out (see auth/epoch.ts).
+    { sql: `INSERT INTO instance_secrets (name, value, created_at) VALUES ('session_key', ?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value, created_at = excluded.created_at`, params: [randomToken(48), now] },
+    rotateSignInEpochStatement(now),
     { sql: `INSERT INTO audit_log (actor, action, target, before_json, after_json, at) VALUES (?, 'instance.recover', 'access', ?, '{"method":"basic"}', ?)`, params: [`${address} (cli)`, JSON.stringify({ method: stored.access?.provider?.type ?? null }), now] },
   ])
   console.log(`Sign-in is now email + password. Password for ${address} (shown once):\n\n  ${password}\n`)

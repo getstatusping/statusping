@@ -27,6 +27,22 @@ export function canOpen(page: NormalizedPage, viewer: Viewer | null, access: Nor
   })
 }
 
+/**
+ * May email about this page go to this subscriber? A subscriber is only an email address: there is
+ * no sign-in to read SSO groups from. So for a restricted page this follows the page's current
+ * access rules by email alone (the page's emails and its teams' emails); access given only through
+ * groups does not count, which keeps restricted pages fail-closed.
+ */
+export function mayEmailAbout(page: NormalizedPage, email: string, access: NormalizedAccess | null): boolean {
+  if (page.access === 'public') return true
+  if (!access) return false
+  if (emailMatches(email, page.access.emails)) return true
+  return page.access.teams.some((t) => {
+    const team = access.teams[t]
+    return team ? emailMatches(email, team.emails) : false
+  })
+}
+
 /** May this signed-in viewer acknowledge incidents? Deliberately separate from page visibility. */
 export function canAcknowledge(viewer: Viewer | null, access: NormalizedAccess | null): boolean {
   if (!viewer || !access?.admins) return false

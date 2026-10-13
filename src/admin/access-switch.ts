@@ -9,6 +9,8 @@ import { deleteCookie, getCookie, setCookie } from 'hono/cookie'
 import { currentViewer, discover, hashUserPassword, setSession } from '../auth/providers.ts'
 import { b64urlEncode, emailVerified, verifyJwt } from '../auth/jwt.ts'
 import { sign, unsign } from '../auth/session.ts'
+import { rotateSignInEpochStatement } from '../auth/epoch.ts'
+import type { Statement } from '../db/types.ts'
 import type { Viewer } from '../auth/viewer.ts'
 import type { AuthProviderInput } from '../config.ts'
 import { type Deps, refreshAdminConfig, storedEnvKey } from '../deps.ts'
@@ -115,15 +117,17 @@ function providerFor(draft: SwitchDraft): AuthProviderInput {
   return { type: 'basic' }
 }
 
-/** Makes sure sessions can be signed after the switch (SSO and DB accounts need a key). */
-async function ensureSessionKey(deps: Deps): Promise<string> {
-  const explicit = deps.getEnv('SESSION_SECRET')
-  if (explicit && explicit.length >= 32) return explicit
-  const stored = (await deps.db.first<{ value: string }>(`SELECT value FROM instance_secrets WHERE name = 'session_key'`))?.value
-  if (stored) return stored
-  const key = randomToken(48)
-  await deps.db.run(`INSERT INTO instance_secrets (name, value, created_at) VALUES ('session_key', ?, ?) ON CONFLICT(name) DO NOTHING`, [key, nowSeconds()])
-  return (await deps.db.first<{ value: string }>(`SELECT value FROM instance_secrets WHERE name = 'session_key'`))!.value
+/**
+ * Ends every sign-in made before the switch: a new stored session key (used when SESSION_SECRET is
+ * not set) and a new sign-in epoch (which SESSION_SECRET and recovery sessions are bound to; see
+ * auth/epoch.ts). Written in the same transaction as the new configuration.
+ */
+function signEveryoneOutStatements(now: number): Statement[] {
+  return [
+    { sql: `INSERT INTO instance_secrets (name, value, created_at) VALUES ('session_key', ?, ?)
+            ON CONFLICT(name) DO UPDATE SET value = excluded.value, created_at = excluded.created_at`, params: [randomToken(48), now] },
+    rotateSignInEpochStatement(now),
+  ]
 }
 
 /** Only an administrator of this site may switch, and the new sign-in must belong to one too. */
@@ -200,7 +204,7 @@ ${verified ? '' : `<section class="card"><h2>3. Test sign-in</h2><p class="lead"
 <div class="actions">${d.issuer && opts.creds.OIDC_CLIENT_ID?.source && opts.creds.OIDC_CLIENT_SECRET?.source ? '<a class="btn-primary" href="/admin/access/method/oidc/start">Test sign-in</a>' : '<span class="btn-primary" aria-disabled="true">Test sign-in</span><span class="hint">Save the issuer, client ID and client secret first.</span>'}</div></section>`}`
   }
   const ready = verified ? `<section class="card"><p class="alert success" role="status">${d.method === 'basic' ? 'Password saved' : 'Test sign-in worked'} for <strong>${escape(verified)}</strong>.</p>
-<p class="lead">Switching signs everyone out. They sign in again with ${METHODS[d.method].toLowerCase()}.</p>
+<p class="lead">Switching signs everyone out, also with <code>SESSION_SECRET</code> set, and ends recovery sessions. ${d.method === 'cloudflare-access' ? 'Everyone' : 'You stay signed in; everyone else'} signs in again with ${METHODS[d.method].toLowerCase()}. MCP access tokens keep working: revoke them under <strong>MCP</strong> if they should end too.</p>
 <form method="post" action="/admin/access/method/apply">${hidden(opts.csrf)}<div class="actions"><button class="btn-primary" type="submit">Switch to ${escape(METHODS[d.method])}</button></div></form></section>` : ''
   return layout({ ...opts, section: 'access', title: METHODS[d.method], description: 'Set up the new sign-in method. The current method keeps working until you switch.', body: `${ready}${body}
 <section class="card"><form method="post" action="/admin/access/method/cancel">${hidden(opts.csrf)}<div class="actions"><a class="btn-outline" href="/admin/access/method?choose=1">Choose a different method</a><button class="btn-outline" type="submit">Cancel the change</button></div></form></section>` })
@@ -346,17 +350,20 @@ export function mountAccessSwitch(app: Hono, deps: Deps, h: SwitchHelpers): void
     if (!canAdmin({ email: draft.verifiedEmail, groups: [], provider } as Viewer, normalized)) return configure(c, p, { ...draft, verifiedEmail: undefined }, ERRORS['not-admin'], 400)
     const now = nowSeconds()
     const promote = Object.entries(creds).filter(([, v]) => v.source === 'pending')
-    await deps.db.batch([
+    // One transaction: the new method, its credentials, and the end of every existing sign-in
+    // (also for a switch to the same kind of method, such as a new password or another issuer).
+    await saveAdminConfig(deps.db, { ...next, admin: true }, p.viewer.email, now, getEnv, { hasRealEnv: deps.hasRealEnv, extra: [
       ...promote.map(([name, v]) => ({ sql: `INSERT INTO instance_secrets (name, value, created_at) VALUES (?, ?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value, created_at = excluded.created_at`, params: [storedEnvKey(name), v.value!, now] })),
       ...(draft.method === 'basic' ? [{ sql: `INSERT INTO local_users (email, password_hash, created_at) VALUES (?, ?, ?) ON CONFLICT(email) DO UPDATE SET password_hash = excluded.password_hash`, params: [draft.verifiedEmail, draft.passwordHash!, now] }] : []),
+      ...signEveryoneOutStatements(now),
       { sql: `INSERT INTO audit_log (actor, action, target, before_json, after_json, at) VALUES (?, 'access.method-change', 'access', ?, ?, ?)`, params: [p.viewer.email, JSON.stringify({ method: currentMethod(deps) ?? null }), JSON.stringify({ method: draft.method }), now] },
-    ])
-    await ensureSessionKey(deps)
-    await saveAdminConfig(deps.db, { ...next, admin: true }, p.viewer.email, now, getEnv, { hasRealEnv: deps.hasRealEnv })
+    ] })
     await clearDraft(deps)
     await refreshAdminConfig(deps, now)
-    // Keep the administrator who switched signed in; Cloudflare Access signs in on every request.
+    // Keep the administrator who switched signed in, with a session signed by the new key;
+    // Cloudflare Access signs in on every request.
     if (draft.method !== 'cloudflare-access') await setSession(c, deps, { email: draft.verifiedEmail, groups: [], provider })
+    else deleteCookie(c, 'sp_session', { path: '/' })
     deleteCookie(c, RECOVERY_COOKIE, { path: '/' })
     return h.done(c, '/admin/access', 'method-changed')
   })

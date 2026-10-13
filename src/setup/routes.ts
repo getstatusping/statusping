@@ -185,10 +185,15 @@ export function draftConfig(draft: SetupDraft): AdminConfig {
 
 /**
  * Ends setup in one batch: configuration (as the first revision of this setup), account, session
- * key, audit, and the end of setup mode. The status guard makes a repeated finish a no-op.
+ * key, audit, and the end of setup mode. The status guard makes a repeated finish a no-op that
+ * returns false.
  */
-export async function completeSetup(deps: Deps, config: AdminConfig, who: { email: string; method: SetupMethod; passwordHash?: string; actor?: string }, now: number): Promise<void> {
+export async function completeSetup(deps: Deps, config: AdminConfig, who: { email: string; method: SetupMethod; passwordHash?: string; actor?: string }, now: number): Promise<boolean> {
   const statements: Statement[] = [
+    // The atomic guard: unless setup is still pending when this transaction runs, this sets a NOT
+    // NULL column to NULL, so the whole batch fails and writes nothing. A second finish that read
+    // "pending" before the first one committed (a double submit) therefore cannot write twice.
+    { sql: `UPDATE setup_state SET updated_at = CASE WHEN status = 'pending' THEN updated_at ELSE NULL END WHERE id = 1` },
     ...revisionStatements(config, who.email, now, { action: 'setup.complete' }),
     { sql: `INSERT INTO admin_config (id, config_json, updated_at, updated_by) VALUES (1, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET config_json = excluded.config_json, updated_at = excluded.updated_at, updated_by = excluded.updated_by`,
@@ -211,11 +216,18 @@ export async function completeSetup(deps: Deps, config: AdminConfig, who: { emai
       params: [who.actor ?? who.email, JSON.stringify({ method: who.method }), now] },
     { sql: `UPDATE setup_state SET status = 'complete', code = NULL, session_key = NULL, draft_json = '{}', failed_attempts = 0, updated_at = ? WHERE id = 1 AND status = 'pending'`, params: [now] },
   ]
-  // Only the first finish writes: a second one (double submit) finds setup already complete.
-  const pending = await deps.db.first<{ status: string }>(`SELECT status FROM setup_state WHERE id = 1`)
-  if (pending?.status !== 'pending') return
-  await deps.db.batch(statements)
+  // Only the first finish writes: a second one (double submit) finds setup already complete, or,
+  // if it raced past this check, is stopped by the guard statement inside the transaction.
+  const status = async () => (await deps.db.first<{ status: string }>(`SELECT status FROM setup_state WHERE id = 1`))?.status
+  if (await status() !== 'pending') return false
+  try {
+    await deps.db.batch(statements)
+  } catch (error) {
+    if (await status() !== 'pending') return false
+    throw error
+  }
   await refreshAdminConfig(deps, now)
+  return true
 }
 
 function currentStep(draft: SetupDraft): SetupStep {
@@ -661,8 +673,10 @@ export function mountSetupRoutes(app: Hono, deps: Deps): void {
     }
     const email = draft.email!
     const method = draft.method ?? 'basic'
-    await completeSetup(deps, config, { email, method, passwordHash: draft.passwordHash }, now)
+    const finished = await completeSetup(deps, config, { email, method, passwordHash: draft.passwordHash }, now)
     deleteCookie(c, SETUP_COOKIE, { path: '/' })
+    // A second submit of the same finish: the first one already signed this browser in.
+    if (!finished) return c.redirect('/admin', 303)
     // Cloudflare Access signs people in on every request; the other methods use a session.
     if (method !== 'cloudflare-access') await setSession(c, deps, { email, groups: [], provider: method === 'oidc' ? 'oidc' : 'basic' })
     // A scheduled job needs its ping URL, which exists only once: generate it and show it now.
@@ -715,9 +729,15 @@ export function mountSetupRoutes(app: Hono, deps: Deps): void {
     const method = provider.type as SetupMethod
     const password = method === 'basic' ? randomToken(24) : undefined
     const now = nowSeconds()
-    await completeSetup(deps, config, { email, method, passwordHash: password ? await hashUserPassword(password) : undefined, actor: `${email} (api)` }, now)
+    if (!await completeSetup(deps, config, { email, method, passwordHash: password ? await hashUserPassword(password) : undefined, actor: `${email} (api)` }, now)) {
+      return json({ error: 'Setup is already complete.' }, 404)
+    }
     const origin = new URL(c.req.url).origin
-    return json({ ok: true, admin: email, method, ...(password ? { password, note: 'Shown once. Sign in with it, then store it in a password manager.' } : {}), signIn: `${origin}/admin` }, 201)
+    // Scheduled jobs have no ping URL until one is created in Settings (each is shown once there).
+    await syncConfig(deps, now)
+    const pingUrlsNeeded = (await deps.db.all<{ id: string }>(`SELECT id FROM monitors WHERE kind = 'push' AND paused = 0 AND ping_token_hash IS NULL ORDER BY id`)).map((r) => r.id)
+    return json({ ok: true, admin: email, method, ...(password ? { password, note: 'Shown once. Sign in with it, then store it in a password manager.' } : {}), signIn: `${origin}/admin`,
+      ...(pingUrlsNeeded.length ? { pingUrlsNeeded, pingUrlsNote: `These scheduled jobs have no ping URL yet. Create each one in Settings: ${origin}/admin/monitors` } : {}) }, 201)
   })
 
   // ── Reset: only exists while the STATUSPING_RESET_TOKEN secret is set ──────────────────────

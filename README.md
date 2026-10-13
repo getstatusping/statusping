@@ -173,9 +173,11 @@ ADMIN_TOKEN=… npm run cli -- config push --url https://status.example.com --re
 
 Scheduled jobs no longer need `PING_TOKENS`: adding one in Settings (or through MCP) shows its ping URL once, and Settings → Monitors marks any job that has none yet.
 
+**Email subscribers** (`subscribers`) on a restricted page: a subscriber is only an email address, so updates go only to addresses the page's access rules list now, in `emails` or in a team's `emails` (patterns such as `*@example.com` count). Access given only through single sign-on `groups` cannot be checked for an email address, so those people cannot subscribe and receive nothing; list their address or domain to include them. Making a public page private, or removing an address from its rules, stops that page's updates to subscribers it no longer lists; their subscriptions are kept and resume if access is given back.
+
 ## Change the sign-in method
 
-Settings → Access → **Change sign-in method** switches between email and password, Cloudflare Access and OpenID Connect without taking the site offline. You enter the new settings, then run a real test sign-in as an administrator; the current method keeps working until that succeeds and you choose **Switch**. Switching signs everyone else out.
+Settings → Access → **Change sign-in method** switches between email and password, Cloudflare Access and OpenID Connect without taking the site offline. You enter the new settings, then run a real test sign-in as an administrator; the current method keeps working until that succeeds and you choose **Switch**. Switching signs everyone else out, also when the new method is the same kind as the old one (a new password, another OpenID Connect issuer, another Access team) and also with `SESSION_SECRET` set; recovery sessions end too. Acknowledgement links in alerts already sent and MCP access tokens keep working (revoke tokens under Settings → MCP).
 
 For OpenID Connect, the current client ID and secret (saved in Settings or set as Worker secrets) are offered only while the issuer stays the same. A new issuer needs them entered again; with Worker secrets, enter the same values to confirm them, or update the secrets first.
 
@@ -222,7 +224,11 @@ you create in the browser:
    Everyone is signed out, MCP access tokens are revoked, and acknowledgement links in alerts
    already sent stop working. This holds when `SESSION_SECRET`, `STATUSPING_RECOVERY_TOKEN` or
    `ACK_SECRET` are set too: what they sign is tied to a value that a reset, and again a finished
-   setup, replaces. The previous configuration and all monitor history are kept.
+   setup, replaces. **Ping URLs of scheduled jobs** (push monitors) created in Settings or by
+   setup are revoked too, even when the next configuration reuses the monitor id: after setup,
+   create a new one for each job (Settings → Monitors marks them "No ping URL yet") and update
+   the jobs that call them. Tokens from the `PING_TOKENS` secret are not affected. The previous
+   configuration, all monitor history and email subscribers are kept.
 3. Open `/setup` and enter the **setup code**. StatusPing writes it to the logs every minute
    while setup is pending (Cloudflare: the Worker's **Logs**, or `npx wrangler tail`). To choose
    your own code instead, set the `STATUSPING_SETUP_TOKEN` secret.
@@ -243,14 +249,15 @@ you create in the browser:
 Scripts can do steps 3–5 in one call: `POST /api/setup` with JSON `{ "code": "<setup code>",
 "admin": "you@example.com", "yaml": "<configuration>" }`. The sign-in method comes from the
 YAML's `access.provider` (email + password when absent; the response then contains a generated
-password, shown once). Cloudflare Access needs `CF_ACCESS_AUD`, and OpenID Connect needs
+password, shown once). `pingUrlsNeeded` in the response lists the scheduled jobs that still need
+a ping URL. Cloudflare Access needs `CF_ACCESS_AUD`, and OpenID Connect needs
 `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET` and a reachable issuer, before the call.
 
 **Locked out?** Set the `STATUSPING_RECOVERY_TOKEN` secret, open `/setup/recover`, and enter
 it with an administrator's email. That session can only change the sign-in method (Settings →
 Access); everything else stays closed until you switch, and the recovery is recorded in
 Activity. Remove the secret afterwards. On Node, `npm run cli -- recover you@example.com`
-switches the site to email + password and prints a new password.
+switches the site to email + password, signs everyone else out and prints a new password.
 
 **Acknowledgement links** in escalation alerts are signed with the `ACK_SECRET` secret when it
 is set, otherwise with a key the site generates and keeps in its database. Setting, changing or

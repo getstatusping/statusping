@@ -119,7 +119,8 @@ export async function recordFailedClaim(deps: { db: Db; log: Logger }, state: Se
  * bindings, an unfinished sign-in method change, CSRF tokens and MCP access tokens are removed, and
  * the secret epoch is replaced, so every existing session, recovery session, alert link and API
  * token ends (with SESSION_SECRET, STATUSPING_RECOVERY_TOKEN or ACK_SECRET set too: see
- * auth/epoch.ts). Monitor history is kept.
+ * auth/epoch.ts). Ping URLs created in the app are revoked. Monitor history and email subscribers
+ * are kept.
  */
 export async function beginSetup(db: Db, actor: string, now: number): Promise<void> {
   await db.batch([
@@ -141,6 +142,9 @@ export async function beginSetup(db: Db, actor: string, now: number): Promise<vo
     { sql: `DELETE FROM admin_csrf` },
     // MCP tokens act as the administrators who created them; none of them belongs to the next owner.
     { sql: `DELETE FROM api_tokens` },
+    // Ping URLs created in the app belong to the old owner too: a monitor id the next
+    // configuration reuses must not keep accepting them (syncConfig keeps a stored hash).
+    { sql: `UPDATE monitors SET ping_token_hash = NULL WHERE ping_token_hash IS NOT NULL` },
     rotateEpochStatement(now),
     { sql: `INSERT INTO audit_log (actor, action, target, before_json, after_json, at) VALUES (?, 'instance.reset', 'setup', NULL, NULL, ?)`, params: [actor, now] },
   ])

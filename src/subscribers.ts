@@ -5,6 +5,8 @@ import type { Db } from './db/types.ts'
 import type { Deps } from './deps.ts'
 import { randomToken, sha256Hex, timingSafeEqual } from './util/crypto.ts'
 import { formatMailbox } from './util/email.ts'
+import { mayEmailAbout } from './auth/viewer.ts'
+import type { NormalizedPage } from './config.ts'
 
 const ATTEMPTS = 3
 const RETRY_AFTER = 50
@@ -41,11 +43,19 @@ async function resend(cfg: SubscriberConfigInput, getEnv: EnvGetter, fetchFn: ty
   if (!response.ok) throw new Error(`subscriber email: HTTP ${response.status}`)
 }
 
-export async function startSubscription(deps: Deps, pageSlug: string, emailInput: string, now: number): Promise<'sent' | 'confirmed' | 'disabled' | 'invalid'> {
+/** The page as configured now, if email about it may go to this address (see mayEmailAbout). */
+function pageFor(deps: Deps, slug: string, email: string): NormalizedPage | null {
+  const page = deps.config.pages.find((p) => p.slug === slug)
+  return page && mayEmailAbout(page, email, deps.config.access) ? page : null
+}
+
+export async function startSubscription(deps: Deps, pageSlug: string, emailInput: string, now: number): Promise<'sent' | 'confirmed' | 'disabled' | 'invalid' | 'not-allowed'> {
   const cfg = deps.config.subscribers
   const email = emailInput.trim().toLowerCase()
   if (!cfg) return 'disabled'
   if (!isEmailAddress(email)) return 'invalid'
+  // A restricted page sends updates only to addresses its access rules list (not to SSO groups).
+  if (!pageFor(deps, pageSlug, email)) return 'not-allowed'
   let row = await deps.db.first<Subscriber>('SELECT id, page_slug, email, confirmed_at, confirm_token_hash, unsubscribe_token_hash FROM subscribers WHERE page_slug = ? AND email = ?', [pageSlug, email])
   if (row?.confirmed_at) return 'confirmed'
   const confirm = randomToken(32)
@@ -75,17 +85,20 @@ export async function unsubscribe(deps: Deps, value: string): Promise<boolean> {
   return (await deps.db.run('DELETE FROM subscribers WHERE id = ? AND unsubscribe_token_hash = ?', [claim.id, await sha256Hex(claim.token)])).changes === 1
 }
 
-async function enqueue(deps: Deps, pageSlug: string, eventKey: string, subject: string, text: string, html: string, now: number, prerequisite?: string) {
-  const rows = await deps.db.all<{ id: number }>(prerequisite
-    ? 'SELECT s.id FROM subscribers s WHERE s.page_slug = ? AND s.confirmed_at IS NOT NULL AND EXISTS (SELECT 1 FROM subscriber_outbox o WHERE o.subscriber_id = s.id AND o.event_key = ? AND o.ok = 1)'
-    : 'SELECT id FROM subscribers WHERE page_slug = ? AND confirmed_at IS NOT NULL', prerequisite ? [pageSlug, prerequisite] : [pageSlug])
-  for (const row of rows) await deps.db.run('INSERT INTO subscriber_outbox(subscriber_id, event_key, subject, text_body, html_body, created_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(subscriber_id, event_key) DO NOTHING', [row.id, eventKey, subject, text, html, now])
+async function enqueue(deps: Deps, page: NormalizedPage, eventKey: string, subject: string, text: string, html: string, now: number, prerequisite?: string) {
+  const rows = await deps.db.all<{ id: number; email: string }>(prerequisite
+    ? 'SELECT s.id, s.email FROM subscribers s WHERE s.page_slug = ? AND s.confirmed_at IS NOT NULL AND EXISTS (SELECT 1 FROM subscriber_outbox o WHERE o.subscriber_id = s.id AND o.event_key = ? AND o.ok = 1)'
+    : 'SELECT id, email FROM subscribers WHERE page_slug = ? AND confirmed_at IS NOT NULL', prerequisite ? [page.slug, prerequisite] : [page.slug])
+  // The page's access now, not when they subscribed: a page made private, or an address removed
+  // from its access rules, stops receiving its updates (the subscription is kept and resumes if
+  // access is given back).
+  for (const row of rows) if (mayEmailAbout(page, row.email, deps.config.access)) await deps.db.run('INSERT INTO subscriber_outbox(subscriber_id, event_key, subject, text_body, html_body, created_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(subscriber_id, event_key) DO NOTHING', [row.id, eventKey, subject, text, html, now])
 }
 export async function enqueueAnnouncement(deps: Deps, announcement: Announcement, eventKey: string, now: number) {
   if (!deps.config.subscribers) return
   const pages = deps.config.pages.filter((page) => announcement.monitors.some((id) => page.monitorIds.includes(id)))
   const body = announcement.updates[0]?.body ?? ''
-  for (const page of pages) await enqueue(deps, page.slug, `announcement:${announcement.id}:${eventKey}`, `${announcement.title} — ${deps.config.title}`, body, `<h1>${escapeHtml(announcement.title)}</h1><p>${escapeHtml(body)}</p>`, now)
+  for (const page of pages) await enqueue(deps, page, `announcement:${announcement.id}:${eventKey}`, `${announcement.title} — ${deps.config.title}`, body, `<h1>${escapeHtml(announcement.title)}</h1><p>${escapeHtml(body)}</p>`, now)
 }
 export async function enqueueIncidentSubscribers(deps: Deps, now: number) {
   if (!deps.config.subscribers) return
@@ -99,14 +112,19 @@ export async function enqueueIncidentSubscribers(deps: Deps, now: number) {
     // monitor it can be text chosen by whoever holds the ping URL).
     const detail = page.show.includes('errors') ? incident.detail : null
     const body = detail ?? (recovered ? 'The incident has been resolved.' : 'An incident has started.')
-    await enqueue(deps, page.slug, `incident:${incident.id}:${event}`, subject, body, `<p>${escapeHtml(body)}</p><p><a href="${deps.config.baseUrl}/pages/${encodeURIComponent(page.slug)}">View status</a></p>`, now, recovered ? `incident:${incident.id}:started` : undefined)
+    await enqueue(deps, page, `incident:${incident.id}:${event}`, subject, body, `<p>${escapeHtml(body)}</p><p><a href="${deps.config.baseUrl}/pages/${encodeURIComponent(page.slug)}">View status</a></p>`, now, recovered ? `incident:${incident.id}:started` : undefined)
   }
 }
 export async function dispatchSubscriberOutbox(deps: Deps, now: number): Promise<number> {
   const cfg = deps.config.subscribers; if (!cfg) return 0
-  const rows = await deps.db.all<{id:number;subscriber_id:number;email:string;subject:string;text_body:string;html_body:string;attempts:number;sent_at:number|null}>('SELECT o.id,o.subscriber_id,s.email,o.subject,o.text_body,o.html_body,o.attempts,o.sent_at FROM subscriber_outbox o JOIN subscribers s ON s.id=o.subscriber_id WHERE o.ok=0 AND o.attempts < ? ORDER BY o.id LIMIT 100', [ATTEMPTS])
+  const rows = await deps.db.all<{id:number;subscriber_id:number;page_slug:string;email:string;subject:string;text_body:string;html_body:string;attempts:number;sent_at:number|null}>('SELECT o.id,o.subscriber_id,s.page_slug,s.email,o.subject,o.text_body,o.html_body,o.attempts,o.sent_at FROM subscriber_outbox o JOIN subscribers s ON s.id=o.subscriber_id WHERE o.ok=0 AND o.attempts < ? ORDER BY o.id LIMIT 100', [ATTEMPTS])
   let sent = 0
   for (const row of rows) {
+    // Checked again when sending: the page's access may have changed since the message was queued.
+    if (!pageFor(deps, row.page_slug, row.email)) {
+      await deps.db.run('UPDATE subscriber_outbox SET attempts = ?, error = ? WHERE id = ? AND ok = 0', [ATTEMPTS, 'not sent: the page no longer lets this address receive its updates', row.id])
+      continue
+    }
     if (row.sent_at && now - row.sent_at < RETRY_AFTER) continue
     if ((await deps.db.run('UPDATE subscriber_outbox SET attempts = attempts + 1, sent_at = ? WHERE id = ? AND ok = 0 AND attempts < ? AND (sent_at IS NULL OR sent_at <= ?)', [now, row.id, ATTEMPTS, now - RETRY_AFTER])).changes !== 1) continue
     try {

@@ -3,7 +3,7 @@ import { readCappedText, readTruncatedText } from '../util/capped-body.ts'
 import { BODY_LIMITS, bodyLimit, bodyLimitFor, capDependsOnCredentials, verifiedCredentials } from './body-limit.ts'
 import type { Context } from 'hono'
 import { currentViewer, hasCredentials, mountAuthRoutes, fromThisSite, signInResponse } from '../auth/providers.ts'
-import { type Viewer, canAcknowledge, canOpen } from '../auth/viewer.ts'
+import { type Viewer, canAcknowledge, canOpen, mayEmailAbout } from '../auth/viewer.ts'
 import { acknowledgeIncident, acknowledgeSecret, verifyAcknowledgeToken } from '../acknowledgements.ts'
 import type { NormalizedPage } from '../config.ts'
 import type { Deps } from '../deps.ts'
@@ -415,6 +415,7 @@ export function createApp(deps: Deps): Hono {
     if (!(await consumeSubscribeLimit(deps.db, bucket, nowSeconds()))) return c.text('Too many subscription attempts; try again later.', 429)
     const result = await startSubscription(deps, r.page.slug, email, nowSeconds())
     if (result === 'invalid') return c.text('Enter a valid email address.', 400)
+    if (result === 'not-allowed') return c.text('Email updates for this page go only to addresses listed in its access rules. Ask an administrator to add yours.', 403)
     return c.redirect(`/pages/${encodeURIComponent(r.page.slug)}?subscription=${result === 'confirmed' ? 'already-confirmed' : 'check-email'}`, 303)
   })
   app.get('/subscribe/confirm', async (c) => {
@@ -436,7 +437,8 @@ export function createApp(deps: Deps): Hono {
     page,
     fields: new Set(page.show),
     base: `/pages/${page.slug}`,
-    subscribersEnabled: Boolean(config.subscribers),
+    // On a restricted page only addresses its access rules list get updates (see mayEmailAbout).
+    subscribersEnabled: Boolean(config.subscribers) && (page.access === 'public' || (viewer !== null && mayEmailAbout(page, viewer.email, config.access))),
     canAcknowledge: canAcknowledge(viewer, config.access),
   })
 

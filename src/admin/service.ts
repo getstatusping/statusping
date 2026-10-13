@@ -176,6 +176,8 @@ export interface SaveOptions {
    * same batch as the configuration, so a refused or failed save stores nothing.
    */
   secrets?: ReadonlyArray<{ name: string; value: string }>
+  /** More statements that must be written in the same transaction as the configuration. */
+  extra?: readonly Statement[]
 }
 
 /** Atomically validates, records, and stores an admin-managed config as a new revision. */
@@ -228,6 +230,7 @@ export async function saveAdminConfig(
         params: [actor, action === 'config.import' || action === 'config.restore' ? action : 'config.save', before ? JSON.stringify(redactAdminValue(before.config)) : null, JSON.stringify(redactAdminValue(config)), now],
       },
       ...bindings,
+      ...(opts.extra ?? []),
     ])
   } catch (error) {
     if (opts.base !== undefined && isConflict(error)) throw new RevisionConflict(await currentRevision(db))
