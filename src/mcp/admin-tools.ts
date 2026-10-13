@@ -14,6 +14,7 @@ import { currentRevision, currentYamlText, listAudit, rotatePingToken, type Save
 import { parseAdminYaml, stringifyAdminYaml } from '../admin/yaml.ts'
 import { checkForUpdate } from '../updates.ts'
 import { isValidTimeZone, nowSeconds } from '../util/time.ts'
+import { hasOwn, own } from '../util/own.ts'
 import { APP_VERSION } from '../version.ts'
 import type { ApiToken } from './tokens.ts'
 import { at, iso, type Json, str, type Tool, ToolError } from './tool.ts'
@@ -173,7 +174,7 @@ export function adminTools({ deps, storedConfig, save, actor }: Ctx): Tool[] {
         const config = await storedConfig()
         const name = at(args.name)
         if (!/^[A-Za-z0-9_-]{1,40}$/.test(name)) throw new ToolError('Use 1–40 letters, numbers, - or _ for the channel name.')
-        if (config.sinks?.[name]) throw new ToolError(`A channel named "${name}" already exists.`)
+        if (hasOwn(config.sinks, name)) throw new ToolError(`A channel named "${name}" already exists.`)
         const close = collidingChannel(config, name)
         if (close) throw new ToolError(`The name "${name}" is too close to the channel "${close}". Choose a different name.`)
         const settings = (args.settings && typeof args.settings === 'object' ? args.settings : {}) as Json
@@ -189,7 +190,7 @@ export function adminTools({ deps, storedConfig, save, actor }: Ctx): Tool[] {
       run: async (args, { token }) => {
         const config = await storedConfig()
         const name = at(args.name)
-        const existing = config.sinks?.[name]
+        const existing = own(config.sinks, name)
         if (!existing) throw new ToolError(`No channel named "${name}".`)
         const settings = (args.settings && typeof args.settings === 'object' ? args.settings : {}) as Json
         const { sink, secrets } = formErrors(() => sinkFromForm({ ...channelForm(existing), ...settingsForm(settings) }, name, existing))
@@ -204,11 +205,12 @@ export function adminTools({ deps, storedConfig, save, actor }: Ctx): Tool[] {
       run: async (args, { token }) => {
         const config = await storedConfig()
         const name = at(args.name)
-        if (!config.sinks?.[name]) throw new ToolError(`No channel named "${name}".`)
+        const sink = own(config.sinks, name)
+        if (!sink) throw new ToolError(`No channel named "${name}".`)
         const remaining = removeSink(config, name)
         await save(token, remaining)
         // Erase the credentials this channel stored, by exact name.
-        await deps.db.batch(forgetChannelStatements(name, config.sinks[name]!.type, remaining))
+        await deps.db.batch(forgetChannelStatements(name, sink.type, remaining))
         return { deleted: name }
       },
     },

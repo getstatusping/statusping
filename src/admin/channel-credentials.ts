@@ -8,6 +8,7 @@
 import type { Db, Statement } from '../db/types.ts'
 import type { AdminConfig } from './security.ts'
 import { SINK_FIELDS, type SinkType, sinkEnvName } from './forms.ts'
+import { hasOwn } from '../util/own.ts'
 
 const ENV_PREFIX = 'env:'
 const BIND_PREFIX = 'bind:'
@@ -87,7 +88,7 @@ export function collidingChannel(config: AdminConfig, name: string): string | un
 export function channelNameProblems(next: AdminConfig, before: AdminConfig | undefined): string[] {
   const problems: string[] = []
   for (const name of Object.keys(next.sinks ?? {})) {
-    if (before?.sinks?.[name]) continue
+    if (hasOwn(before?.sinks, name)) continue
     const other = collidingChannel(next, name)
     if (other) problems.push(`sinks.${name}: the name is too close to the channel "${other}" (both store credentials as ${sinkEnvName(name, '')}…). Choose a different name.`)
   }

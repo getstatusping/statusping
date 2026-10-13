@@ -6,6 +6,7 @@
  */
 import type { AdminConfig } from './security.ts'
 import type { MonitorInput, PageInput, SinkInput } from '../config.ts'
+import { own } from '../util/own.ts'
 
 export type Form = Record<string, unknown>
 export const text = (form: Form, name: string) => (typeof form[name] === 'string' ? (form[name] as string).trim() : '')
@@ -191,7 +192,7 @@ export interface SinkFormResult { sink: SinkInput; secrets: Array<{ name: string
  */
 export function sinkFromForm(form: Form, name: string, existing: SinkInput | undefined): SinkFormResult {
   const type = (existing?.type ?? text(form, 'type')) as SinkType
-  const spec = SINK_FIELDS[type]
+  const spec = own(SINK_FIELDS, type)
   if (!spec) throw new FormError('Choose a channel type.')
   const sink: Record<string, unknown> = { ...(existing ?? {}), type }
   const old = (existing ?? {}) as Record<string, unknown>

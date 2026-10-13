@@ -11,6 +11,7 @@ import {
   resolveConfigEnv,
 } from './config.ts'
 import { isValidTimeZone } from './util/time.ts'
+import { nullProtoRecord, own } from './util/own.ts'
 import { canonicalJson } from './updates.ts'
 import type { Db } from './db/types.ts'
 import type { CertificateExpiryProvider } from './expiry/types.ts'
@@ -142,6 +143,10 @@ export const consoleLogger: Logger = (level, message, data) => {
 }
 
 export function createDeps(opts: CreateDepsOptions): Deps {
+  // Strings only: an environment object that inherits Object.prototype would otherwise answer
+  // "toString" or "constructor" with a native function.
+  const rawGetEnv = opts.getEnv
+  opts = { ...opts, getEnv: (name) => { const value = rawGetEnv(name); return typeof value === 'string' ? value : undefined } }
   const roleEnv = opts.getEnv('STATUSPING_ROLE') ?? 'primary'
   if (roleEnv !== 'primary' && roleEnv !== 'watchdog') {
     throw new Error(`STATUSPING_ROLE must be "primary" or "watchdog", got "${roleEnv}"`)
@@ -166,9 +171,9 @@ export function createDeps(opts: CreateDepsOptions): Deps {
     setupPending: false,
     role: roleEnv,
     // A Worker secret or env var always wins over a value stored by setup.
-    getEnv: (name) => opts.getEnv(name) ?? (isStorableEnv(name) ? deps.storedEnv[name] : undefined),
+    getEnv: (name) => opts.getEnv(name) ?? (isStorableEnv(name) ? own(deps.storedEnv, name) : undefined),
     hasRealEnv: (name) => opts.getEnv(name) !== undefined,
-    storedEnv: {},
+    storedEnv: nullProtoRecord<string>(),
     pingTokens: parsePingTokens(opts.getEnv('PING_TOKENS')),
     // Bind: Workers throw "Illegal invocation" when fetch is called detached from globalThis.
     fetch: opts.fetch ?? fetch.bind(globalThis),
@@ -203,7 +208,7 @@ export const storedEnvKey = (name: string) => `env:${name}`
 
 async function loadStoredEnv(deps: Deps): Promise<void> {
   const rows = await deps.db.all<{ name: string; value: string }>(`SELECT name, value FROM instance_secrets WHERE name LIKE 'env:%'`)
-  const stored: Record<string, string> = {}
+  const stored = nullProtoRecord<string>()
   for (const row of rows) {
     const name = row.name.slice(4)
     if (isStorableEnv(name)) stored[name] = row.value

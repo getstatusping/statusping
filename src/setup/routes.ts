@@ -25,13 +25,14 @@ import { discover } from '../auth/providers.ts'
 import type { AuthProviderInput, MonitorInput, StatusPingConfig } from '../config.ts'
 import { type Deps, isStorableEnv, refreshAdminConfig, STORABLE_ENV, storedEnvKey } from '../deps.ts'
 import { rotatePingToken } from '../admin/service.ts'
-import { syncConfig } from '../sync.ts'
+import { hasPingToken, syncConfig } from '../sync.ts'
 import { TEAM_DOMAIN, presetById } from './instructions.ts'
 import { accessPage, channelPage, type ChannelSources, type EnvSource, importPage, type MonitorValues, oidcPage, setupDonePage } from './ui.ts'
 import { consumeAttempt } from '../rate-limit.ts'
 import { randomToken, timingSafeEqual } from '../util/crypto.ts'
 import { discover as discoverIssuer } from '../auth/providers.ts'
 import { isValidTimeZone, nowSeconds } from '../util/time.ts'
+import { own } from '../util/own.ts'
 import {
   beginSetup, expectedSetupCode, loadSetupState, recordFailedClaim, saveDraft, setupCodeMatches,
   type SetupDraft, type SetupMethod, type SetupMonitor, type SetupState,
@@ -124,7 +125,7 @@ export function draftSummary(draft: SetupDraft): Array<[string, string]> {
       : m.kind === 'tcp' ? `${m.name}: port ${m.port} on ${m.host}, checked every minute`
         : `${m.name}: ${m.url}, checked every minute${m.keyword ? ` for "${m.keyword}"` : ''}`
   const imported = draft.imported
-  const channel = draft.channel ? `${SINK_FIELDS[draft.channel.sink.type as SinkType]?.label ?? draft.channel.sink.type} (${draft.channel.name})` : 'None yet'
+  const channel = draft.channel ? `${own(SINK_FIELDS, draft.channel.sink.type)?.label ?? draft.channel.sink.type} (${draft.channel.name})` : 'None yet'
   return [
     ...(imported ? [['Imported configuration', importSummary(imported)] as [string, string]] : []),
     ['Site title', draft.title ?? ''],
@@ -259,7 +260,7 @@ export function mountSetupRoutes(app: Hono, deps: Deps): void {
 
   const sessionSecretSet = () => (deps.getEnv('SESSION_SECRET')?.length ?? 0) >= 32
   /** Where a setting is set: a Worker secret wins over a value saved here. Never the value. */
-  const source = (name: string): EnvSource => (deps.hasRealEnv(name) ? 'env' : deps.storedEnv[name] ? 'db' : false)
+  const source = (name: string): EnvSource => (deps.hasRealEnv(name) ? 'env' : own(deps.storedEnv, name) ? 'db' : false)
   const oidcEnv = () => ({ OIDC_CLIENT_ID: source('OIDC_CLIENT_ID'), OIDC_CLIENT_SECRET: source('OIDC_CLIENT_SECRET') })
 
   /** Where the saved channel's credentials are set. Names only, never values. */
@@ -269,7 +270,7 @@ export function mountSetupRoutes(app: Hono, deps: Deps): void {
     const refs: Record<string, unknown> = { ...s, ...(s.via && typeof s.via === 'object' ? s.via as Record<string, unknown> : {}) }
     for (const [key, value] of Object.entries(refs)) {
       const name = value && typeof value === 'object' && typeof (value as { $env?: unknown }).$env === 'string' ? (value as { $env: string }).$env : undefined
-      if (name) out[key] = { envName: name, source: deps.hasRealEnv(name) ? 'env' : isStorableEnv(name) && deps.storedEnv[name] ? 'db' : false }
+      if (name) out[key] = { envName: name, source: deps.hasRealEnv(name) ? 'env' : isStorableEnv(name) && own(deps.storedEnv, name) ? 'db' : false }
     }
     return out
   }
@@ -351,7 +352,7 @@ export function mountSetupRoutes(app: Hono, deps: Deps): void {
       res.headers.set('cache-control', 'no-store')
       return res
     }
-    return render(c, loaded.state, loaded.session.csrf, requested, VERIFY_ERRORS[c.req.query('error') ?? ''])
+    return render(c, loaded.state, loaded.session.csrf, requested, own(VERIFY_ERRORS, c.req.query('error') ?? ''))
   })
 
   // ── Cloudflare Access and OIDC: connect & verify ────────────────────────────────────────────
@@ -591,7 +592,7 @@ export function mountSetupRoutes(app: Hono, deps: Deps): void {
       // and a stale stored copy would take over if the Worker secret were later deleted.
       const secrets = entered.filter((secret) => !deps.hasRealEnv(secret.name))
       const pending = Object.fromEntries(secrets.map((secret) => [secret.name, secret.value]))
-      try { validateAdminConfig(draftConfig({ ...draft, channel: { name, sink } }), (env) => pending[env] ?? deps.getEnv(env)) } catch (e) { throw new FormError((e as Error).message) }
+      try { validateAdminConfig(draftConfig({ ...draft, channel: { name, sink } }), (env) => own(pending, env) ?? deps.getEnv(env)) } catch (e) { throw new FormError((e as Error).message) }
       const now = nowSeconds()
       if (previous && previous.name !== name) await forgetChannel(previous.name)
       await deps.db.batch([
@@ -694,7 +695,7 @@ export function mountSetupRoutes(app: Hono, deps: Deps): void {
       if (token) return html(c, setupDonePage({ pingUrl: `${config.baseUrl.replace(/\/+$/, '')}/ping/${token}`, monitorName: draft.monitor.name }))
     }
     // Imported scheduled jobs get their ping URLs in Settings, where each is shown once.
-    if (draft.imported && monitorRows(config).some((row) => row.monitor.kind === 'push' && !deps.pingTokens[row.monitor.id])) {
+    if (draft.imported && monitorRows(config).some((row) => row.monitor.kind === 'push' && !hasPingToken(deps.pingTokens, row.monitor.id))) {
       await syncConfig(deps, now)
       return c.redirect('/admin/monitors?notice=setup-ping-urls', 303)
     }

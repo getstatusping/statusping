@@ -30,7 +30,7 @@ import { locateProblems, parseAdminYaml } from '../src/admin/yaml.ts'
 import type { NormalizedConfig } from '../src/config.ts'
 
 const [command, ...args] = process.argv.slice(2)
-const getEnv = (name: string) => process.env[name]
+const getEnv = (name: string) => (Object.hasOwn(process.env, name) ? process.env[name] : undefined)
 
 function fail(message: string): never {
   console.error(`error: ${message}`)

@@ -27,7 +27,8 @@ async function legacyConfig(): Promise<StatusPingConfig | undefined> {
   return ((await import(`../../statusping${suffix}.ts`)) as { default?: StatusPingConfig }).default
 }
 
-const env = (name: string) => process.env[name] || undefined
+// Own variables only: process.env inherits Object.prototype, so "toString" would be a function.
+const env = (name: string) => (Object.hasOwn(process.env, name) && process.env[name]) || undefined
 const confirmation = nodeConfirmationSettings(env)
 
 const deps = createDeps({

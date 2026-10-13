@@ -19,6 +19,7 @@ import { readRecoverySession, RECOVERY_COOKIE } from '../setup/recovery.ts'
 import { hmacSha256Hex, randomToken, timingSafeEqual } from '../util/crypto.ts'
 import { consumeAttempt } from '../rate-limit.ts'
 import { nowSeconds } from '../util/time.ts'
+import { hasOwn, nullProtoRecord, own } from '../util/own.ts'
 import type { Form } from './forms.ts'
 import { type AdminConfig, canAdmin, validateAdminConfig } from './security.ts'
 import { auditStatement, saveAdminConfig } from './service.ts'
@@ -106,7 +107,7 @@ function keepsIssuer(deps: Deps, draft: Pick<SwitchDraft, 'method' | 'issuer'>):
 }
 
 async function credentials(deps: Deps, draft: Pick<SwitchDraft, 'method' | 'issuer' | 'key'>): Promise<Record<string, Credential>> {
-  const out: Record<string, Credential> = {}
+  const out = nullProtoRecord<Credential>()
   const same = keepsIssuer(deps, draft)
   for (const name of SECRETS[draft.method]) {
     if (deps.hasRealEnv(name)) {
@@ -255,7 +256,7 @@ const currentMethod = (deps: Deps) => deps.config.access?.provider.type as Metho
 /** Settings pages for the switch. Called from mountAdminRoutes with its signed-in helpers. */
 export function mountAccessSwitch(app: Hono, deps: Deps, h: SwitchHelpers): void {
   const configure = async (c: Context, v: View | Post, draft: SwitchDraft, error?: string, status: 200 | 400 | 429 = 200) =>
-    h.html(c, configurePage({ viewer: v.viewer, csrf: v.csrf, origin: origin(c, deps), draft, creds: await credentials(deps, draft), error: error ?? ERRORS[c.req.query('error') ?? ''], notice: 'notice' in v ? v.notice : undefined, preset: c.req.query('preset'), current: currentMethod(deps),
+    h.html(c, configurePage({ viewer: v.viewer, csrf: v.csrf, origin: origin(c, deps), draft, creds: await credentials(deps, draft), error: error ?? own(ERRORS, c.req.query('error') ?? ''), notice: 'notice' in v ? v.notice : undefined, preset: c.req.query('preset'), current: currentMethod(deps),
       envListsViewer: draft.method === 'basic' && envListsAddress(deps, v.viewer.email) }), status)
   /** Another administrator's draft: shown with who started it, never changed, tested or applied. */
   const foreign = (c: Context, v: View | Post, draft: SwitchDraft, status: 200 | 409 = 409) =>
@@ -274,7 +275,7 @@ export function mountAccessSwitch(app: Hono, deps: Deps, h: SwitchHelpers): void
     const p = await h.post(c)
     if (p instanceof Response) return p
     const method = text(p.form, 'method') as Method
-    if (!(method in METHODS)) return h.html(c, choosePage({ viewer: p.viewer, csrf: p.csrf, current: currentMethod(deps), error: 'Choose a sign-in method.' }), 400)
+    if (!hasOwn(METHODS, method)) return h.html(c, choosePage({ viewer: p.viewer, csrf: p.csrf, current: currentMethod(deps), error: 'Choose a sign-in method.' }), 400)
     // Replacing another administrator's draft takes an explicit Cancel first.
     const existing = await loadDraft(deps)
     if (existing && !ownsDraft(existing, p.viewer)) return foreign(c, p, existing)
@@ -380,7 +381,7 @@ export function mountAccessSwitch(app: Hono, deps: Deps, h: SwitchHelpers): void
     if (!draft?.verifiedEmail) return h.done(c, '/admin/access/method', 'method-expired')
     if (!ownsDraft(draft, p.viewer)) return foreign(c, p, draft)
     const creds = await credentials(deps, draft)
-    const getEnv = (name: string) => (name in creds ? creds[name]!.value : deps.getEnv(name))
+    const getEnv = (name: string) => (hasOwn(creds, name) ? creds[name]!.value : deps.getEnv(name))
     const next: AdminConfig = { ...p.config, access: { ...(p.config.access ?? {}), provider: providerFor(draft) } as AdminConfig['access'] }
     let normalized
     try { normalized = validateAdminConfig({ ...next, admin: true }, getEnv).normalized } catch (error) { return configure(c, p, draft, (error as Error).message, 400) }

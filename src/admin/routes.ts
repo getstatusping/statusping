@@ -6,6 +6,7 @@ import type { MonitorInput, PageInput, SinkInput } from '../config.ts'
 import type { Deps } from '../deps.ts'
 import { isStorableEnv, refreshAdminConfig } from '../deps.ts'
 import { isValidTimeZone, nowSeconds } from '../util/time.ts'
+import { hasOwn, own } from '../util/own.ts'
 import {
   describeChanges, findMonitor, type Form, FormError, monitorFromForm, monitorRows, pageFromForm, pageList, putMonitor, putPage, putSink,
   removeMonitor, removePage, removeSink, SINK_FIELDS, sinkFromForm, type SinkType, text,
@@ -23,7 +24,7 @@ import { exportAdminYaml, locateProblems, parseAdminYaml, stringifyAdminYaml } f
 import { configSchema } from './config-schema.ts'
 import { lineDiff, withContext } from './diff.ts'
 import { collidingChannel, forgetChannelStatements } from './channel-credentials.ts'
-import { syncConfig } from '../sync.ts'
+import { hasPingToken, syncConfig } from '../sync.ts'
 import { readRecoverySession } from '../setup/recovery.ts'
 import { beginSetup } from '../setup/state.ts'
 import { deleteCookie } from 'hono/cookie'
@@ -120,7 +121,7 @@ export function mountAdminRoutes(app: Hono, deps: Deps): void {
     if (viewer instanceof Response) return viewer
     const csrf = await issueCsrfToken(deps.db, c, nowSeconds())
     if (!csrf) return c.text('Your session is invalid. Please sign in again.', 401, noStore)
-    return { viewer, csrf, config: await storedConfig(), notice: NOTICES[c.req.query('notice') ?? ''] }
+    return { viewer, csrf, config: await storedConfig(), notice: own(NOTICES, c.req.query('notice') ?? '') }
   }
 
   /**
@@ -291,7 +292,7 @@ They are refused when saving, so fix them in <a href="/admin/configuration">Conf
     try {
       const monitor = monitorFromForm(p.form, undefined, new Set(monitorRows(p.config).map((r) => r.monitor.id)))
       const result = await save(p, putMonitor(p.config, monitor, text(p.form, 'group')))
-      if (!result && monitor.kind === 'push' && !deps.pingTokens[monitor.id]) {
+      if (!result && monitor.kind === 'push' && !hasPingToken(deps.pingTokens, monitor.id)) {
         // A new scheduled job gets its ping URL right away; it is shown only this once.
         await syncConfig(deps, nowSeconds())
         const token = await rotatePingToken(deps.db, monitor.id, p.viewer.email, nowSeconds())
@@ -413,7 +414,7 @@ They are refused when saving, so fix them in <a href="/admin/configuration">Conf
   // ── Alert channels ────────────────────────────────────────────────────────────────────────
 
   const channelRows = (config: AdminConfig) => Object.entries(config.sinks ?? {}).map(([name, sink]) => ({ name, type: sink.type }))
-  const typeParam = (value: string | undefined): SinkType => (value && value in SINK_FIELDS ? value as SinkType : 'slack')
+  const typeParam = (value: string | undefined): SinkType => (value && hasOwn(SINK_FIELDS, value) ? value as SinkType : 'slack')
 
   /** Where each credential of a channel comes from. Values are never read for display. */
   const sources = (sink: SinkInput | undefined): Record<string, { source: SecretSource; envName?: string }> => {
@@ -424,7 +425,7 @@ They are refused when saving, so fix them in <a href="/admin/configuration">Conf
     for (const [key, value] of Object.entries(refs)) {
       const name = value && typeof value === 'object' && typeof (value as { $env?: unknown }).$env === 'string' ? (value as { $env: string }).$env : undefined
       if (!name) continue
-      out[key] = { envName: name, source: deps.hasRealEnv(name) ? 'env' : isStorableEnv(name) && deps.storedEnv[name] ? 'db' : false }
+      out[key] = { envName: name, source: deps.hasRealEnv(name) ? 'env' : isStorableEnv(name) && own(deps.storedEnv, name) ? 'db' : false }
     }
     return out
   }
@@ -444,7 +445,7 @@ They are refused when saving, so fix them in <a href="/admin/configuration">Conf
   const saveChannel = async (c: Context, name: string | undefined) => {
     const p = await post(c)
     if (p instanceof Response) return p
-    const existing = name ? p.config.sinks?.[name] : undefined
+    const existing = name ? own(p.config.sinks, name) : undefined
     if (name && !existing) return notFound(c)
     const type = existing?.type ?? typeParam(text(p.form, 'type'))
     let error: string
@@ -452,14 +453,14 @@ They are refused when saving, so fix them in <a href="/admin/configuration">Conf
       const channel = name ?? text(p.form, 'name')
       if (!name) {
         if (!/^[A-Za-z0-9_-]{1,40}$/.test(channel)) throw new FormError('Use letters, numbers, - and _ for the channel name.')
-        if (p.config.sinks?.[channel]) throw new FormError(`A channel named "${channel}" already exists.`)
+        if (hasOwn(p.config.sinks, channel)) throw new FormError(`A channel named "${channel}" already exists.`)
         const close = collidingChannel(p.config, channel)
         if (close) throw new FormError(`The name is too close to the channel "${close}". Choose a different name.`)
       }
       const { sink, secrets } = sinkFromForm(p.form, channel, existing)
       // Validate with the new values visible, so a just-entered credential counts as set.
       const pending = Object.fromEntries(secrets.map((s) => [s.name, s.value]))
-      const getEnv = (env: string) => pending[env] ?? deps.getEnv(env)
+      const getEnv = (env: string) => own(pending, env) ?? deps.getEnv(env)
       try { validateAdminConfig({ ...putSink(p.config, channel, sink), admin: true }, getEnv) } catch (e) { throw new FormError((e as Error).message) }
       const result = await save(p, putSink(p.config, channel, sink), secrets)
       if (!result) return done(c, '/admin/channels', name ? 'channel-saved' : 'channel-added')
@@ -474,7 +475,7 @@ They are refused when saving, so fix them in <a href="/admin/configuration">Conf
     const v = await view(c)
     if (v instanceof Response) return v
     const name = c.req.param('name')
-    const sink = v.config.sinks?.[name]
+    const sink = own(v.config.sinks, name)
     if (!sink) return notFound(c)
     return html(c, channelForm({ viewer: v.viewer, csrf: v.csrf, type: sink.type, name, sink, sources: sources(sink) }))
   })
@@ -485,12 +486,13 @@ They are refused when saving, so fix them in <a href="/admin/configuration">Conf
     const p = await post(c)
     if (p instanceof Response) return p
     const name = c.req.param('name')
-    if (!p.config.sinks?.[name]) return notFound(c)
+    const sink = own(p.config.sinks, name)
+    if (!sink) return notFound(c)
     const remaining = removeSink(p.config, name)
     const error = await save(p, remaining)
     if (error) return html(c, channelsPage({ viewer: p.viewer, csrf: p.csrf, sinks: channelRows(p.config), error }), 400)
     // Erase the credentials this channel stored, by exact name.
-    await deps.db.batch(forgetChannelStatements(name, p.config.sinks[name]!.type, remaining))
+    await deps.db.batch(forgetChannelStatements(name, sink.type, remaining))
     await refreshAdminConfig(deps, nowSeconds())
     return done(c, '/admin/channels', 'channel-deleted')
   })
@@ -579,7 +581,7 @@ They are refused when saving, so fix them in <a href="/admin/configuration">Conf
 
   /** Where each $env name the configuration uses is set. Names only, never values. */
   const envStatus = (config: AdminConfig) => envReferences(config).map(({ name, paths }) => ({
-    name, paths, source: (deps.hasRealEnv(name) ? 'env' : isStorableEnv(name) && deps.storedEnv[name] ? 'db' : false) as SecretSource,
+    name, paths, source: (deps.hasRealEnv(name) ? 'env' : isStorableEnv(name) && own(deps.storedEnv, name) ? 'db' : false) as SecretSource,
   }))
   const schemaUrl = () => `${deps.config.baseUrl.replace(/\/+$/, '')}/admin/schema.json`
   const currentYaml = async (config: AdminConfig) => exportAdminYaml(config, await currentYamlText(deps.db), schemaUrl())

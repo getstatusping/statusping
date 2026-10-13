@@ -4,6 +4,7 @@ import { activeMaintenance } from '../maintenance.ts'
 import { acknowledgeSecret, createAcknowledgeToken } from '../acknowledgements.ts'
 import { formatDuration } from '../util/time.ts'
 import { clipText } from '../util/text.ts'
+import { own } from '../util/own.ts'
 import { type AlertMessage, createSink } from './sinks.ts'
 
 const MAX_ATTEMPTS = 3
@@ -231,7 +232,7 @@ export async function dispatchNotifications(deps: Deps, now: number, onlyMonitor
     }
 
     for (const { sinkName, event, messageKind, acknowledge } of targets) {
-      const sinkConfig = config.sinks[sinkName]
+      const sinkConfig = own(config.sinks, sinkName)
       if (!sinkConfig) continue
       const prev = known.get(key(incident.id, event, sinkName))
       if (prev && (prev.ok || prev.attempts >= MAX_ATTEMPTS)) continue

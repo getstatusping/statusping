@@ -128,7 +128,7 @@ export async function parseSourceTree(value: unknown): Promise<SourceTree | null
   const files = manifestCandidate(tree?.files)
   if (!tree || !files || tree.algorithm !== 'sha256' || typeof tree.digest !== 'string' || !HEX64.test(tree.digest)) return null
   const entries = Object.entries(files)
-  if (entries.length === 0 || entries.length > MAX_SOURCE_FILES || !(MARKER in files)) return null
+  if (entries.length === 0 || entries.length > MAX_SOURCE_FILES || !Object.hasOwn(files, MARKER)) return null
   for (const [path, hash] of entries) if (!sourcePathIsSafe(path) || typeof hash !== 'string' || !HEX64.test(hash)) return null
   const checked = Object.fromEntries(entries) as Record<string, string>
   if (await sourceTreeDigest(checked) !== tree.digest) return null
@@ -149,7 +149,7 @@ export async function sourceTreeMismatches(tree: ReadonlyMap<string, Uint8Array>
   // The marker is signed, so the ownership it declares can be trusted once it matched above.
   const owned = mismatches.has(MARKER) ? null : updaterOwnedPaths(tree.get(MARKER))
   for (const path of tree.keys()) {
-    if (!(path in signed.files) && (!owned || ownedByPrefixes(path, owned))) mismatches.add(path)
+    if (!Object.hasOwn(signed.files, path) && (!owned || ownedByPrefixes(path, owned))) mismatches.add(path)
   }
   return [...mismatches].sort()
 }

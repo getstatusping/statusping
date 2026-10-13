@@ -1,6 +1,7 @@
 import type { Announcement } from '../announcements.ts'
 import type { Deps } from '../deps.ts'
 import { createSink, type AlertMessage } from './sinks.ts'
+import { own } from '../util/own.ts'
 
 const MAX_ATTEMPTS = 3
 const RETRY_AFTER = 50
@@ -78,7 +79,7 @@ export async function dispatchAnnouncementNotifications(deps: Deps, now: number)
       [now, row.id, MAX_ATTEMPTS, now - RETRY_AFTER],
     )
     if (claim.changes !== 1) continue
-    const sinkConfig = deps.config.sinks[row.sink]
+    const sinkConfig = own(deps.config.sinks, row.sink)
     if (!sinkConfig) continue
     try {
       await createSink(row.sink, sinkConfig, deps.getEnv, deps).send(announcementMessage(row, deps.config.baseUrl), deps.fetch)

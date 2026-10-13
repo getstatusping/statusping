@@ -3,6 +3,7 @@ import { parseJsonPath } from './evaluate/json.ts'
 import { normalizeSchedule, recurringScheduleProblem } from './maintenance.ts'
 import { hasControlChars, isEmailAddress } from './util/email.ts'
 import { isValidTimeZone, parseDuration } from './util/time.ts'
+import { nullProtoRecord } from './util/own.ts'
 import { OFFICIAL_MANIFEST_URL, OFFICIAL_RELEASE_PUBLIC_KEY } from './updates.ts'
 
 // ─── Config types (the YAML document edited in Settings → Configuration) ───────────────────
@@ -820,9 +821,8 @@ export function normalizeConfig(config: StatusPingConfig, options: NormalizeOpti
     }
   }
 
-  const sinks: Record<string, SinkInput> = disabledSinks.size
-    ? Object.fromEntries(Object.entries(configuredSinks).filter(([name]) => !disabledSinks.has(name)))
-    : configuredSinks
+  // No prototype: `config.sinks[name]` is only ever a configured channel, whatever the name.
+  const sinks: Record<string, SinkInput> = nullProtoRecord(Object.entries(configuredSinks).filter(([name]) => !disabledSinks.has(name)))
   // Own keys only: a name such as "toString" must not resolve to an Object.prototype member.
   const isSink = (name: string) => Object.prototype.hasOwnProperty.call(sinks, name)
   /**
@@ -1483,13 +1483,18 @@ export function resolveSecret(value: Secret, getEnv: EnvGetter): string | undefi
   return v
 }
 
-/** Parses the PING_TOKENS secret: JSON object of `{ monitorId: token }`. */
+/**
+ * Parses the PING_TOKENS secret: JSON object of `{ monitorId: token }`. The map has no prototype:
+ * before 0.3.22 a push monitor named after an Object.prototype member ("constructor",
+ * "toString", …) with no entry here read a native function from the map, and its public string
+ * form became the monitor's ping token. Read it with own-key lookups (`own` in util/own.ts) all the same.
+ */
 export function parsePingTokens(raw: string | undefined): Record<string, string> {
-  if (!raw) return {}
+  if (!raw) return nullProtoRecord<string>()
   try {
     const parsed = JSON.parse(raw) as unknown
     if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-      return Object.fromEntries(
+      return nullProtoRecord(
         Object.entries(parsed as Record<string, unknown>).filter(
           (e): e is [string, string] => typeof e[1] === 'string' && e[1].length >= 16,
         ),

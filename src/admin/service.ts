@@ -2,6 +2,7 @@ import type { StatusPingConfig } from '../config.ts'
 import type { Db, Statement } from '../db/types.ts'
 import { createSink, type SinkRuntime } from '../notify/sinks.ts'
 import { randomToken, sha256Hex } from '../util/crypto.ts'
+import { own } from '../util/own.ts'
 import { type AdminConfig, validateAdminConfig } from './security.ts'
 import { ChannelCredentialError, channelBindingStatements, channelNameProblems } from './channel-credentials.ts'
 import { parseAdminYaml } from './yaml.ts'
@@ -276,7 +277,7 @@ export async function sendSinkTest(
   fetchFn: typeof fetch,
   runtime: SinkRuntime = {},
 ): Promise<void> {
-  const sinkConfig = config.sinks?.[name]
+  const sinkConfig = own(config.sinks, name)
   if (!sinkConfig) throw new Error(`unknown sink "${name}"`)
   const sink = createSink(name, sinkConfig, getEnv, runtime)
   await sink.send({
