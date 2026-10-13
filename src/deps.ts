@@ -394,6 +394,8 @@ function withStoredTarget(monitor: Record<string, unknown>, stored: Record<strin
  * - So do `title`, `baseUrl` and `timezone` whenever the stored value is valid (the rule rescue
  *   mode uses). `baseUrl` decides the sign-in redirect, secure cookies, which origins count as this
  *   site, and the host in ping and acknowledgement links.
+ * - `updates` and `peer` come from the stored configuration when their blocks are well-formed, and
+ *   are otherwise left at their defaults (off); the older version's never come back.
  * - Nothing deleted or changed since comes back: only monitors the stored configuration still
  *   defines, with the same kind, are kept, and they connect where the stored one does; an alert
  *   channel is kept only when it is exactly the stored one. Pages show no monitor targets.
@@ -448,13 +450,58 @@ export function fallbackFromRevision(revision: AdminConfig, stored: Record<strin
       .map((window) => (Array.isArray(window.monitors) ? { ...window, monitors: window.monitors.filter((id) => ids.has(id)) } : window))
       .filter((window) => window.monitors === '*' || window.monitors.length > 0)
   }
-  if (revision.peer) {
-    const peer = { ...revision.peer }
-    if (peer.heartbeatMonitor !== undefined && !ids.has(peer.heartbeatMonitor)) delete peer.heartbeatMonitor
-    if (peer.healthMonitor !== undefined && !ids.has(peer.healthMonitor)) delete peer.healthMonitor
+  // Update checks and the watchdog pairing come from the stored configuration when its block is
+  // well-formed; otherwise they fall back to the defaults (off), never to the older version's.
+  delete next.updates
+  delete next.peer
+  const updates = storedUpdates(stored.updates)
+  if (updates) next.updates = updates
+  const peer = storedPeer(stored.peer)
+  if (peer) {
+    if (typeof peer.heartbeatMonitor === 'string' && !ids.has(peer.heartbeatMonitor)) delete peer.heartbeatMonitor
+    if (typeof peer.healthMonitor === 'string' && !ids.has(peer.healthMonitor)) delete peer.healthMonitor
     next.peer = peer
   }
   return next as unknown as AdminConfig
+}
+
+/** The stored `updates` block when every field it has is valid (see normalizeConfig), else null. */
+function storedUpdates(value: unknown): Record<string, unknown> | null {
+  const updates = record(value)
+  if (!updates) return null
+  const { enabled, manifestUrl, publicKey } = updates
+  if (enabled !== undefined && typeof enabled !== 'boolean') return null
+  if (manifestUrl !== undefined) {
+    if (typeof manifestUrl !== 'string') return null
+    try {
+      const url = new URL(manifestUrl)
+      if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash) return null
+    } catch { return null }
+  }
+  if (publicKey !== undefined) {
+    if (typeof publicKey !== 'string') return null
+    try { if (Uint8Array.from(atob(publicKey), (char) => char.charCodeAt(0)).byteLength !== 32) return null } catch { return null }
+  }
+  return {
+    ...(enabled !== undefined ? { enabled } : {}),
+    ...(manifestUrl !== undefined ? { manifestUrl } : {}),
+    ...(publicKey !== undefined ? { publicKey } : {}),
+  }
+}
+
+/** The stored `peer` block when every field it has is well-formed, else null. */
+function storedPeer(value: unknown): Record<string, unknown> | null {
+  const peer = record(value)
+  if (!peer) return null
+  const { pingUrl, heartbeatMonitor, healthMonitor } = peer
+  if (pingUrl !== undefined && !(typeof pingUrl === 'string' ? httpUrl(pingUrl) : isEnvRef(pingUrl))) return null
+  if (heartbeatMonitor !== undefined && typeof heartbeatMonitor !== 'string') return null
+  if (healthMonitor !== undefined && typeof healthMonitor !== 'string') return null
+  return {
+    ...(pingUrl !== undefined ? { pingUrl } : {}),
+    ...(heartbeatMonitor !== undefined ? { heartbeatMonitor } : {}),
+    ...(healthMonitor !== undefined ? { healthMonitor } : {}),
+  }
 }
 
 /**

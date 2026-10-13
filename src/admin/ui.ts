@@ -470,7 +470,7 @@ export function activityPage(opts: { viewer: Viewer; audit: AuditEntry[] }): str
 function resetCard(csrf: string, error?: string): string {
   return `<section class="card danger" id="reset"><h2>Reset to the setup wizard</h2>
 <p class="lead">Start over with the setup wizard, where you choose the sign-in method and settings again.</p>
-<ul class="changes"><li>Everyone is signed out, and built-in accounts are removed.</li><li>Checks stop and every page sends visitors to setup until it is finished.</li>
+<ul class="changes"><li>Everyone is signed out (also with <code>SESSION_SECRET</code> set), built-in accounts and MCP access tokens are removed, and acknowledgement links in alerts already sent stop working.</li><li>Checks stop and every page sends visitors to setup until it is finished.</li>
 <li>The current configuration and all monitor history are kept. The reset is recorded in Activity.</li></ul>
 <p class="hint" style="margin:0 0 16px">Tip: <a href="/admin/configuration">export the configuration</a> first, then import it after setup to keep your monitors, pages and alert channels.</p>
 ${error ? `<p class="form-error" role="alert">${escape(error)}</p>` : ''}

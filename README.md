@@ -201,7 +201,7 @@ With the browser admin enabled, StatusPing is also a remote [MCP](https://modelc
 
 Resetting the site, changing the sign-in method and creating MCP tokens stay in the browser.
 
-The token is shown once and only its hash is stored; revoke it in the same place. For Claude Code:
+The token is shown once and only its hash is stored; revoke it in the same place. Resetting the site to the setup wizard revokes every token. For Claude Code:
 
 ```bash
 claude mcp add --transport http statusping https://<your-site>/mcp --header "Authorization: Bearer <token>"
@@ -219,8 +219,10 @@ you create in the browser:
    STATUSPING_RESET_TOKEN`; Node: add it to `.env` and restart).
 2. Open `/setup/reset`, enter the token, and type `reset`. The site switches to setup mode:
    every page shows "being set up", `/healthz` reports `"setup": "required"`, and no checks run.
-   Everyone is signed out, and acknowledgement links in alerts already sent stop working. The
-   previous configuration and all monitor history are kept.
+   Everyone is signed out, MCP access tokens are revoked, and acknowledgement links in alerts
+   already sent stop working. This holds when `SESSION_SECRET`, `STATUSPING_RECOVERY_TOKEN` or
+   `ACK_SECRET` are set too: what they sign is tied to a value that a reset, and again a finished
+   setup, replaces. The previous configuration and all monitor history are kept.
 3. Open `/setup` and enter the **setup code**. StatusPing writes it to the logs every minute
    while setup is pending (Cloudflare: the Worker's **Logs**, or `npx wrangler tail`). To choose
    your own code instead, set the `STATUSPING_SETUP_TOKEN` secret.
@@ -254,7 +256,8 @@ switches the site to email + password and prints a new password.
 is set, otherwise with a key the site generates and keeps in its database. Setting, changing or
 removing `ACK_SECRET` switches keys, so links in alerts already sent stop working (each link
 expires after 24 hours anyway); acknowledge those incidents from the monitor page instead. A
-reset and a finished setup replace the generated key in the same way.
+reset and a finished setup make links already sent stop working in the same way, whether they
+were signed with `ACK_SECRET` or the generated key.
 
 After setup, the configuration lives in the database and is edited in Settings or as YAML.
 Passwords chosen in the wizard are stored as

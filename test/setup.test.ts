@@ -4,6 +4,11 @@ import { beginSetup, loadSetupState } from '../src/setup/state.ts'
 import { tick } from '../src/tick.ts'
 import { createApp } from '../src/web/app.ts'
 import { createTestDb, fakeFetch, TEST_TOKENS, testConfig } from './helpers.ts'
+import { createApiToken } from '../src/mcp/tokens.ts'
+import { hashPassword } from '../src/auth/providers.ts'
+import { sign } from '../src/auth/session.ts'
+import { epochKey, SECRET_EPOCH_NAME, secretEpoch } from '../src/auth/epoch.ts'
+import { acknowledgeSecret, createAcknowledgeToken } from '../src/acknowledgements.ts'
 
 const ORIGIN = 'https://status.test'
 const RESET_TOKEN = 'reset-token-0123456789abcdefghij'
@@ -264,12 +269,153 @@ describe('reset clears stored sign-in and channel state', () => {
     try {
       const keep = ['legacy_kept', 'environment']
       const gone = ['session_key', 'access_switch', 'env:SINK_ALERTS_TOKEN', 'bind:SINK_ALERTS_TOKEN', 'pending:OIDC_CLIENT_SECRET']
-      for (const name of [...keep, ...gone]) await t.db.run(`INSERT INTO instance_secrets (name, value, created_at) VALUES (?, 'v', 1)`, [name])
+      for (const name of [...keep, ...gone, SECRET_EPOCH_NAME]) await t.db.run(`INSERT INTO instance_secrets (name, value, created_at) VALUES (?, 'v', 1)`, [name])
       await beginSetup(t.db, 'test', 100)
       const left = (await t.db.all<{ name: string }>(`SELECT name FROM instance_secrets ORDER BY name`)).map((r) => r.name)
-      expect(left).toEqual([...keep].sort())
+      expect(left).toEqual([...keep, SECRET_EPOCH_NAME].sort())
+      // The secret epoch is replaced, not kept.
+      expect(await secretEpoch(t.db)).not.toBe('v')
     } finally {
       await t.close()
     }
+  })
+})
+
+// ── Round 17: nothing issued before a reset works after it ──────────────────────────────────────
+
+const OWNER_PASSWORD = 'owner-password-12345'
+
+/** A configured site with email + password sign-in and the reset token set. */
+async function configuredSite(env: Record<string, string> = {}, admin = 'owner@example.test') {
+  const t = await createTestDb('libsql')
+  const config = { ...testConfig({ sinks: {}, access: { provider: { type: 'basic' as const }, admins: { emails: [admin] } } }), baseUrl: ORIGIN, admin: true }
+  // Tests change these while the site runs (a secret added or removed), so they are read live.
+  const vars: Record<string, string> = { PING_TOKENS: JSON.stringify(TEST_TOKENS), STATUSPING_RESET_TOKEN: RESET_TOKEN, BASIC_AUTH_USERS: JSON.stringify({ [admin]: await hashPassword(OWNER_PASSWORD) }), ...env }
+  const deps = createDeps({ db: t.db, config, getEnv: (n) => vars[n], fetch: fakeFetch().fn, log: () => {} })
+  await tick(deps, Date.parse('2026-10-11T00:00:00Z'))
+  return { ...t, deps, vars, app: createApp(deps) }
+}
+
+type Site = Awaited<ReturnType<typeof configuredSite>>
+
+const resetSite = (site: Site) => browser(site.app).post('/setup/reset', { token: RESET_TOKEN, confirm: 'reset' })
+
+/** Finishes setup again through /api/setup (email + password for `admin`). */
+async function setUpAgain(site: Site, admin: string) {
+  const code = (await loadSetupState(site.db))!.code!
+  const res = await site.app.request(`${ORIGIN}/api/setup`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ code, admin, yaml: `title: After reset\nbaseUrl: ${ORIGIN}\ngroups: []\n` }) })
+  expect(res.status).toBe(201)
+  return (await res.json()) as { password?: string }
+}
+
+describe('a reset revokes MCP access tokens (round 17, F1)', () => {
+  let site: Site | undefined
+  afterEach(async () => { await site?.close(); site = undefined })
+
+  let id = 0
+  const mcp = async (token: string, method: string, params: Record<string, unknown> = {}) => {
+    const res = await site!.app.request(`${ORIGIN}/mcp`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` }, body: JSON.stringify({ jsonrpc: '2.0', id: ++id, method, params }) })
+    return { status: res.status, json: (await res.json().catch(() => null)) as any }
+  }
+
+  it('a token issued before a reset does not work for the next owner', async () => {
+    site = await configuredSite({}, 'old-admin@example.test')
+    const token = await createApiToken(site.db, 'old owner bot', ['read', 'settings', 'monitors'], 'old-admin@example.test', Math.floor(Date.now() / 1000))
+    const before = await mcp(token, 'tools/list')
+    expect(before.status).toBe(200)
+    expect(before.json.result.tools.length).toBeGreaterThan(0)
+
+    await resetSite(site)
+    expect(await site.db.all(`SELECT * FROM api_tokens`)).toEqual([])
+    expect((await mcp(token, 'tools/list')).status).not.toBe(200)
+
+    await setUpAgain(site, 'new-owner@example.test')
+    const after = await mcp(token, 'tools/list')
+    expect(after.status).toBe(401)
+    const take = await mcp(token, 'tools/call', { name: 'set_administrators', arguments: { emails: ['new-owner@example.test', 'attacker@evil.test'] } })
+    expect(take.status).toBe(401)
+    const stored = await site.db.first<{ config_json: string }>(`SELECT config_json FROM admin_config WHERE id = 1`)
+    expect(stored!.config_json).not.toContain('attacker@evil.test')
+  })
+
+  it('a finished setup starts with no MCP tokens either', async () => {
+    site = await configuredSite()
+    await resetSite(site)
+    // A token row that appears while setup is pending (a restored database, say) is not carried over.
+    await createApiToken(site.db, 'restored', ['read'], 'someone@example.test', 1)
+    await setUpAgain(site, 'owner@example.test')
+    expect(await site.db.all(`SELECT * FROM api_tokens`)).toEqual([])
+  })
+})
+
+describe('a reset signs everyone out, also with operator secrets set (round 17, F2)', () => {
+  let site: Site | undefined
+  afterEach(async () => { await site?.close(); site = undefined })
+
+  const signIn = async (s: Site) => {
+    const b = browser(s.app)
+    expect((await b.post('/auth/login', { email: 'owner@example.test', password: OWNER_PASSWORD, next: '/admin' })).res.status).toBe(303)
+    expect((await b.get('/admin')).res.status).toBe(200)
+    return b
+  }
+
+  for (const withSecret of [true, false]) {
+    it(`a session from before the reset does not open /admin after setup (SESSION_SECRET ${withSecret ? 'set' : 'unset'})`, async () => {
+      site = await configuredSite(withSecret ? { SESSION_SECRET: 's'.repeat(40) } : {})
+      const b = await signIn(site)
+      await resetSite(site)
+      const { password } = await setUpAgain(site, 'owner@example.test')
+      expect((await b.get('/admin')).res.status).not.toBe(200)
+      // The owner can sign in again with the new account.
+      const fresh = browser(site.app)
+      delete site.vars.BASIC_AUTH_USERS
+      await fresh.post('/auth/login', { email: 'owner@example.test', password: password!, next: '/admin' })
+      expect((await fresh.get('/admin')).res.status).toBe(200)
+    })
+  }
+
+  it('without an epoch yet (upgraded site), sessions signed with SESSION_SECRET keep working until the first reset', async () => {
+    const secret = 's'.repeat(40)
+    site = await configuredSite({ SESSION_SECRET: secret })
+    // Sites set up before this release have no epoch.
+    await site.db.run(`DELETE FROM instance_secrets WHERE name = ?`, [SECRET_EPOCH_NAME])
+    expect(await epochKey(site.db, secret, 'session')).toBe(secret)
+    const legacy = await sign({ kind: 'session', email: 'owner@example.test', groups: [], provider: 'basic', exp: Math.floor(Date.now() / 1000) + 3600 }, secret)
+    const open = () => site!.app.request(`${ORIGIN}/admin`, { headers: { cookie: `sp_session=${legacy}` } })
+    expect((await open()).status).toBe(200)
+    await resetSite(site)
+    await setUpAgain(site, 'owner@example.test')
+    expect(await secretEpoch(site.db)).toBeTruthy()
+    expect((await open()).status).not.toBe(200)
+  })
+
+  it('a reset ends a recovery session signed with STATUSPING_RECOVERY_TOKEN', async () => {
+    site = await configuredSite({ SESSION_SECRET: 's'.repeat(40) })
+    // Recovery needs the browser admin, so start from a site set up in the wizard.
+    await resetSite(site)
+    await setUpAgain(site, 'owner@example.test')
+    delete site.vars.BASIC_AUTH_USERS
+    site.vars.STATUSPING_RECOVERY_TOKEN = 'recovery-token-0123456789abcdef'
+    const b = browser(site.app)
+    const ok = await b.post('/setup/recover', { token: site.vars.STATUSPING_RECOVERY_TOKEN, email: 'owner@example.test' })
+    expect(ok.res.headers.get('location')).toBe('/admin/access/method?notice=recovered')
+    expect((await b.get('/admin/access/method')).res.status).toBe(200)
+    const recover = b.jar.get('sp_recover')!
+
+    await resetSite(site)
+    await setUpAgain(site, 'owner@example.test')
+    const after = await site.app.request(`${ORIGIN}/admin/access/method`, { headers: { cookie: `sp_recover=${recover}` } })
+    expect(after.status).not.toBe(200)
+  })
+
+  it('a reset ends acknowledgement links signed with ACK_SECRET', async () => {
+    site = await configuredSite({ ACK_SECRET: 'ack-secret-0123456789abcdefghij' })
+    const before = await createAcknowledgeToken(1, Math.floor(Date.now() / 1000), (await acknowledgeSecret(site.deps))!)
+    await resetSite(site)
+    await setUpAgain(site, 'owner@example.test')
+    const after = await createAcknowledgeToken(1, Math.floor(Date.now() / 1000), (await acknowledgeSecret(site.deps))!)
+    expect(after.split('.')[1]).not.toBe(before.split('.')[1])
+    const res = await site.app.request(`${ORIGIN}/ack/${before}`)
+    expect(res.status).toBe(404)
   })
 })

@@ -6,6 +6,7 @@ import type { SinkInput, StatusPingConfig } from '../config.ts'
 import type { Db } from '../db/types.ts'
 import type { Logger } from '../deps.ts'
 import { ACK_KEY_NAME } from '../acknowledgements.ts'
+import { rotateEpochStatement } from '../auth/epoch.ts'
 import { randomToken, timingSafeEqual } from '../util/crypto.ts'
 
 export type SetupStatus = 'pending' | 'complete'
@@ -115,8 +116,10 @@ export async function recordFailedClaim(deps: { db: Db; log: Logger }, state: Se
 /**
  * Puts the instance into setup mode. The current DB configuration is kept in
  * previous_config_json; built-in accounts, the session and acknowledgement keys, stored settings and credential
- * bindings, an unfinished sign-in method change, and CSRF tokens are removed so every existing
- * session ends. Monitor history is kept.
+ * bindings, an unfinished sign-in method change, CSRF tokens and MCP access tokens are removed, and
+ * the secret epoch is replaced, so every existing session, recovery session, alert link and API
+ * token ends (with SESSION_SECRET, STATUSPING_RECOVERY_TOKEN or ACK_SECRET set too: see
+ * auth/epoch.ts). Monitor history is kept.
  */
 export async function beginSetup(db: Db, actor: string, now: number): Promise<void> {
   await db.batch([
@@ -136,6 +139,9 @@ export async function beginSetup(db: Db, actor: string, now: number): Promise<vo
     // The generated acknowledgement key goes too, so alert links sent before the reset stop working.
     { sql: `DELETE FROM instance_secrets WHERE name IN ('session_key', 'access_switch', ?) OR substr(name, 1, 4) = 'env:' OR substr(name, 1, 5) = 'bind:' OR substr(name, 1, 8) = 'pending:'`, params: [ACK_KEY_NAME] },
     { sql: `DELETE FROM admin_csrf` },
+    // MCP tokens act as the administrators who created them; none of them belongs to the next owner.
+    { sql: `DELETE FROM api_tokens` },
+    rotateEpochStatement(now),
     { sql: `INSERT INTO audit_log (actor, action, target, before_json, after_json, at) VALUES (?, 'instance.reset', 'setup', NULL, NULL, ?)`, params: [actor, now] },
   ])
 }

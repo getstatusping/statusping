@@ -9,6 +9,7 @@ import { randomToken, sha256Hex, timingSafeEqual } from '../util/crypto.ts'
 import { nowSeconds } from '../util/time.ts'
 import { b64urlEncode, emailVerified, verifyJwt } from './jwt.ts'
 import { sign, unsign } from './session.ts'
+import { epochKey } from './epoch.ts'
 import { buildChrome } from '../web/chrome.ts'
 import { signInPage, signOutPage, ssoSignInPage } from '../web/pages.ts'
 import { type Viewer, referencedGroups } from './viewer.ts'
@@ -243,22 +244,32 @@ async function storedSessionKey(deps: Deps): Promise<string | null> {
   return (await deps.db.first<{ value: string }>(`SELECT value FROM instance_secrets WHERE name = 'session_key'`))?.value ?? null
 }
 
-async function sessionSecret(deps: Deps): Promise<string> {
+/**
+ * SESSION_SECRET bound to the secret epoch, or null when it is not set. A reset and a finished
+ * setup replace the epoch, so sessions signed before them stop verifying even though the operator
+ * secret is unchanged (see auth/epoch.ts; before a site's first epoch this is SESSION_SECRET itself).
+ */
+async function explicitSessionKey(deps: Deps): Promise<string | null> {
   const s = deps.getEnv('SESSION_SECRET')
-  if (s && s.length >= 32) return s
+  return s && s.length >= 32 ? epochKey(deps.db, s, 'session') : null
+}
+
+async function sessionSecret(deps: Deps): Promise<string> {
+  const explicit = await explicitSessionKey(deps)
+  if (explicit) return explicit
   const stored = await storedSessionKey(deps)
   if (stored) return stored
   throw new Error('SESSION_SECRET must be set (at least 32 characters) for SSO')
 }
 
 /**
- * Secret for signing session cookies: SESSION_SECRET, else the key setup stored in the DB.
+ * Secret for signing session cookies: SESSION_SECRET (bound to the secret epoch), else the key setup stored in the DB.
  * Basic finally falls back to a key derived from BASIC_AUTH_USERS (changing users or passwords
  * then signs everyone out).
  */
 async function cookieSecret(deps: Deps): Promise<string | null> {
-  const explicit = deps.getEnv('SESSION_SECRET')
-  if (explicit && explicit.length >= 32) return explicit
+  const explicit = await explicitSessionKey(deps)
+  if (explicit) return explicit
   const type = deps.config.access?.provider.type
   if (type !== 'basic' && type !== 'oidc') return null
   const stored = await storedSessionKey(deps)

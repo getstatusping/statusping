@@ -1,5 +1,6 @@
 import type { Db } from './db/types.ts'
 import { randomToken, timingSafeEqual } from './util/crypto.ts'
+import { epochKey } from './auth/epoch.ts'
 import { nowSeconds } from './util/time.ts'
 
 export const ACK_LINK_TTL = 24 * 60 * 60
@@ -35,11 +36,12 @@ export const ACK_KEY_NAME = 'ack_key'
  * With `create: false` (verifying a link) a missing key returns null: no link was ever signed.
  *
  * Setting, changing or clearing ACK_SECRET switches the signing key, so every link already sent
- * stops verifying; so does a reset or a finished setup, which delete the generated key.
+ * stops verifying; so does a reset or a finished setup, which delete the generated key and replace
+ * the secret epoch ACK_SECRET is bound to (see auth/epoch.ts).
  */
 export async function acknowledgeSecret(deps: { db: Db; getEnv: (name: string) => string | undefined }, create = true): Promise<string | null> {
   const explicit = deps.getEnv('ACK_SECRET')
-  if (explicit) return explicit
+  if (explicit) return epochKey(deps.db, explicit, 'ack')
   const read = async () => (await deps.db.first<{ value: string }>(`SELECT value FROM instance_secrets WHERE name = ?`, [ACK_KEY_NAME]))?.value || null
   const stored = await read()
   if (stored || !create) return stored

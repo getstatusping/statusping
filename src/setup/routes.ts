@@ -13,6 +13,7 @@ import { sign, unsign } from '../auth/session.ts'
 import type { AdminConfig } from '../admin/security.ts'
 import { validateAdminConfig } from '../admin/security.ts'
 import { ACK_KEY_NAME } from '../acknowledgements.ts'
+import { rotateEpochStatement } from '../auth/epoch.ts'
 import { locateProblems, parseAdminYaml, stringifyAdminYaml } from '../admin/yaml.ts'
 import { FormError, monitorRows, pageList, SINK_FIELDS, sinkFromForm, type SinkType } from '../admin/forms.ts'
 import { revisionStatements, sendSinkTest } from '../admin/service.ts'
@@ -201,6 +202,11 @@ export async function completeSetup(deps: Deps, config: AdminConfig, who: { emai
     // Like the session key, the generated acknowledgement key starts fresh with the new owner; the
     // next escalation alert creates a new one (see acknowledgeSecret).
     { sql: `DELETE FROM instance_secrets WHERE name = ?`, params: [ACK_KEY_NAME] },
+    // Nothing signed or issued during setup carries over: no MCP token (none can be created while
+    // setup is pending, but a database restored mid-setup could hold some), and a new secret epoch,
+    // so keys derived from SESSION_SECRET, STATUSPING_RECOVERY_TOKEN and ACK_SECRET change too.
+    { sql: `DELETE FROM api_tokens` },
+    rotateEpochStatement(now),
     { sql: `INSERT INTO audit_log (actor, action, target, before_json, after_json, at) VALUES (?, 'setup.complete', 'setup', NULL, ?, ?)`,
       params: [who.actor ?? who.email, JSON.stringify({ method: who.method }), now] },
     { sql: `UPDATE setup_state SET status = 'complete', code = NULL, session_key = NULL, draft_json = '{}', failed_attempts = 0, updated_at = ? WHERE id = 1 AND status = 'pending'`, params: [now] },
