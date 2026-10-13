@@ -19,7 +19,8 @@ import { LibsqlDb } from '../src/db/libsql.ts'
 import { migrate } from '../src/schema.ts'
 import { randomToken } from '../src/util/crypto.ts'
 import { formatDuration } from '../src/util/time.ts'
-import { hashUserPassword } from '../src/auth/providers.ts'
+import { basicAuthEnvIgnoredNote, basicAuthUsersLists, hashUserPassword } from '../src/auth/providers.ts'
+import { STORABLE_ENV, storedEnvKey } from '../src/deps.ts'
 import { type AdminConfig, validateAdminConfig } from '../src/admin/security.ts'
 import { revisionStatements } from '../src/admin/service.ts'
 import { rotateSignInEpochStatement } from '../src/auth/epoch.ts'
@@ -132,10 +133,13 @@ async function recover(email: string | undefined): Promise<void> {
     { sql: `INSERT INTO local_users (email, password_hash, created_at) VALUES (?, ?, ?) ON CONFLICT(email) DO UPDATE SET password_hash = excluded.password_hash`, params: [address, await hashUserPassword(password), now] },
     // Like a sign-in method change in Settings, recovering signs everyone out (see auth/epoch.ts).
     { sql: `INSERT INTO instance_secrets (name, value, created_at) VALUES ('session_key', ?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value, created_at = excluded.created_at`, params: [randomToken(48), now] },
+    // Email + password uses no stored sign-in credentials; drop any an earlier method left behind.
+    ...STORABLE_ENV.map((name) => ({ sql: `DELETE FROM instance_secrets WHERE name = ?`, params: [storedEnvKey(name)] })),
     rotateSignInEpochStatement(now),
     { sql: `INSERT INTO audit_log (actor, action, target, before_json, after_json, at) VALUES (?, 'instance.recover', 'access', ?, '{"method":"basic"}', ?)`, params: [`${address} (cli)`, JSON.stringify({ method: stored.access?.provider?.type ?? null }), now] },
   ])
   console.log(`Sign-in is now email + password. Password for ${address} (shown once):\n\n  ${password}\n`)
+  if (basicAuthUsersLists(getEnv, address)) console.log(`Note: ${basicAuthEnvIgnoredNote(address)}\n`)
   console.log(`Sign in at ${config.baseUrl.replace(/\/+$/, '')}/auth/login, then change the sign-in method under Settings → Access if you want another one.`)
 }
 
@@ -178,6 +182,7 @@ async function main() {
       console.log('New BASIC_AUTH_USERS secret value:\n')
       console.log(JSON.stringify(users))
       console.log('\nRemember: page access lists decide which pages this user can open.')
+      console.log('A password stored in the site for this address (from setup, Change sign-in method or `recover`) takes precedence over this entry.')
       break
     }
 

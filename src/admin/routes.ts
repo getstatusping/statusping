@@ -60,6 +60,7 @@ const NOTICES: Record<string, string> = {
   'method-cancelled': 'The sign-in method was not changed.',
   'method-expired': 'That change expired after an hour. Start again.',
   'method-changed': 'Sign-in method changed. Everyone else signs in again with the new method.',
+  'method-changed-env': 'Sign-in method changed. Everyone else signs in again with the new method. BASIC_AUTH_USERS still lists your address: that entry is now ignored, because the password stored in the site takes precedence. Remove it from the BASIC_AUTH_USERS secret.',
   'mcp-token-revoked': 'Token revoked. Clients using it can no longer connect.',
   'home-saved': 'Home page changed.',
   'update-available': 'A new version is available.',
@@ -201,7 +202,7 @@ They are refused when saving, so fix them in <a href="/admin/configuration">Conf
   }
 
   /** Every form carries the revision it was rendered from, next to its CSRF value. */
-  const html = (c: Context, body: string, status: 200 | 400 | 429 = 200) => {
+  const html = (c: Context, body: string, status: 200 | 400 | 409 | 429 = 200) => {
     const revision = formRevision.get(c.req.raw) ?? deps.configRevision
     const page = body.replace(/(<input type="hidden" name="csrf" value="[^"]*">)/g, `$1<input type="hidden" name="revision" value="${revision}">`).replace('<!--banner-->', () => configBanner() + addressBanner(c))
     return c.html(page, status, noStore)

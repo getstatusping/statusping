@@ -6,14 +6,14 @@
 import { OIDC_MAX_RESPONSE_BYTES, readCappedJson } from '../util/capped-body.ts'
 import type { Context, Hono } from 'hono'
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie'
-import { currentViewer, discover, hashUserPassword, setSession } from '../auth/providers.ts'
+import { basicAuthEnvIgnoredNote, basicAuthUsersLists, currentViewer, discover, hashUserPassword, setSession } from '../auth/providers.ts'
 import { b64urlEncode, emailVerified, verifyJwt } from '../auth/jwt.ts'
 import { sign, unsign } from '../auth/session.ts'
 import { rotateSignInEpochStatement } from '../auth/epoch.ts'
 import type { Statement } from '../db/types.ts'
 import type { Viewer } from '../auth/viewer.ts'
 import type { AuthProviderInput } from '../config.ts'
-import { type Deps, refreshAdminConfig, storedEnvKey } from '../deps.ts'
+import { type Deps, refreshAdminConfig, STORABLE_ENV, storedEnvKey } from '../deps.ts'
 import { ACCESS_DOCS_URL, OIDC_PRESETS, presetById, TEAM_DOMAIN } from '../setup/instructions.ts'
 import { readRecoverySession, RECOVERY_COOKIE } from '../setup/recovery.ts'
 import { hmacSha256Hex, randomToken, timingSafeEqual } from '../util/crypto.ts'
@@ -53,6 +53,20 @@ export interface SwitchDraft {
   /** Signs the test sign-in cookie. Separate from the session key, which must not change mid-switch. */
   key: string
 }
+
+/** Same address, ignoring case. */
+const sameEmail = (a: string | undefined, b: string | undefined) => a !== undefined && b !== undefined && a.trim().toLowerCase() === b.trim().toLowerCase()
+
+/**
+ * A draft belongs to the administrator who started it: only they may change, test or apply it.
+ * Another administrator (a recovery session counts as the administrator it names) sees who
+ * started it and may cancel it to start their own. Without this, any administrator could apply a
+ * draft another one had verified and be handed a session as that administrator.
+ */
+const ownsDraft = (draft: SwitchDraft, viewer: Viewer) => sameEmail(draft.by, viewer.email)
+
+/** Whether a real BASIC_AUTH_USERS secret lists this address (its entry is ignored once a password is stored). */
+const envListsAddress = (deps: Deps, email: string) => basicAuthUsersLists((name) => (deps.hasRealEnv(name) ? deps.getEnv(name) : undefined), email)
 
 const escape = (value: string) => value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
 
@@ -157,13 +171,21 @@ ${choice('oidc', 'Google, Microsoft Entra ID, Okta, Auth0, Keycloak, Pocket ID o
 <div class="actions"><button class="btn-primary" type="submit">Continue</button><a class="btn-outline" href="/admin/access">Cancel</a></div></form></section>` })
 }
 
+function foreignDraftPage(opts: { viewer: Viewer; csrf: string; draft: SwitchDraft; notice?: string; error?: string }): string {
+  const started = new Date(opts.draft.startedAt * 1000).toISOString().replace('T', ' ').slice(0, 16)
+  return layout({ ...opts, section: 'access', title: 'Change sign-in method', description: 'Another administrator is changing the sign-in method.', body: `
+<section class="card"><p class="lead">Started by <strong>${escape(opts.draft.by)}</strong> at ${started} UTC: a switch to ${escape(METHODS[opts.draft.method])}.</p>
+<p>Only the administrator who started a change can set it up, test it and switch. Cancel it to start your own; the current sign-in method keeps working either way.</p>
+<form method="post" action="/admin/access/method/cancel">${hidden(opts.csrf)}<div class="actions"><button class="btn-outline" type="submit">Cancel their change</button><a class="btn-outline" href="/admin/access">Back</a></div></form></section>` })
+}
+
 function sourceNote(source: Source): string {
   return source === 'env' ? '<span class="secret-state ok">✓ From a Worker secret</span>'
     : source === 'pending' ? '<span class="secret-state ok">✓ Saved for this change. Leave blank to keep it.</span>'
       : source === 'current' ? '<span class="secret-state ok">✓ Using the current value. Enter a new one to replace it.</span>' : ''
 }
 
-function configurePage(opts: { viewer: Viewer; csrf: string; origin: string; draft: SwitchDraft; creds: Record<string, Credential>; error?: string; notice?: string; preset?: string }): string {
+function configurePage(opts: { viewer: Viewer; csrf: string; origin: string; draft: SwitchDraft; creds: Record<string, Credential>; error?: string; notice?: string; preset?: string; envListsViewer?: boolean }): string {
   const d = opts.draft
   const verified = d.verifiedEmail
   const secretField = (name: string, label: string, type = 'password') => opts.creds[name]?.source === 'env' ? `<p class="hint">${label}: ${sourceNote('env')}</p>`
@@ -176,6 +198,7 @@ function configurePage(opts: { viewer: Viewer; csrf: string; origin: string; dra
 ${field('New password', '<input class="input" id="password" name="password" type="password" autocomplete="new-password" minlength="12" required>', 'At least 12 characters.')}
 ${field('Confirm password', '<input class="input" id="confirm" name="confirm" type="password" autocomplete="new-password" required>')}
 <div class="actions"><button class="btn-outline" type="submit">Save password</button></div></form>
+${opts.envListsViewer ? `<p class="alert warning" role="status">${escape(basicAuthEnvIgnoredNote(opts.viewer.email))}</p>` : ''}
 <p class="hint" style="margin:16px 0 0">Other administrators cannot sign in until they have a password. Give them one with <code>npm run cli -- add-user</code> (the <code>BASIC_AUTH_USERS</code> secret).</p></section>`
   } else if (d.method === 'cloudflare-access') {
     const host = new URL(opts.origin).host
@@ -203,8 +226,9 @@ ${secretField('OIDC_CLIENT_SECRET', 'Client secret')}
 ${verified ? '' : `<section class="card"><h2>3. Test sign-in</h2><p class="lead">Sign in with the provider as an administrator.</p>
 <div class="actions">${d.issuer && opts.creds.OIDC_CLIENT_ID?.source && opts.creds.OIDC_CLIENT_SECRET?.source ? '<a class="btn-primary" href="/admin/access/method/oidc/start">Test sign-in</a>' : '<span class="btn-primary" aria-disabled="true">Test sign-in</span><span class="hint">Save the issuer, client ID and client secret first.</span>'}</div></section>`}`
   }
+  const staySignedIn = d.method !== 'cloudflare-access' && sameEmail(verified, opts.viewer.email)
   const ready = verified ? `<section class="card"><p class="alert success" role="status">${d.method === 'basic' ? 'Password saved' : 'Test sign-in worked'} for <strong>${escape(verified)}</strong>.</p>
-<p class="lead">Switching signs everyone out, also with <code>SESSION_SECRET</code> set, and ends recovery sessions. ${d.method === 'cloudflare-access' ? 'Everyone' : 'You stay signed in; everyone else'} signs in again with ${METHODS[d.method].toLowerCase()}. MCP access tokens keep working: revoke them under <strong>MCP</strong> if they should end too.</p>
+<p class="lead">Switching signs everyone out, also with <code>SESSION_SECRET</code> set, and ends recovery sessions. ${staySignedIn ? 'You stay signed in; everyone else' : d.method === 'cloudflare-access' ? 'Everyone' : `You are signed out too (the test sign-in was as ${escape(verified)}), and everyone`} signs in again with ${METHODS[d.method].toLowerCase()}. MCP access tokens keep working: revoke them under <strong>MCP</strong> if they should end too.</p>
 <form method="post" action="/admin/access/method/apply">${hidden(opts.csrf)}<div class="actions"><button class="btn-primary" type="submit">Switch to ${escape(METHODS[d.method])}</button></div></form></section>` : ''
   return layout({ ...opts, section: 'access', title: METHODS[d.method], description: 'Set up the new sign-in method. The current method keeps working until you switch.', body: `${ready}${body}
 <section class="card"><form method="post" action="/admin/access/method/cancel">${hidden(opts.csrf)}<div class="actions"><a class="btn-outline" href="/admin/access/method?choose=1">Choose a different method</a><button class="btn-outline" type="submit">Cancel the change</button></div></form></section>` })
@@ -217,7 +241,7 @@ type Post = { viewer: Viewer; csrf: string; config: AdminConfig; form: Form }
 export interface SwitchHelpers {
   view: (c: Context) => Promise<Response | View>
   post: (c: Context) => Promise<Response | Post>
-  html: (c: Context, body: string, status?: 200 | 400 | 429) => Response
+  html: (c: Context, body: string, status?: 200 | 400 | 409 | 429) => Response
   done: (c: Context, path: string, notice: string) => Response
 }
 
@@ -228,12 +252,17 @@ const currentMethod = (deps: Deps) => deps.config.access?.provider.type as Metho
 /** Settings pages for the switch. Called from mountAdminRoutes with its signed-in helpers. */
 export function mountAccessSwitch(app: Hono, deps: Deps, h: SwitchHelpers): void {
   const configure = async (c: Context, v: View | Post, draft: SwitchDraft, error?: string, status: 200 | 400 | 429 = 200) =>
-    h.html(c, configurePage({ viewer: v.viewer, csrf: v.csrf, origin: origin(c, deps), draft, creds: await credentials(deps, draft), error: error ?? ERRORS[c.req.query('error') ?? ''], notice: 'notice' in v ? v.notice : undefined, preset: c.req.query('preset') }), status)
+    h.html(c, configurePage({ viewer: v.viewer, csrf: v.csrf, origin: origin(c, deps), draft, creds: await credentials(deps, draft), error: error ?? ERRORS[c.req.query('error') ?? ''], notice: 'notice' in v ? v.notice : undefined, preset: c.req.query('preset'),
+      envListsViewer: draft.method === 'basic' && envListsAddress(deps, v.viewer.email) }), status)
+  /** Another administrator's draft: shown with who started it, never changed, tested or applied. */
+  const foreign = (c: Context, v: View | Post, draft: SwitchDraft, status: 200 | 409 = 409) =>
+    h.html(c, foreignDraftPage({ viewer: v.viewer, csrf: v.csrf, draft, notice: 'notice' in v ? v.notice : undefined }), status)
 
   app.get('/admin/access/method', async (c) => {
     const v = await h.view(c)
     if (v instanceof Response) return v
     const draft = await loadDraft(deps)
+    if (draft && !ownsDraft(draft, v.viewer)) return foreign(c, v, draft, 200)
     if (!draft || c.req.query('choose') === '1') return h.html(c, choosePage({ viewer: v.viewer, csrf: v.csrf, current: currentMethod(deps), notice: v.notice }))
     return configure(c, v, draft)
   })
@@ -243,6 +272,9 @@ export function mountAccessSwitch(app: Hono, deps: Deps, h: SwitchHelpers): void
     if (p instanceof Response) return p
     const method = text(p.form, 'method') as Method
     if (!(method in METHODS)) return h.html(c, choosePage({ viewer: p.viewer, csrf: p.csrf, current: currentMethod(deps), error: 'Choose a sign-in method.' }), 400)
+    // Replacing another administrator's draft takes an explicit Cancel first.
+    const existing = await loadDraft(deps)
+    if (existing && !ownsDraft(existing, p.viewer)) return foreign(c, p, existing)
     await clearDraft(deps)
     const current = deps.config.access?.provider
     // Start from the current settings when staying with the same kind of method.
@@ -265,6 +297,7 @@ export function mountAccessSwitch(app: Hono, deps: Deps, h: SwitchHelpers): void
     if (p instanceof Response) return p
     const draft = await loadDraft(deps)
     if (!draft) return h.done(c, '/admin/access/method', 'method-expired')
+    if (!ownsDraft(draft, p.viewer)) return foreign(c, p, draft)
     const now = nowSeconds()
     // Any change to the settings needs a fresh test sign-in.
     const next: SwitchDraft = { ...draft, verifiedEmail: undefined }
@@ -324,6 +357,7 @@ export function mountAccessSwitch(app: Hono, deps: Deps, h: SwitchHelpers): void
     const v = await h.view(c)
     if (v instanceof Response) return v
     const draft = await loadDraft(deps)
+    if (draft && !ownsDraft(draft, v.viewer)) return foreign(c, v, draft)
     if (draft?.method !== 'oidc' || !draft.issuer) return h.done(c, '/admin/access/method', 'method-saved')
     const creds = await credentials(deps, draft)
     if (!creds.OIDC_CLIENT_ID?.value || !creds.OIDC_CLIENT_SECRET?.value) return h.done(c, '/admin/access/method', 'method-saved')
@@ -341,6 +375,7 @@ export function mountAccessSwitch(app: Hono, deps: Deps, h: SwitchHelpers): void
     if (p instanceof Response) return p
     const draft = await loadDraft(deps)
     if (!draft?.verifiedEmail) return h.done(c, '/admin/access/method', 'method-expired')
+    if (!ownsDraft(draft, p.viewer)) return foreign(c, p, draft)
     const creds = await credentials(deps, draft)
     const getEnv = (name: string) => (name in creds ? creds[name]!.value : deps.getEnv(name))
     const next: AdminConfig = { ...p.config, access: { ...(p.config.access ?? {}), provider: providerFor(draft) } as AdminConfig['access'] }
@@ -350,22 +385,30 @@ export function mountAccessSwitch(app: Hono, deps: Deps, h: SwitchHelpers): void
     if (!canAdmin({ email: draft.verifiedEmail, groups: [], provider } as Viewer, normalized)) return configure(c, p, { ...draft, verifiedEmail: undefined }, ERRORS['not-admin'], 400)
     const now = nowSeconds()
     const promote = Object.entries(creds).filter(([, v]) => v.source === 'pending')
+    // Stored sign-in credentials the new method does not use (an old OIDC client secret, an old
+    // Access audience tag) are deleted, so a later switch back cannot silently pick them up.
+    const unused = STORABLE_ENV.filter((name) => !SECRETS[draft.method].includes(name))
     // One transaction: the new method, its credentials, and the end of every existing sign-in
     // (also for a switch to the same kind of method, such as a new password or another issuer).
     await saveAdminConfig(deps.db, { ...next, admin: true }, p.viewer.email, now, getEnv, { hasRealEnv: deps.hasRealEnv, extra: [
       ...promote.map(([name, v]) => ({ sql: `INSERT INTO instance_secrets (name, value, created_at) VALUES (?, ?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value, created_at = excluded.created_at`, params: [storedEnvKey(name), v.value!, now] })),
       ...(draft.method === 'basic' ? [{ sql: `INSERT INTO local_users (email, password_hash, created_at) VALUES (?, ?, ?) ON CONFLICT(email) DO UPDATE SET password_hash = excluded.password_hash`, params: [draft.verifiedEmail, draft.passwordHash!, now] }] : []),
+      ...unused.map((name) => ({ sql: `DELETE FROM instance_secrets WHERE name = ?`, params: [storedEnvKey(name)] })),
       ...signEveryoneOutStatements(now),
-      { sql: `INSERT INTO audit_log (actor, action, target, before_json, after_json, at) VALUES (?, 'access.method-change', 'access', ?, ?, ?)`, params: [p.viewer.email, JSON.stringify({ method: currentMethod(deps) ?? null }), JSON.stringify({ method: draft.method }), now] },
+      { sql: `INSERT INTO audit_log (actor, action, target, before_json, after_json, at) VALUES (?, 'access.method-change', 'access', ?, ?, ?)`,
+        params: [p.viewer.email, JSON.stringify({ method: currentMethod(deps) ?? null }), JSON.stringify({ method: draft.method, startedBy: draft.by, startedAt: draft.startedAt, verifiedEmail: draft.verifiedEmail }), now] },
     ] })
     await clearDraft(deps)
     await refreshAdminConfig(deps, now)
-    // Keep the administrator who switched signed in, with a session signed by the new key;
-    // Cloudflare Access signs in on every request.
-    if (draft.method !== 'cloudflare-access') await setSession(c, deps, { email: draft.verifiedEmail, groups: [], provider })
+    // Keep the administrator who switched signed in, with a session signed by the new key, but
+    // only as themselves: when the test sign-in was made as another address (possible with SSO),
+    // they are signed out and sign in again with the new method. Cloudflare Access signs in on
+    // every request. A recovery session always ends here; the session that replaces it is for
+    // the same address, which proved itself with the recovery token and the new method.
+    if (draft.method !== 'cloudflare-access' && sameEmail(p.viewer.email, draft.verifiedEmail)) await setSession(c, deps, { email: draft.verifiedEmail, groups: [], provider })
     else deleteCookie(c, 'sp_session', { path: '/' })
     deleteCookie(c, RECOVERY_COOKIE, { path: '/' })
-    return h.done(c, '/admin/access', 'method-changed')
+    return h.done(c, '/admin/access', draft.method === 'basic' && envListsAddress(deps, draft.verifiedEmail) ? 'method-changed-env' : 'method-changed')
   })
 }
 
@@ -381,7 +424,9 @@ export function mountAccessSwitchAuthRoutes(app: Hono, deps: Deps): void {
     if (!deps.adminEnabled) return null
     const viewer = await currentViewer(c, deps) ?? await readRecoverySession(c, deps)
     if (!viewer || !canAdmin(viewer, deps.config)) return null
-    return loadDraft(deps)
+    const draft = await loadDraft(deps)
+    // Only the administrator who started the change can complete its test sign-in.
+    return draft && ownsDraft(draft, viewer) ? draft : null
   }
 
   app.get('/auth/method-verify', async (c) => {

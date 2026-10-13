@@ -8,7 +8,7 @@
 import { OIDC_MAX_RESPONSE_BYTES, readCappedJson } from '../util/capped-body.ts'
 import type { Context, Hono } from 'hono'
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie'
-import { hashUserPassword, fromThisSite, setSession } from '../auth/providers.ts'
+import { basicAuthEnvIgnoredNote, basicAuthUsersLists, hashUserPassword, fromThisSite, setSession } from '../auth/providers.ts'
 import { sign, unsign } from '../auth/session.ts'
 import type { AdminConfig } from '../admin/security.ts'
 import { validateAdminConfig } from '../admin/security.ts'
@@ -249,6 +249,14 @@ export function mountSetupRoutes(app: Hono, deps: Deps): void {
   const notFound = (c: Context) => c.text('Not found', 404, headers)
   const html = (c: Context, body: string, status: 200 | 400 | 401 | 403 | 429 = 200) => c.html(body, status, headers)
 
+  /**
+   * A password set during setup is stored in the site and takes precedence over a BASIC_AUTH_USERS
+   * entry for the same address, which is then ignored; say so, so the stale entry gets removed.
+   */
+  const envListsAddress = (email: string) => basicAuthUsersLists((name) => (deps.hasRealEnv(name) ? deps.getEnv(name) : undefined), email)
+  const envPasswordWarning = (draft: { method?: SetupMethod; email?: string; passwordHash?: string }) =>
+    (draft.method ?? 'basic') === 'basic' && draft.passwordHash && draft.email && envListsAddress(draft.email) ? basicAuthEnvIgnoredNote(draft.email) : undefined
+
   const sessionSecretSet = () => (deps.getEnv('SESSION_SECRET')?.length ?? 0) >= 32
   /** Where a setting is set: a Worker secret wins over a value saved here. Never the value. */
   const source = (name: string): EnvSource => (deps.hasRealEnv(name) ? 'env' : deps.storedEnv[name] ? 'db' : false)
@@ -328,7 +336,7 @@ export function mountSetupRoutes(app: Hono, deps: Deps): void {
         const type = (SINK_TYPES as readonly string[]).includes(c.req.query('type') ?? '') ? c.req.query('type') as SinkType : (saved?.sink.type ?? 'slack')
         return html(c, channelPage({ csrf, completed, type, saved, sources: channelSources(saved?.sink), tested: c.req.query('tested') === '1', error }))
       }
-      default: return html(c, reviewPage({ csrf, completed, summary: draftSummary(draft), yaml: stringifyAdminYaml(draftConfig(draft)), back: draft.imported ? '/setup?step=import' : undefined }))
+      default: return html(c, reviewPage({ csrf, completed, summary: draftSummary(draft), yaml: stringifyAdminYaml(draftConfig(draft)), back: draft.imported ? '/setup?step=import' : undefined, warning: envPasswordWarning(draft) }))
     }
   }
 
@@ -669,7 +677,7 @@ export function mountSetupRoutes(app: Hono, deps: Deps): void {
     try {
       config = validateAdminConfig(draftConfig(draft), deps.getEnv).config
     } catch (error) {
-      return html(c, reviewPage({ csrf: r.csrf, completed: new Set(['claim', 'method', 'account', 'basics', 'monitor']), summary: draftSummary(draft), yaml: stringifyAdminYaml(draftConfig(draft)), error: (error as Error).message }), 400)
+      return html(c, reviewPage({ csrf: r.csrf, completed: new Set(['claim', 'method', 'account', 'basics', 'monitor']), summary: draftSummary(draft), yaml: stringifyAdminYaml(draftConfig(draft)), error: (error as Error).message, warning: envPasswordWarning(draft) }), 400)
     }
     const email = draft.email!
     const method = draft.method ?? 'basic'
@@ -737,6 +745,7 @@ export function mountSetupRoutes(app: Hono, deps: Deps): void {
     await syncConfig(deps, now)
     const pingUrlsNeeded = (await deps.db.all<{ id: string }>(`SELECT id FROM monitors WHERE kind = 'push' AND paused = 0 AND ping_token_hash IS NULL ORDER BY id`)).map((r) => r.id)
     return json({ ok: true, admin: email, method, ...(password ? { password, note: 'Shown once. Sign in with it, then store it in a password manager.' } : {}), signIn: `${origin}/admin`,
+      ...(password && envListsAddress(email) ? { warning: basicAuthEnvIgnoredNote(email) } : {}),
       ...(pingUrlsNeeded.length ? { pingUrlsNeeded, pingUrlsNote: `These scheduled jobs have no ping URL yet. Create each one in Settings: ${origin}/admin/monitors` } : {}) }, 201)
   })
 

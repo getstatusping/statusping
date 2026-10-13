@@ -90,19 +90,58 @@ export async function passwordMatches(password: string, entry: string): Promise<
   return false
 }
 
-/** Checks an email + password against BASIC_AUTH_USERS, then the accounts created by setup. */
+/** Parses BASIC_AUTH_USERS; null (and an error in the log, when given) if it is not a JSON object. */
+function basicAuthUsers(getEnv: (name: string) => string | undefined, log?: Deps['log']): Record<string, string> | null {
+  try {
+    const users: unknown = JSON.parse(getEnv('BASIC_AUTH_USERS') ?? '{}')
+    if (users && typeof users === 'object' && !Array.isArray(users)) return users as Record<string, string>
+  } catch { /* reported below */ }
+  log?.('error', 'BASIC_AUTH_USERS is not valid JSON')
+  return null
+}
+
+/** The BASIC_AUTH_USERS entry for an address (keys compare case-insensitively), if any. */
+function basicAuthEntry(users: Record<string, string>, email: string): string | undefined {
+  const entry = Object.entries(users).find(([k]) => k.toLowerCase() === email)?.[1]
+  return typeof entry === 'string' ? entry : undefined
+}
+
+/**
+ * Whether BASIC_AUTH_USERS lists this address. Used to tell an administrator who has just set a
+ * password in the site (setup, Change sign-in method, `cli recover`) that the env entry is now
+ * ignored for that address and should be removed. Pass a getter that reads only the real
+ * environment; BASIC_AUTH_USERS is never stored in the database anyway.
+ */
+export function basicAuthUsersLists(getEnv: (name: string) => string | undefined, rawEmail: string): boolean {
+  if (getEnv('BASIC_AUTH_USERS') === undefined) return false
+  const users = basicAuthUsers(getEnv)
+  return users !== null && basicAuthEntry(users, rawEmail.trim().toLowerCase()) !== undefined
+}
+
+/** The sentence shown when BASIC_AUTH_USERS still lists an address that now has a stored password. */
+export const basicAuthEnvIgnoredNote = (email: string) =>
+  `BASIC_AUTH_USERS still lists ${email}. That entry is now ignored for this address, because the password stored in the site takes precedence. Remove it from the BASIC_AUTH_USERS secret.`
+
+/**
+ * Checks an email + password. A password stored in the site (local_users: setup, Change sign-in
+ * method, `cli recover`) wins; BASIC_AUTH_USERS is used only for an address with no stored
+ * password. Before v0.3.19 the env entry won, so a password set in the site had no effect for an
+ * address the secret also listed, and the old env password kept signing in.
+ *
+ * Timing: the database is read for every attempt, so whether an address has a stored password or
+ * an env entry does not change the work done before the hash comparison. An address with neither
+ * returns without hashing, as it always has.
+ */
 export async function verifyPassword(deps: Deps, rawEmail: string, password: string): Promise<Viewer | null> {
   const email = rawEmail.trim().toLowerCase()
   if (!email || !password) return null
-  let users: Record<string, string>
-  try {
-    users = JSON.parse(deps.getEnv('BASIC_AUTH_USERS') ?? '{}')
-  } catch {
-    deps.log('error', 'BASIC_AUTH_USERS is not valid JSON')
-    return null
+  const stored = (await deps.db.first<{ password_hash: string }>(`SELECT password_hash FROM local_users WHERE email = ?`, [email]))?.password_hash
+  let entry = stored
+  if (entry === undefined) {
+    const users = basicAuthUsers(deps.getEnv, deps.log)
+    if (!users) return null
+    entry = basicAuthEntry(users, email)
   }
-  const entry = Object.entries(users).find(([k]) => k.toLowerCase() === email)?.[1]
-    ?? (await deps.db.first<{ password_hash: string }>(`SELECT password_hash FROM local_users WHERE email = ?`, [email]))?.password_hash
   if (!entry) return null
   return (await passwordMatches(password, entry)) ? { email, groups: [], provider: 'basic' } : null
 }

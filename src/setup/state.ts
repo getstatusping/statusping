@@ -145,6 +145,10 @@ export async function beginSetup(db: Db, actor: string, now: number): Promise<vo
     // Ping URLs created in the app belong to the old owner too: a monitor id the next
     // configuration reuses must not keep accepting them (syncConfig keeps a stored hash).
     { sql: `UPDATE monitors SET ping_token_hash = NULL WHERE ping_token_hash IS NOT NULL` },
+    // The sign-in epoch (sign_in_epoch) is deliberately left as it is: sessions and recovery
+    // sessions derive their key from both epochs (auth/epoch.ts epochKey), so replacing the secret
+    // epoch alone already changes every sign-in key and ends every sign-in made before the reset.
+    // The stored session key, the other sign-in key, is deleted above.
     rotateEpochStatement(now),
     { sql: `INSERT INTO audit_log (actor, action, target, before_json, after_json, at) VALUES (?, 'instance.reset', 'setup', NULL, NULL, ?)`, params: [actor, now] },
   ])
