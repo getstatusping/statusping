@@ -5,6 +5,7 @@ import { randomToken, sha256Hex } from '../util/crypto.ts'
 import { type AdminConfig, validateAdminConfig } from './security.ts'
 import { ChannelCredentialError, channelBindingStatements, channelNameProblems } from './channel-credentials.ts'
 import { parseAdminYaml } from './yaml.ts'
+import { pruneLocalUsersStatement } from '../auth/local-users.ts'
 
 export interface StoredAdminConfig {
   config: AdminConfig
@@ -145,11 +146,17 @@ export async function loadAdminConfig(db: Db): Promise<StoredAdminConfig | null>
   return config ? { config, updatedAt: row.updated_at, updatedBy: row.updated_by } : null
 }
 
+/** An audit row as a statement, for writing in the same transaction as the change; values redacted like {@link appendAudit}. */
+export function auditStatement(entry: Omit<AuditEntry, 'id'>): Statement {
+  return {
+    sql: `INSERT INTO audit_log (actor, action, target, before_json, after_json, at) VALUES (?, ?, ?, ?, ?, ?)`,
+    params: [entry.actor, entry.action, entry.target, entry.before === null ? null : JSON.stringify(redactAdminValue(entry.before)), entry.after === null ? null : JSON.stringify(redactAdminValue(entry.after)), entry.at],
+  }
+}
+
 export async function appendAudit(db: Db, entry: Omit<AuditEntry, 'id'>): Promise<void> {
-  await db.run(
-    `INSERT INTO audit_log (actor, action, target, before_json, after_json, at) VALUES (?, ?, ?, ?, ?, ?)`,
-    [entry.actor, entry.action, entry.target, entry.before === null ? null : JSON.stringify(redactAdminValue(entry.before)), entry.after === null ? null : JSON.stringify(redactAdminValue(entry.after)), entry.at],
-  )
+  const { sql, params } = auditStatement(entry)
+  await db.run(sql, params)
 }
 
 export async function listAudit(db: Db, limit = 100): Promise<AuditEntry[]> {
@@ -197,7 +204,7 @@ export async function saveAdminConfig(
   const env = pending.size
     ? (name: string) => (opts.hasRealEnv?.(name) ? getEnv(name) : pending.get(name) ?? getEnv(name))
     : getEnv
-  const { config } = validateAdminConfig(value, env)
+  const { config, normalized } = validateAdminConfig(value, env)
   if (config.admin !== true) throw new Error('admin: cannot disable admin mode through the admin API')
   const before = await loadAdminConfig(db)
   const nameProblems = channelNameProblems(config, before?.config)
@@ -231,6 +238,10 @@ export async function saveAdminConfig(
       },
       ...bindings,
       ...(opts.extra ?? []),
+      // Passwords stored in the site belong to administrators: those of anyone this configuration
+      // does not make an administrator (all of them when it does not use email + password) go in
+      // the same transaction, whichever path changed the administrators (v0.3.20).
+      pruneLocalUsersStatement(normalized.access),
     ])
   } catch (error) {
     if (opts.base !== undefined && isConflict(error)) throw new RevisionConflict(await currentRevision(db))

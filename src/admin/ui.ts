@@ -354,13 +354,38 @@ ${editing ? `<section class="card danger"><h2>Delete channel</h2><p class="lead"
 
 // ── Access ──────────────────────────────────────────────────────────────────────────────────
 
-export function accessPage(opts: { viewer: Viewer; csrf: string; providerSummary: string; admins: string[]; notice?: string; error?: string; values?: Record<string, string> }): string {
+/** A password stored in the site, as Settings → Access lists it. */
+export interface StoredPasswordRow {
+  email: string
+  createdAt: number
+  /** It signs in under the current configuration (email + password, and still an administrator). */
+  allowed: boolean
+  /** The sentence to show when BASIC_AUTH_USERS also lists the address and is ignored for it. */
+  envIgnored: string | null
+  /** The signed-in administrator's own address. */
+  self: boolean
+}
+
+function storedPasswordsCard(csrf: string, rows: StoredPasswordRow[], basic: boolean): string {
+  if (!rows.length && !basic) return ''
+  const items = rows.map((r) => `<tr><td><strong>${escape(r.email)}</strong><span class="sub">Set ${when16(r.createdAt)}</span>
+${r.allowed ? '' : '<span class="sub">Cannot sign in: not an administrator with email and password</span>'}
+${r.envIgnored ? `<p class="alert warning" role="status">${escape(r.envIgnored)}</p>` : ''}</td>
+<td class="end">${r.self ? '<span class="hint">Your own: another administrator has to remove it.</span>'
+    : `<form method="post" action="/admin/access/passwords/remove" style="display:inline">${hidden(csrf)}<input type="hidden" name="email" value="${escape(r.email)}"><button class="btn-outline" type="submit">Remove</button></form>`}</td></tr>`).join('')
+  return `<section class="card" id="stored-passwords"><h2>Passwords stored in the site</h2>
+<p class="lead">Set by setup, <strong>Change sign-in method</strong> or <code>npm run cli -- recover</code>. A stored password takes precedence over <code>BASIC_AUTH_USERS</code>, so changing or removing someone's <code>BASIC_AUTH_USERS</code> entry does not revoke it: remove it here. Removing someone from the administrators removes their stored password too. Removing a password does not end a session already signed in; it lasts until it expires.</p>
+${items ? `<div class="scroll" tabindex="0" role="region" aria-label="Passwords stored in the site"><table class="table"><thead><tr><th>Address</th><th><span class="sr-only">Actions</span></th></tr></thead><tbody>${items}</tbody></table></div>` : '<p class="hint">No passwords are stored in the site. Everyone signs in with <code>BASIC_AUTH_USERS</code>.</p>'}</section>`
+}
+
+export function accessPage(opts: { viewer: Viewer; csrf: string; providerSummary: string; admins: string[]; storedPasswords?: StoredPasswordRow[]; basic?: boolean; notice?: string; error?: string; values?: Record<string, string> }): string {
   return layout({ ...opts, section: 'access', title: 'Access', description: 'Who can sign in to Settings.', body: `
 <section class="card"><h2>Sign-in method</h2><p class="lead">${opts.providerSummary}</p><div class="actions"><a class="btn-outline" href="/admin/access/method">Change sign-in method</a></div></section>
 <section class="card"><h2>Administrators</h2><p class="lead">These people can open Settings after signing in.</p>
 <form class="form" method="post" action="/admin/access">${hidden(opts.csrf)}
 ${field('Administrator emails', `<textarea class="input" id="admins" name="admins" placeholder="one per line, or *@your-domain.com">${escape(opts.values?.admins ?? opts.admins.join('\n'))}</textarea>`, 'You cannot remove yourself; another administrator has to.')}
-<div class="actions"><button class="btn-primary" type="submit">Save administrators</button></div></form></section>` })
+<div class="actions"><button class="btn-primary" type="submit">Save administrators</button></div></form></section>
+${storedPasswordsCard(opts.csrf, opts.storedPasswords ?? [], opts.basic ?? false)}` })
 }
 
 // ── MCP ─────────────────────────────────────────────────────────────────────────────────────

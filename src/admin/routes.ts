@@ -1,5 +1,6 @@
 import type { Context, Hono } from 'hono'
-import { currentViewer, fromThisSite, signInResponse } from '../auth/providers.ts'
+import { basicAuthEnvIgnoredNote, basicAuthUsersLists, currentViewer, fromThisSite, signInResponse } from '../auth/providers.ts'
+import { listLocalUsers, storedPasswordAllowed } from '../auth/local-users.ts'
 import type { Viewer } from '../auth/viewer.ts'
 import type { MonitorInput, PageInput, SinkInput } from '../config.ts'
 import type { Deps } from '../deps.ts'
@@ -11,10 +12,10 @@ import {
 } from './forms.ts'
 import {
   accessPage, activityPage, mcpPage, mcpTokenCreated, channelForm, channelsPage, diffBlock, generalPage, configurationPage, importPreview, monitorForm, monitorsPage,
-  pageForm, pagesPage, pingUrlPage, revisionPage, type SecretSource,
+  pageForm, pagesPage, pingUrlPage, revisionPage, type SecretSource, type StoredPasswordRow,
 } from './ui.ts'
 import {
-  appendAudit, currentRevision, currentYamlText, listAudit, listRevisions, loadAdminConfig, loadRevision, RevisionConflict, rotatePingToken, saveAdminConfig,
+  appendAudit, auditStatement, currentRevision, currentYamlText, listAudit, listRevisions, loadAdminConfig, loadRevision, RevisionConflict, rotatePingToken, saveAdminConfig,
   type SaveOptions, sendSinkTest,
 } from './service.ts'
 import { type AdminConfig, authorizeAdminToken, canAdmin, envReferences, issueCsrfToken, validateAdminConfig, verifyCsrfToken } from './security.ts'
@@ -49,7 +50,9 @@ const NOTICES: Record<string, string> = {
   'channel-saved': 'Alert channel saved.',
   'channel-deleted': 'Alert channel deleted.',
   'test-sent': 'Test alert sent.',
-  'admins-saved': 'Administrators saved.',
+  'admins-saved': 'Administrators saved. Anyone no longer an administrator lost the password stored in the site, if they had one.',
+  'password-removed': 'Stored password removed. That address can no longer sign in with it.',
+  'password-missing': 'That address has no password stored in the site.',
   imported: 'Configuration imported.',
   restored: 'Earlier version restored.',
   'setup-ping-urls': 'Setup is complete. Scheduled jobs marked "No ping URL yet" need one: open each and create its ping URL.',
@@ -505,10 +508,44 @@ They are refused when saving, so fix them in <a href="/admin/configuration">Conf
 
   // ── Access ────────────────────────────────────────────────────────────────────────────────
 
+  /** Passwords stored in the site, for Settings → Access (addresses only, never hashes). */
+  const storedPasswords = async (viewer: Viewer): Promise<StoredPasswordRow[]> => {
+    const realEnv = (name: string) => (deps.hasRealEnv(name) ? deps.getEnv(name) : undefined)
+    return (await listLocalUsers(deps.db)).map((u) => {
+      const allowed = storedPasswordAllowed(deps.config.access, u.email)
+      // The env entry is ignored only while the stored password is in force.
+      const envIgnored = allowed && basicAuthUsersLists(realEnv, u.email) ? basicAuthEnvIgnoredNote(u.email) : null
+      return { ...u, allowed, envIgnored, self: u.email === viewer.email.trim().toLowerCase() }
+    })
+  }
+  const accessView = async (c: Context, v: { viewer: Viewer; csrf: string; config: AdminConfig; notice?: string }, extra: { values?: Record<string, string>; error?: string } = {}) =>
+    html(c, accessPage({
+      viewer: v.viewer, csrf: v.csrf, providerSummary: providerSummary(v.config), admins: v.config.access?.admins?.emails ?? [], notice: v.notice,
+      storedPasswords: await storedPasswords(v.viewer), basic: deps.config.access?.provider.type === 'basic', ...extra,
+    }), extra.error ? 400 : 200)
+
   app.get('/admin/access', async (c) => {
     const v = await view(c)
     if (v instanceof Response) return v
-    return html(c, accessPage({ viewer: v.viewer, csrf: v.csrf, providerSummary: providerSummary(v.config), admins: v.config.access?.admins?.emails ?? [], notice: v.notice }))
+    return accessView(c, v)
+  })
+
+  /** Removes one password stored in the site (BASIC_AUTH_USERS rotation does not revoke it). */
+  app.post('/admin/access/passwords/remove', async (c) => {
+    const p = await post(c)
+    if (p instanceof Response) return p
+    const email = text(p.form, 'email').toLowerCase()
+    if (email === p.viewer.email.trim().toLowerCase()) {
+      return accessView(c, p, { error: 'You cannot remove your own stored password. Ask another administrator, or run npm run cli -- remove-user on Node.' })
+    }
+    const row = email ? await deps.db.first<{ email: string }>(`SELECT email FROM local_users WHERE email = ?`, [email]) : null
+    if (!row) return done(c, '/admin/access', 'password-missing')
+    const now = nowSeconds()
+    await deps.db.batch([
+      { sql: `DELETE FROM local_users WHERE email = ?`, params: [email] },
+      auditStatement({ actor: p.viewer.email, action: 'access.password-remove', target: `local-user:${email}`, before: null, after: null, at: now }),
+    ])
+    return done(c, '/admin/access', 'password-removed')
   })
 
   app.post('/admin/access', async (c) => {
@@ -518,7 +555,7 @@ They are refused when saving, so fix them in <a href="/admin/configuration">Conf
     const admins = { ...(p.config.access?.admins ?? {}), emails }
     const error = !emails.length && !p.config.access?.admins?.teams?.length ? 'Keep at least one administrator.'
       : p.config.access ? await save(p, { ...p.config, access: { ...p.config.access, admins } }) : 'No sign-in method is configured.'
-    if (error) return html(c, accessPage({ viewer: p.viewer, csrf: p.csrf, providerSummary: providerSummary(p.config), admins: p.config.access?.admins?.emails ?? [], values: formValues(p.form), error }), 400)
+    if (error) return accessView(c, p, { values: formValues(p.form), error })
     return done(c, '/admin/access', 'admins-saved')
   })
 

@@ -11,6 +11,7 @@
  *   npm run cli -- config push [--url <site>] [--revision <n>] <file.yaml>
  *                                                      replace it (with --revision, only if unchanged since)
  *   npm run cli -- recover <email>                     Node: switch to email + password and print a new password
+ *   npm run cli -- remove-user <email>                 Node: delete the password stored in the site for an address
  * pull and push use $ADMIN_TOKEN, and $STATUSPING_URL when --url is not given.
  */
 import { readFile } from 'node:fs/promises'
@@ -22,7 +23,8 @@ import { formatDuration } from '../src/util/time.ts'
 import { basicAuthEnvIgnoredNote, basicAuthUsersLists, hashUserPassword } from '../src/auth/providers.ts'
 import { STORABLE_ENV, storedEnvKey } from '../src/deps.ts'
 import { type AdminConfig, validateAdminConfig } from '../src/admin/security.ts'
-import { revisionStatements } from '../src/admin/service.ts'
+import { auditStatement, revisionStatements } from '../src/admin/service.ts'
+import { pruneLocalUsersStatement } from '../src/auth/local-users.ts'
 import { rotateSignInEpochStatement } from '../src/auth/epoch.ts'
 import { locateProblems, parseAdminYaml } from '../src/admin/yaml.ts'
 import type { NormalizedConfig } from '../src/config.ts'
@@ -124,13 +126,18 @@ async function recover(email: string | undefined): Promise<void> {
   const admins = stored.access?.admins
   const next = { ...stored, admin: true, access: { ...(stored.access ?? {}), provider: { type: 'basic' }, admins: { ...(admins ?? {}), emails: [...new Set([address, ...(admins?.emails ?? [])])] } } } as AdminConfig
   let config: AdminConfig
-  try { config = validateAdminConfig(next, getEnv, 'load').config } catch (error) { fail((error as Error).message) }
+  let normalized: NormalizedConfig
+  try { ({ config, normalized } = validateAdminConfig(next, getEnv, 'load')) } catch (error) { fail((error as Error).message) }
   const password = randomToken(24)
   const now = Math.floor(Date.now() / 1000)
   await db.batch([
     ...revisionStatements(config, address, now, { action: 'config.recover' }),
     { sql: `UPDATE admin_config SET config_json = ?, updated_at = ?, updated_by = ? WHERE id = 1`, params: [JSON.stringify(config), now, address] },
+    // Coming from another method, passwords stored before it are deleted rather than revived.
+    ...(stored.access?.provider?.type !== 'basic' ? [{ sql: `DELETE FROM local_users WHERE email <> ?`, params: [address] }] : []),
     { sql: `INSERT INTO local_users (email, password_hash, created_at) VALUES (?, ?, ?) ON CONFLICT(email) DO UPDATE SET password_hash = excluded.password_hash`, params: [address, await hashUserPassword(password), now] },
+    // Stored passwords of anyone who is not an administrator go too (see src/auth/local-users.ts).
+    pruneLocalUsersStatement(normalized.access),
     // Like a sign-in method change in Settings, recovering signs everyone out (see auth/epoch.ts).
     { sql: `INSERT INTO instance_secrets (name, value, created_at) VALUES ('session_key', ?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value, created_at = excluded.created_at`, params: [randomToken(48), now] },
     // Email + password uses no stored sign-in credentials; drop any an earlier method left behind.
@@ -141,6 +148,26 @@ async function recover(email: string | undefined): Promise<void> {
   console.log(`Sign-in is now email + password. Password for ${address} (shown once):\n\n  ${password}\n`)
   if (basicAuthUsersLists(getEnv, address)) console.log(`Note: ${basicAuthEnvIgnoredNote(address)}\n`)
   console.log(`Sign in at ${config.baseUrl.replace(/\/+$/, '')}/auth/login, then change the sign-in method under Settings → Access if you want another one.`)
+}
+
+/** Node: delete the password stored in the site for an address (BASIC_AUTH_USERS rotation does not revoke it). */
+async function removeUser(email: string | undefined): Promise<void> {
+  const address = email?.trim().toLowerCase() || fail('usage: remove-user <email>')
+  const { createClient } = await import('@libsql/client')
+  const db = new LibsqlDb(createClient({ url: getEnv('TURSO_DATABASE_URL') ?? 'file:statusping.db', authToken: getEnv('TURSO_AUTH_TOKEN') }))
+  await migrate(db)
+  if (!(await db.first(`SELECT email FROM local_users WHERE email = ?`, [address]))) {
+    console.log(`${address} has no password stored in the site. Nothing to remove.`)
+    if (basicAuthUsersLists(getEnv, address)) console.log(`BASIC_AUTH_USERS lists ${address}: remove the entry from that secret to stop it signing in.`)
+    return
+  }
+  const now = Math.floor(Date.now() / 1000)
+  await db.batch([
+    { sql: `DELETE FROM local_users WHERE email = ?`, params: [address] },
+    auditStatement({ actor: 'cli', action: 'access.password-remove', target: `local-user:${address}`, before: null, after: null, at: now }),
+  ])
+  console.log(`✓ removed the password stored in the site for ${address}. A session already signed in lasts until it expires.`)
+  if (basicAuthUsersLists(getEnv, address)) console.log(`Note: BASIC_AUTH_USERS lists ${address}, so that entry now signs this address in. Remove it from the secret too if it should not.`)
 }
 
 /** Commands that read statusping.config.ts, which v0.3.0 no longer has. */
@@ -155,6 +182,7 @@ const RETIRED: Record<string, string> = {
 async function main() {
   if (command === 'config') return configCommand(args[0], args.slice(1))
   if (command === 'recover') return recover(args[0])
+  if (command === 'remove-user') return removeUser(args[0])
   if (command && RETIRED[command]) fail(`"${command}" was removed in v0.3.0 with statusping.config.ts. ${RETIRED[command]}`)
 
   switch (command) {
@@ -182,12 +210,12 @@ async function main() {
       console.log('New BASIC_AUTH_USERS secret value:\n')
       console.log(JSON.stringify(users))
       console.log('\nRemember: page access lists decide which pages this user can open.')
-      console.log('A password stored in the site for this address (from setup, Change sign-in method or `recover`) takes precedence over this entry.')
+      console.log('A password stored in the site for this address (from setup, Change sign-in method or `recover`) takes precedence over this entry; remove it in Settings → Access or with `remove-user`.')
       break
     }
 
     default:
-      console.log('usage: statusping <config <check|pull|push> | recover <email> | add-user <email> | migrate>')
+      console.log('usage: statusping <config <check|pull|push> | recover <email> | add-user <email> | remove-user <email> | migrate>')
       process.exit(command ? 1 : 0)
   }
 }

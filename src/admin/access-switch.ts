@@ -21,7 +21,7 @@ import { consumeAttempt } from '../rate-limit.ts'
 import { nowSeconds } from '../util/time.ts'
 import type { Form } from './forms.ts'
 import { type AdminConfig, canAdmin, validateAdminConfig } from './security.ts'
-import { saveAdminConfig } from './service.ts'
+import { auditStatement, saveAdminConfig } from './service.ts'
 import { field, hidden, layout, selectInput, textInput } from './ui.ts'
 import { targetFetch } from '../util/private-targets.ts'
 
@@ -185,7 +185,7 @@ function sourceNote(source: Source): string {
       : source === 'current' ? '<span class="secret-state ok">✓ Using the current value. Enter a new one to replace it.</span>' : ''
 }
 
-function configurePage(opts: { viewer: Viewer; csrf: string; origin: string; draft: SwitchDraft; creds: Record<string, Credential>; error?: string; notice?: string; preset?: string; envListsViewer?: boolean }): string {
+function configurePage(opts: { viewer: Viewer; csrf: string; origin: string; draft: SwitchDraft; creds: Record<string, Credential>; error?: string; notice?: string; preset?: string; envListsViewer?: boolean; current?: Method }): string {
   const d = opts.draft
   const verified = d.verifiedEmail
   const secretField = (name: string, label: string, type = 'password') => opts.creds[name]?.source === 'env' ? `<p class="hint">${label}: ${sourceNote('env')}</p>`
@@ -199,7 +199,10 @@ ${field('New password', '<input class="input" id="password" name="password" type
 ${field('Confirm password', '<input class="input" id="confirm" name="confirm" type="password" autocomplete="new-password" required>')}
 <div class="actions"><button class="btn-outline" type="submit">Save password</button></div></form>
 ${opts.envListsViewer ? `<p class="alert warning" role="status">${escape(basicAuthEnvIgnoredNote(opts.viewer.email))}</p>` : ''}
-<p class="hint" style="margin:16px 0 0">Other administrators cannot sign in until they have a password. Give them one with <code>npm run cli -- add-user</code> (the <code>BASIC_AUTH_USERS</code> secret).</p></section>`
+<p class="hint" style="margin:16px 0 0">${opts.current === 'basic'
+      ? 'Other administrators keep the password stored in the site, if they have one (Settings → Access lists them); one without a stored password signs in with their <code>BASIC_AUTH_USERS</code> entry.'
+      : 'Switching keeps only your stored password: any password stored in the site before the current method is deleted. Other administrators sign in with their <code>BASIC_AUTH_USERS</code> entry, and cannot sign in until they have one.'}
+Give an administrator a password with <code>npm run cli -- add-user</code> (the <code>BASIC_AUTH_USERS</code> secret).</p></section>`
   } else if (d.method === 'cloudflare-access') {
     const host = new URL(opts.origin).host
     body = `<section class="card"><h2>1. Protect sign-in with Access</h2><ol class="changes">
@@ -228,7 +231,7 @@ ${verified ? '' : `<section class="card"><h2>3. Test sign-in</h2><p class="lead"
   }
   const staySignedIn = d.method !== 'cloudflare-access' && sameEmail(verified, opts.viewer.email)
   const ready = verified ? `<section class="card"><p class="alert success" role="status">${d.method === 'basic' ? 'Password saved' : 'Test sign-in worked'} for <strong>${escape(verified)}</strong>.</p>
-<p class="lead">Switching signs everyone out, also with <code>SESSION_SECRET</code> set, and ends recovery sessions. ${staySignedIn ? 'You stay signed in; everyone else' : d.method === 'cloudflare-access' ? 'Everyone' : `You are signed out too (the test sign-in was as ${escape(verified)}), and everyone`} signs in again with ${METHODS[d.method].toLowerCase()}. MCP access tokens keep working: revoke them under <strong>MCP</strong> if they should end too.</p>
+<p class="lead">Switching signs everyone out, also with <code>SESSION_SECRET</code> set, and ends recovery sessions. ${staySignedIn ? 'You stay signed in; everyone else' : d.method === 'cloudflare-access' ? 'Everyone' : `You are signed out too (the test sign-in was as ${escape(verified)}), and everyone`} signs in again with ${METHODS[d.method].toLowerCase()}. ${d.method !== 'basic' && opts.current === 'basic' ? 'Every password stored in the site is deleted. ' : ''}MCP access tokens keep working: revoke them under <strong>MCP</strong> if they should end too.</p>
 <form method="post" action="/admin/access/method/apply">${hidden(opts.csrf)}<div class="actions"><button class="btn-primary" type="submit">Switch to ${escape(METHODS[d.method])}</button></div></form></section>` : ''
   return layout({ ...opts, section: 'access', title: METHODS[d.method], description: 'Set up the new sign-in method. The current method keeps working until you switch.', body: `${ready}${body}
 <section class="card"><form method="post" action="/admin/access/method/cancel">${hidden(opts.csrf)}<div class="actions"><a class="btn-outline" href="/admin/access/method?choose=1">Choose a different method</a><button class="btn-outline" type="submit">Cancel the change</button></div></form></section>` })
@@ -252,7 +255,7 @@ const currentMethod = (deps: Deps) => deps.config.access?.provider.type as Metho
 /** Settings pages for the switch. Called from mountAdminRoutes with its signed-in helpers. */
 export function mountAccessSwitch(app: Hono, deps: Deps, h: SwitchHelpers): void {
   const configure = async (c: Context, v: View | Post, draft: SwitchDraft, error?: string, status: 200 | 400 | 429 = 200) =>
-    h.html(c, configurePage({ viewer: v.viewer, csrf: v.csrf, origin: origin(c, deps), draft, creds: await credentials(deps, draft), error: error ?? ERRORS[c.req.query('error') ?? ''], notice: 'notice' in v ? v.notice : undefined, preset: c.req.query('preset'),
+    h.html(c, configurePage({ viewer: v.viewer, csrf: v.csrf, origin: origin(c, deps), draft, creds: await credentials(deps, draft), error: error ?? ERRORS[c.req.query('error') ?? ''], notice: 'notice' in v ? v.notice : undefined, preset: c.req.query('preset'), current: currentMethod(deps),
       envListsViewer: draft.method === 'basic' && envListsAddress(deps, v.viewer.email) }), status)
   /** Another administrator's draft: shown with who started it, never changed, tested or applied. */
   const foreign = (c: Context, v: View | Post, draft: SwitchDraft, status: 200 | 409 = 409) =>
@@ -392,11 +395,16 @@ export function mountAccessSwitch(app: Hono, deps: Deps, h: SwitchHelpers): void
     // (also for a switch to the same kind of method, such as a new password or another issuer).
     await saveAdminConfig(deps.db, { ...next, admin: true }, p.viewer.email, now, getEnv, { hasRealEnv: deps.hasRealEnv, extra: [
       ...promote.map(([name, v]) => ({ sql: `INSERT INTO instance_secrets (name, value, created_at) VALUES (?, ?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value, created_at = excluded.created_at`, params: [storedEnvKey(name), v.value!, now] })),
+      // Email + password: the verified administrator's new password. Coming from another method,
+      // passwords stored before it (by an earlier release, which kept them through SSO) are deleted
+      // rather than revived, so only this one exists. Another method: saveAdminConfig deletes every
+      // stored password in this transaction (see auth/local-users.ts).
+      ...(draft.method === 'basic' && currentMethod(deps) !== 'basic' ? [{ sql: `DELETE FROM local_users WHERE email <> ?`, params: [draft.verifiedEmail] }] : []),
       ...(draft.method === 'basic' ? [{ sql: `INSERT INTO local_users (email, password_hash, created_at) VALUES (?, ?, ?) ON CONFLICT(email) DO UPDATE SET password_hash = excluded.password_hash`, params: [draft.verifiedEmail, draft.passwordHash!, now] }] : []),
       ...unused.map((name) => ({ sql: `DELETE FROM instance_secrets WHERE name = ?`, params: [storedEnvKey(name)] })),
       ...signEveryoneOutStatements(now),
-      { sql: `INSERT INTO audit_log (actor, action, target, before_json, after_json, at) VALUES (?, 'access.method-change', 'access', ?, ?, ?)`,
-        params: [p.viewer.email, JSON.stringify({ method: currentMethod(deps) ?? null }), JSON.stringify({ method: draft.method, startedBy: draft.by, startedAt: draft.startedAt, verifiedEmail: draft.verifiedEmail }), now] },
+      auditStatement({ actor: p.viewer.email, action: 'access.method-change', target: 'access', before: { method: currentMethod(deps) ?? null },
+        after: { method: draft.method, startedBy: draft.by, startedAt: draft.startedAt, verifiedEmail: draft.verifiedEmail }, at: now }),
     ] })
     await clearDraft(deps)
     await refreshAdminConfig(deps, now)

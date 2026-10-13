@@ -10,6 +10,7 @@ import { nowSeconds } from '../util/time.ts'
 import { b64urlEncode, emailVerified, verifyJwt } from './jwt.ts'
 import { sign, unsign } from './session.ts'
 import { epochKey } from './epoch.ts'
+import { storedPasswordAllowed } from './local-users.ts'
 import { buildChrome } from '../web/chrome.ts'
 import { signInPage, signOutPage, ssoSignInPage } from '../web/pages.ts'
 import { type Viewer, referencedGroups } from './viewer.ts'
@@ -123,25 +124,41 @@ export const basicAuthEnvIgnoredNote = (email: string) =>
   `BASIC_AUTH_USERS still lists ${email}. That entry is now ignored for this address, because the password stored in the site takes precedence. Remove it from the BASIC_AUTH_USERS secret.`
 
 /**
+ * A fixed `pbkdf2-sha256` entry with the parameters of {@link hashUserPassword}. Checked when an
+ * address has no usable stored password, so every attempt costs one PBKDF2 derivation whether
+ * the address is unknown, listed in BASIC_AUTH_USERS (sha256) or stored in the site (round 20, F2:
+ * before, an unknown address returned in microseconds and a stored one took ~5 ms). No password
+ * matches it: the expected value is not the output of any derivation we know of, and the result is
+ * never used.
+ */
+const DUMMY_PASSWORD_HASH = `pbkdf2-sha256:${PBKDF2_ITERATIONS}:${'5a'.repeat(16)}:${'0'.repeat(64)}`
+
+/**
  * Checks an email + password. A password stored in the site (local_users: setup, Change sign-in
- * method, `cli recover`) wins; BASIC_AUTH_USERS is used only for an address with no stored
+ * method, `cli recover`) wins; BASIC_AUTH_USERS is used only for an address with no usable stored
  * password. Before v0.3.19 the env entry won, so a password set in the site had no effect for an
  * address the secret also listed, and the old env password kept signing in.
  *
- * Timing: the database is read for every attempt, so whether an address has a stored password or
- * an env entry does not change the work done before the hash comparison. An address with neither
- * returns without hashing, as it always has.
+ * A stored password is usable only while the site signs in with email + password and the address
+ * is an administrator under the current configuration (v0.3.20). Saves that remove an administrator
+ * also delete their row (auth/local-users.ts), but this check holds whatever changed the
+ * administrators, including rows left by an earlier release. BASIC_AUTH_USERS entries are not
+ * limited to administrators: they are also how page viewers sign in.
+ *
+ * Timing: the database is read for every attempt, and every attempt runs one PBKDF2 derivation
+ * (against a dummy hash when the entry is missing or a fast sha256 one), so the time taken does
+ * not show whether an address exists or where its password comes from.
  */
 export async function verifyPassword(deps: Deps, rawEmail: string, password: string): Promise<Viewer | null> {
   const email = rawEmail.trim().toLowerCase()
   if (!email || !password) return null
   const stored = (await deps.db.first<{ password_hash: string }>(`SELECT password_hash FROM local_users WHERE email = ?`, [email]))?.password_hash
-  let entry = stored
+  let entry = stored !== undefined && storedPasswordAllowed(deps.config.access, email) ? stored : undefined
   if (entry === undefined) {
     const users = basicAuthUsers(deps.getEnv, deps.log)
-    if (!users) return null
-    entry = basicAuthEntry(users, email)
+    entry = users ? basicAuthEntry(users, email) : undefined
   }
+  if (!entry || !entry.startsWith('pbkdf2-sha256:')) await passwordMatches(password, DUMMY_PASSWORD_HASH)
   if (!entry) return null
   return (await passwordMatches(password, entry)) ? { email, groups: [], provider: 'basic' } : null
 }
