@@ -20,11 +20,11 @@ import { LibsqlDb } from '../src/db/libsql.ts'
 import { migrate } from '../src/schema.ts'
 import { randomToken } from '../src/util/crypto.ts'
 import { formatDuration } from '../src/util/time.ts'
-import { basicAuthEnvIgnoredNote, basicAuthUsersLists, hashUserPassword } from '../src/auth/providers.ts'
+import { basicAuthEnvAdminNote, basicAuthEnvIgnoredNote, basicAuthUsersLists, hashUserPassword } from '../src/auth/providers.ts'
 import { STORABLE_ENV, storedEnvKey } from '../src/deps.ts'
 import { type AdminConfig, validateAdminConfig } from '../src/admin/security.ts'
 import { auditStatement, revisionStatements } from '../src/admin/service.ts'
-import { pruneLocalUsersStatement } from '../src/auth/local-users.ts'
+import { pruneLocalUsersStatement, storedPasswordAllowed } from '../src/auth/local-users.ts'
 import { rotateSignInEpochStatement } from '../src/auth/epoch.ts'
 import { locateProblems, parseAdminYaml } from '../src/admin/yaml.ts'
 import type { NormalizedConfig } from '../src/config.ts'
@@ -156,9 +156,17 @@ async function removeUser(email: string | undefined): Promise<void> {
   const { createClient } = await import('@libsql/client')
   const db = new LibsqlDb(createClient({ url: getEnv('TURSO_DATABASE_URL') ?? 'file:statusping.db', authToken: getEnv('TURSO_AUTH_TOKEN') }))
   await migrate(db)
+  /** Whether the address is an administrator who signs in with email + password (false if the configuration cannot be read). */
+  const stillAdmin = async () => {
+    const row = await db.first<{ config_json: string }>(`SELECT config_json FROM admin_config WHERE id = 1`)
+    if (!row) return false
+    try { return storedPasswordAllowed(validateAdminConfig(JSON.parse(row.config_json), getEnv, 'load').normalized.access, address) } catch { return false }
+  }
+  const envLists = basicAuthUsersLists(getEnv, address)
   if (!(await db.first(`SELECT email FROM local_users WHERE email = ?`, [address]))) {
     console.log(`${address} has no password stored in the site. Nothing to remove.`)
-    if (basicAuthUsersLists(getEnv, address)) console.log(`BASIC_AUTH_USERS lists ${address}: remove the entry from that secret to stop it signing in.`)
+    if (envLists && await stillAdmin()) console.log(`Warning: ${basicAuthEnvAdminNote(address)}`)
+    else if (envLists) console.log(`BASIC_AUTH_USERS lists ${address}: remove the entry from that secret to stop it signing in.`)
     return
   }
   const now = Math.floor(Date.now() / 1000)
@@ -167,7 +175,8 @@ async function removeUser(email: string | undefined): Promise<void> {
     auditStatement({ actor: 'cli', action: 'access.password-remove', target: `local-user:${address}`, before: null, after: null, at: now }),
   ])
   console.log(`✓ removed the password stored in the site for ${address}. A session already signed in lasts until it expires.`)
-  if (basicAuthUsersLists(getEnv, address)) console.log(`Note: BASIC_AUTH_USERS lists ${address}, so that entry now signs this address in. Remove it from the secret too if it should not.`)
+  if (envLists && await stillAdmin()) console.log(`Warning: ${basicAuthEnvAdminNote(address)}`)
+  else if (envLists) console.log(`Note: BASIC_AUTH_USERS lists ${address}, so that entry now signs this address in. Remove it from the secret too if it should not.`)
 }
 
 /** Commands that read statusping.config.ts, which v0.3.0 no longer has. */

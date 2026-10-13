@@ -1,7 +1,7 @@
 {
   "format": "statusping-template/v1",
-  "release": "0.3.20",
-  "template": "0.3.20",
+  "release": "0.3.21",
+  "template": "0.3.21",
   "channel": "stable",
   "source": {
     "repository": "https://github.com/getstatusping/statusping",

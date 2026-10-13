@@ -1,0 +1,63 @@
+{
+  "note": "a team named \"__proto__\" (before 0.3.21 it set the prototype of the team map; refused on save since)",
+  "config": {
+    "title": "Example Status",
+    "baseUrl": "https://status.example.test",
+    "timezone": "UTC",
+    "admin": true,
+    "access": {
+      "provider": {
+        "type": "basic"
+      },
+      "teams": {
+        "__proto__": {
+          "emails": [
+            "intruder@example.test"
+          ]
+        },
+        "ops": {
+          "emails": [
+            "ops@example.test"
+          ]
+        }
+      },
+      "admins": {
+        "emails": [
+          "owner@example.test"
+        ],
+        "teams": [
+          "ops"
+        ]
+      }
+    },
+    "groups": [
+      {
+        "name": "Web",
+        "monitors": [
+          {
+            "id": "site",
+            "kind": "http",
+            "name": "Site",
+            "url": "https://www.example.test/health",
+            "interval": "1m"
+          }
+        ]
+      }
+    ],
+    "pages": [
+      {
+        "slug": "status",
+        "title": "Status",
+        "monitors": ["*"]
+      },
+      {
+        "slug": "ops",
+        "title": "Ops",
+        "monitors": ["*"],
+        "access": {
+          "teams": ["ops"]
+        }
+      }
+    ]
+  }
+}

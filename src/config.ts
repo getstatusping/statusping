@@ -1354,6 +1354,9 @@ function normalizeMatch(input: MatchInput | undefined, where: string, sso: boole
   return { emails, groups }
 }
 
+/** Names that could reach an object's prototype if used as a key of a map built from the configuration. */
+export const RESERVED_KEYS: ReadonlySet<string> = new Set(['__proto__', 'constructor', 'prototype'])
+
 function normalizeAccess(input: AccessInput | undefined, problems: string[], save = false, warnings?: string[]): NormalizedAccess | null {
   if (!input) return null
   if (typeof input !== 'object' || !input.provider || typeof input.provider !== 'object') {
@@ -1377,10 +1380,19 @@ function normalizeAccess(input: AccessInput | undefined, problems: string[], sav
   if (!['basic', 'cloudflare-access', 'oidc'].includes(p.type)) {
     problems.push(`access.provider: unknown type "${(p as { type: string }).type}"`)
   }
-  const teams: Record<string, NormalizedMatch> = {}
+  // No prototype: a team name is only ever an own key, whatever the stored configuration says.
+  const teams: Record<string, NormalizedMatch> = Object.create(null) as Record<string, NormalizedMatch>
   const validTeams = input.teams && typeof input.teams === 'object' && !Array.isArray(input.teams)
   if (save && input.teams !== undefined && !validTeams) problems.push('access.teams: must be an object of named member lists')
   for (const [name, t] of Object.entries(validTeams ? input.teams! : {})) {
+    // Before 0.3.21 a team named "__proto__" set the prototype of the team map. Saving refuses
+    // these names; loading an older stored configuration drops the team with a warning.
+    if (RESERVED_KEYS.has(name)) {
+      const message = `access.teams: "${name}" cannot be used as a team name`
+      if (save) problems.push(message)
+      else warnings?.push(`${message} (left out)`)
+      continue
+    }
     teams[name] = normalizeMatch(t, `access.teams.${name}`, sso, problems, save)
   }
   let admins: NormalizedAccess['admins'] = null
@@ -1428,7 +1440,8 @@ export function resolveConfigEnv(config: StatusPingConfig, getEnv: EnvGetter, le
           else if (lenient) url = `https://unset.invalid/${url.$env}`
           else throw new Error(`monitor "${m.id}": missing environment variable ${url.$env} for its url`)
         }
-        const headers: Record<string, string> = {}
+        // Own keys only: a header named "__proto__" stays a header, never the object's prototype.
+        const headers: Record<string, string> = Object.create(null) as Record<string, string>
         for (const [key, value] of Object.entries(m.headers ?? {})) {
           if (typeof value === 'string') { headers[key] = value; continue }
           const resolved = getEnv(value.$env)

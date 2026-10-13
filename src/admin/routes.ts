@@ -52,6 +52,8 @@ const NOTICES: Record<string, string> = {
   'test-sent': 'Test alert sent.',
   'admins-saved': 'Administrators saved. Anyone no longer an administrator lost the password stored in the site, if they had one.',
   'password-removed': 'Stored password removed. That address can no longer sign in with it.',
+  // A fixed sentence (notices never carry free text); the address is the one just removed.
+  'password-removed-env-admin': 'Stored password removed. Warning: BASIC_AUTH_USERS still lists that address, which is still an administrator, so that entry now signs it in with administrator access. Remove or rotate that entry in the BASIC_AUTH_USERS secret unless that is intended.',
   'password-missing': 'That address has no password stored in the site.',
   imported: 'Configuration imported.',
   restored: 'Earlier version restored.',
@@ -509,8 +511,8 @@ They are refused when saving, so fix them in <a href="/admin/configuration">Conf
   // ── Access ────────────────────────────────────────────────────────────────────────────────
 
   /** Passwords stored in the site, for Settings → Access (addresses only, never hashes). */
+  const realEnv = (name: string) => (deps.hasRealEnv(name) ? deps.getEnv(name) : undefined)
   const storedPasswords = async (viewer: Viewer): Promise<StoredPasswordRow[]> => {
-    const realEnv = (name: string) => (deps.hasRealEnv(name) ? deps.getEnv(name) : undefined)
     return (await listLocalUsers(deps.db)).map((u) => {
       const allowed = storedPasswordAllowed(deps.config.access, u.email)
       // The env entry is ignored only while the stored password is in force.
@@ -545,7 +547,10 @@ They are refused when saving, so fix them in <a href="/admin/configuration">Conf
       { sql: `DELETE FROM local_users WHERE email = ?`, params: [email] },
       auditStatement({ actor: p.viewer.email, action: 'access.password-remove', target: `local-user:${email}`, before: null, after: null, at: now }),
     ])
-    return done(c, '/admin/access', 'password-removed')
+    // An old BASIC_AUTH_USERS entry for an address that is still an administrator signs it in
+    // again from now on (the stored password no longer takes precedence): say so.
+    const envSignsAdminIn = storedPasswordAllowed(deps.config.access, email) && basicAuthUsersLists(realEnv, email)
+    return done(c, '/admin/access', envSignsAdminIn ? 'password-removed-env-admin' : 'password-removed')
   })
 
   app.post('/admin/access', async (c) => {

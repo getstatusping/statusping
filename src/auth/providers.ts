@@ -124,6 +124,14 @@ export const basicAuthEnvIgnoredNote = (email: string) =>
   `BASIC_AUTH_USERS still lists ${email}. That entry is now ignored for this address, because the password stored in the site takes precedence. Remove it from the BASIC_AUTH_USERS secret.`
 
 /**
+ * The warning shown when a stored password was removed (Settings → Access, `cli remove-user`) for
+ * an address that is still an administrator and that BASIC_AUTH_USERS lists: from then on that env
+ * entry signs the address in again, with administrator access, however old it is.
+ */
+export const basicAuthEnvAdminNote = (email: string) =>
+  `BASIC_AUTH_USERS lists ${email}, which is still an administrator, so that entry now signs it in with administrator access. Remove or rotate that entry in the BASIC_AUTH_USERS secret unless that is intended.`
+
+/**
  * A fixed `pbkdf2-sha256` entry with the parameters of {@link hashUserPassword}. Checked when an
  * address has no usable stored password, so every attempt costs one PBKDF2 derivation whether
  * the address is unknown, listed in BASIC_AUTH_USERS (sha256) or stored in the site (round 20, F2:

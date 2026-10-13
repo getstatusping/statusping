@@ -67,7 +67,7 @@ describe('stored configurations from earlier releases still load', () => {
   it('has a fixture for each rule a release added since 0.3.6', () => {
     expect(fixtures.map((f) => f.file)).toEqual(expect.arrayContaining([
       'dangling-default-notify.json', 'tick-limits-out-of-range.json', 'loose-email-addresses.json', 'prototype-sink-name.json',
-      'loose-list-shapes.json', 'frequent-maintenance.json', 'ntfy-plain-http.json', 'full-featured.json',
+      'loose-list-shapes.json', 'frequent-maintenance.json', 'ntfy-plain-http.json', 'full-featured.json', 'prototype-team-name.json',
     ]))
   })
 
