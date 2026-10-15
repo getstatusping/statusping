@@ -44,8 +44,6 @@ export interface TickSummary {
   suspended?: boolean
 }
 
-const HTTP_CONCURRENCY = 5 // Workers allow 6 simultaneous outbound connections.
-
 /**
  * Every check error is bounded here, before anything stores it (`last_error`, incident detail,
  * `tick_results`) or a status page loads it back: an error can quote a target's response (a JSON
@@ -203,7 +201,7 @@ export async function tick(deps: Deps, nowMs: number = Date.now()): Promise<Tick
   const overCap = due.splice(deps.config.limits.maxChecksPerTick)
   const httpFetch = targetFetch(deps)
   const tcpConnect = targetTcpConnect(deps)
-  const { results: raw, skipped } = await runPool(due, HTTP_CONCURRENCY, startedMs + deps.config.limits.tickBudgetMs, (m) => {
+  const { results: raw, skipped } = await runPool(due, deps.config.limits.checkConcurrency, startedMs + deps.config.limits.tickBudgetMs, (m) => {
     if (m.kind === 'http') return runHttpCheck(m, httpFetch)
     if (!tcpConnect) return Promise.resolve({ id: m.id, ok: false, ms: null, code: null, err: 'TCP checks are unavailable in this runtime' })
     return runTcpCheck(m, tcpConnect)

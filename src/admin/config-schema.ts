@@ -143,7 +143,13 @@ const ROOT = object<AdminConfig>()({
   home: str('Slug of the page served at /.'),
   access: ref('access'),
   peer: object<NonNullable<StatusPingConfig['peer']>>()({ pingUrl: secret(), heartbeatMonitor: str(), healthMonitor: str() }, []),
-  limits: object<NonNullable<StatusPingConfig['limits']>>()({ maxChecksPerTick: int(), tickBudgetMs: int(), maxConfirmationsPerTick: int(), pingPerIpPerMinute: int() }, []),
+  limits: object<NonNullable<StatusPingConfig['limits']>>()({
+    maxChecksPerTick: int('Most HTTP/TCP checks started in one tick. Default 35 on Cloudflare Workers (at most 1000); default 1000 on Node (at most 10000).', { minimum: 1, maximum: 10_000 }),
+    checkConcurrency: int('HTTP/TCP checks run at the same time. Default 5 on Cloudflare Workers (at most 6); default 50 on Node (at most 500).', { minimum: 1, maximum: 500 }),
+    tickBudgetMs: int('Stop starting new checks after this many milliseconds in one tick. Default 20000.', { minimum: 1000, maximum: 300_000 }),
+    maxConfirmationsPerTick: int('Default 6.', { minimum: 1, maximum: 35 }),
+    pingPerIpPerMinute: int('Default 60.', { minimum: 1, maximum: 10_000 }),
+  }, []),
   admin: bool('Older configurations only; the admin is always on after setup.'),
   updates: object<NonNullable<StatusPingConfig['updates']>>()({ enabled: bool(), manifestUrl: str(), publicKey: str() }, []),
 }, ['title', 'baseUrl', 'groups'])

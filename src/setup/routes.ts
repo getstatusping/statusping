@@ -559,7 +559,7 @@ export function mountSetupRoutes(app: Hono, deps: Deps): void {
     }
     // Let the full validator judge cron expressions, periods, and the rest.
     if (monitor) {
-      try { validateAdminConfig(draftConfig({ ...r.state.draft, monitor }), deps.getEnv) } catch (e) {
+      try { validateAdminConfig(draftConfig({ ...r.state.draft, monitor }), deps.getEnv, 'save', deps.runtime) } catch (e) {
         error = kind === 'push' && values.schedule ? `"${values.schedule}" is not a valid cron schedule. Use five fields, such as 0 3 * * *.` : (e as Error).message
       }
     }
@@ -592,7 +592,7 @@ export function mountSetupRoutes(app: Hono, deps: Deps): void {
       // and a stale stored copy would take over if the Worker secret were later deleted.
       const secrets = entered.filter((secret) => !deps.hasRealEnv(secret.name))
       const pending = Object.fromEntries(secrets.map((secret) => [secret.name, secret.value]))
-      try { validateAdminConfig(draftConfig({ ...draft, channel: { name, sink } }), (env) => own(pending, env) ?? deps.getEnv(env)) } catch (e) { throw new FormError((e as Error).message) }
+      try { validateAdminConfig(draftConfig({ ...draft, channel: { name, sink } }), (env) => own(pending, env) ?? deps.getEnv(env), 'save', deps.runtime) } catch (e) { throw new FormError((e as Error).message) }
       const now = nowSeconds()
       if (previous && previous.name !== name) await forgetChannel(previous.name)
       await deps.db.batch([
@@ -652,7 +652,7 @@ export function mountSetupRoutes(app: Hono, deps: Deps): void {
     try {
       if (!yaml.trim()) throw new Error('Paste a configuration or choose a YAML file.')
       imported = parseAdminYaml(yaml) as StatusPingConfig
-      try { validateAdminConfig(draftConfig({ ...draft, imported }), deps.getEnv) } catch (e) { throw new Error(locateProblems(yaml, (e as Error).message)) }
+      try { validateAdminConfig(draftConfig({ ...draft, imported }), deps.getEnv, 'save', deps.runtime) } catch (e) { throw new Error(locateProblems(yaml, (e as Error).message)) }
     } catch (e) {
       return html(c, importPage({ csrf: loaded.session.csrf, completed, yaml, error: (e as Error).message }), 400)
     }
@@ -676,7 +676,7 @@ export function mountSetupRoutes(app: Hono, deps: Deps): void {
     const now = nowSeconds()
     let config: AdminConfig
     try {
-      config = validateAdminConfig(draftConfig(draft), deps.getEnv).config
+      config = validateAdminConfig(draftConfig(draft), deps.getEnv, 'save', deps.runtime).config
     } catch (error) {
       return html(c, reviewPage({ csrf: r.csrf, completed: new Set(['claim', 'method', 'account', 'basics', 'monitor']), summary: draftSummary(draft), yaml: stringifyAdminYaml(draftConfig(draft)), error: (error as Error).message, warning: envPasswordWarning(draft) }), 400)
     }
@@ -734,7 +734,7 @@ export function mountSetupRoutes(app: Hono, deps: Deps): void {
     const admins = input.access?.admins
     const next = { ...input, admin: true, access: { ...(input.access ?? {}), provider, admins: { ...(admins ?? {}), emails: [...new Set([email, ...(admins?.emails ?? [])])] } } } as AdminConfig
     let config: AdminConfig
-    try { config = validateAdminConfig(next, deps.getEnv).config } catch (e) { return json({ error: yaml ? locateProblems(yaml, (e as Error).message) : (e as Error).message }, 400) }
+    try { config = validateAdminConfig(next, deps.getEnv, 'save', deps.runtime).config } catch (e) { return json({ error: yaml ? locateProblems(yaml, (e as Error).message) : (e as Error).message }, 400) }
     const method = provider.type as SetupMethod
     const password = method === 'basic' ? randomToken(24) : undefined
     const now = nowSeconds()

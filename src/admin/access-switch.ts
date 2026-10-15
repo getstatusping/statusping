@@ -384,7 +384,7 @@ export function mountAccessSwitch(app: Hono, deps: Deps, h: SwitchHelpers): void
     const getEnv = (name: string) => (hasOwn(creds, name) ? creds[name]!.value : deps.getEnv(name))
     const next: AdminConfig = { ...p.config, access: { ...(p.config.access ?? {}), provider: providerFor(draft) } as AdminConfig['access'] }
     let normalized
-    try { normalized = validateAdminConfig({ ...next, admin: true }, getEnv).normalized } catch (error) { return configure(c, p, draft, (error as Error).message, 400) }
+    try { normalized = validateAdminConfig({ ...next, admin: true }, getEnv, 'save', deps.runtime).normalized } catch (error) { return configure(c, p, draft, (error as Error).message, 400) }
     const provider = draft.method === 'oidc' ? 'oidc' : draft.method
     if (!canAdmin({ email: draft.verifiedEmail, groups: [], provider } as Viewer, normalized)) return configure(c, p, { ...draft, verifiedEmail: undefined }, ERRORS['not-admin'], 400)
     const now = nowSeconds()
@@ -394,7 +394,7 @@ export function mountAccessSwitch(app: Hono, deps: Deps, h: SwitchHelpers): void
     const unused = STORABLE_ENV.filter((name) => !SECRETS[draft.method].includes(name))
     // One transaction: the new method, its credentials, and the end of every existing sign-in
     // (also for a switch to the same kind of method, such as a new password or another issuer).
-    await saveAdminConfig(deps.db, { ...next, admin: true }, p.viewer.email, now, getEnv, { hasRealEnv: deps.hasRealEnv, extra: [
+    await saveAdminConfig(deps.db, { ...next, admin: true }, p.viewer.email, now, getEnv, { hasRealEnv: deps.hasRealEnv, runtime: deps.runtime, extra: [
       ...promote.map(([name, v]) => ({ sql: `INSERT INTO instance_secrets (name, value, created_at) VALUES (?, ?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value, created_at = excluded.created_at`, params: [storedEnvKey(name), v.value!, now] })),
       // Email + password: the verified administrator's new password. Coming from another method,
       // passwords stored before it (by an earlier release, which kept them through SSO) are deleted

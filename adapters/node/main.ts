@@ -36,6 +36,7 @@ const deps = createDeps({
     createClient({ url: env('TURSO_DATABASE_URL') ?? 'file:statusping.db', authToken: env('TURSO_AUTH_TOKEN') }),
   ),
   getEnv: env,
+  runtime: 'node',
   legacyConfig,
   certificateExpiry: lookupNodeCertificateExpiry,
   tcpConnect: nodeTcpConnect,

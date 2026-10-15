@@ -88,7 +88,7 @@ export async function runExpiryChecks(deps: Deps, now: number): Promise<number> 
       const target = new URL(monitor.url)
       const host = target.hostname
       const lookup = kind === 'ssl'
-        ? await (deps.certificateExpiry ? probeCertificate(deps, deps.certificateExpiry, host, Number(target.port) || 443) : lookupCertificateExpiry(host, { fetch: deps.fetch }))
+        ? await (deps.certificateExpiry ? probeCertificate(deps, deps.certificateExpiry, host, Number(target.port) || 443) : lookupCertificateExpiry(host, { fetch: deps.fetch, now: () => now * 1000 }))
         : await lookupDomainExpiry(host, { fetch: deps.fetch })
       await saveResult(deps, monitor, kind, lookup, now)
       return 1

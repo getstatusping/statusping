@@ -58,11 +58,11 @@ export function mountMcp(app: Hono, deps: Deps): void {
     const pending = new Map(secrets.map((s) => [s.name, s.value]))
     // A real Worker secret wins over an entered value, which is then not stored either.
     const getEnv = (name: string) => (deps.hasRealEnv(name) ? deps.getEnv(name) : pending.get(name) ?? deps.getEnv(name))
-    try { validateAdminConfig({ ...next, admin: true }, getEnv) } catch (error) { throw new ToolError(opts.yaml ? locateProblems(opts.yaml, (error as Error).message) : (error as Error).message) }
+    try { validateAdminConfig({ ...next, admin: true }, getEnv, 'save', deps.runtime) } catch (error) { throw new ToolError(opts.yaml ? locateProblems(opts.yaml, (error as Error).message) : (error as Error).message) }
     const now = nowSeconds()
     if (opts.base !== undefined && opts.base !== await currentRevision(deps.db)) throw new ToolError(`The configuration changed after revision ${opts.base}. Call get_configuration again and retry.`)
     try {
-      await saveAdminConfig(deps.db, { ...next, admin: true }, actor(token), now, deps.getEnv, { action: 'config.mcp', ...opts, secrets, hasRealEnv: deps.hasRealEnv })
+      await saveAdminConfig(deps.db, { ...next, admin: true }, actor(token), now, deps.getEnv, { action: 'config.mcp', ...opts, secrets, hasRealEnv: deps.hasRealEnv, runtime: deps.runtime })
     } catch (error) {
       if (error instanceof RevisionConflict) throw new ToolError(`The configuration changed after revision ${opts.base}. Call get_configuration again and retry.`)
       if (error instanceof ChannelCredentialError) throw new ToolError(opts.yaml ? locateProblems(opts.yaml, error.message) : error.message)

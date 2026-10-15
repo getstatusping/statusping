@@ -119,6 +119,7 @@ const deps = createDeps({
   db,
   config,
   getEnv: (n) => envVars[n] ?? process.env[n],
+  runtime: 'node',
   fetch: fakeFetch,
   log: (level, msg) => level !== 'debug' && level !== 'info' && console.log(`[${level}] ${msg}`),
 })

@@ -402,6 +402,26 @@ variables below, and none of this applies to them.
   [Monitoring private addresses](#monitoring-private-addresses)); a tenant
   cannot turn this off.
 
+## Check limits
+
+Every minute a tick runs the HTTP and TCP checks that are due. Two settings under `limits` decide how many it can finish:
+
+| Setting | What it limits | Cloudflare Workers | Node |
+| --- | --- | --- | --- |
+| `checkConcurrency` | Checks running at the same time | default 5, at most 6 | default 50, at most 500 |
+| `maxChecksPerTick` | Checks started in one tick; the rest are skipped and logged | default 35, at most 1000 | default 1000, at most 10000 |
+
+`tickBudgetMs` (default 20000) stops a tick from starting new checks after that many milliseconds. A Worker can open only 6 outbound connections at once and make at most 1000 subrequests per invocation, so a Worker refuses higher values when you save, and clamps them, with a warning in Settings, when it loads a configuration saved on Node. On Node only memory sets the limit. In a test with 500 ms targets, 1000 checks took about 10 s at 50 in parallel and peaked near 300 MB, and 5000 checks took about 6 s at 500 in parallel and peaked near 530 MB. A 1 GB VPS can run several thousand checks a minute:
+
+```yaml
+limits:
+  checkConcurrency: 200
+  maxChecksPerTick: 5000
+  tickBudgetMs: 45000
+```
+
+`npm run cli -- config check` validates against the Workers limits; add `--runtime node` for a Node site.
+
 ## Run on Node and use an independent confirmation peer
 
 Node 22.18+ can run StatusPing outside Cloudflare, which is useful for a watchdog or an independent confirmation location:

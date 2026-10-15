@@ -358,8 +358,16 @@ export interface StatusPingConfig {
     healthMonitor?: string
   }
   limits?: {
-    /** Cloudflare's free plan allows 50 subrequests per invocation; keep headroom. Default 35. */
+    /**
+     * Most HTTP/TCP checks started in one tick. Default 35 on Workers (the free plan allows 50
+     * subrequests per invocation; keep headroom) and at most 1000; default 1000 on Node, at most 10000.
+     */
     maxChecksPerTick?: number
+    /**
+     * HTTP/TCP checks run at the same time. Default 5 on Workers, at most 6 (Workers allow 6
+     * simultaneous outbound connections); default 50 on Node, at most 500.
+     */
+    checkConcurrency?: number
     /** Stop starting new checks after this many ms in one tick. Default 20000. */
     tickBudgetMs?: number
     /** Maximum additional regional confirmation probes started in one tick. Default 6. */
@@ -533,7 +541,7 @@ export interface NormalizedConfig {
   subscribers: SubscriberConfigInput | null
   monitors: Monitor[]
   peer: { pingUrl: Secret | null; heartbeatMonitor: string | null; healthMonitor: string | null }
-  limits: { maxChecksPerTick: number; tickBudgetMs: number; maxConfirmationsPerTick: number; pingPerIpPerMinute: number }
+  limits: { maxChecksPerTick: number; checkConcurrency: number; tickBudgetMs: number; maxConfirmationsPerTick: number; pingPerIpPerMinute: number }
   access: NormalizedAccess | null
   pages: NormalizedPage[]
   home: string | null
@@ -660,6 +668,8 @@ export interface NormalizeOptions {
    * still loads (an unknown sink name, an out-of-range limit). Saving refuses these instead.
    */
   warnings?: string[]
+  /** Where the configuration runs; it sets the check limits (RUNTIME_LIMITS). Default 'workers'. */
+  runtime?: Runtime
 }
 
 /**
@@ -694,8 +704,20 @@ function boundedNumber(value: unknown, fallback: number, where: string, [min, ma
   return used
 }
 
-/** Bounds for the tick's work limits: at least one check (Workers allow 1000 subrequests), and a budget from 1 s to 5 min. */
-export const LIMIT_BOUNDS = { maxChecksPerTick: [1, 1000], tickBudgetMs: [1000, 300_000], maxConfirmationsPerTick: [1, 35], pingPerIpPerMinute: [1, 10_000] } as const
+/** Bounds for the tick's work limits that do not depend on the runtime: a budget from 1 s to 5 min. */
+export const LIMIT_BOUNDS = { tickBudgetMs: [1000, 300_000], maxConfirmationsPerTick: [1, 35], pingPerIpPerMinute: [1, 10_000] } as const
+
+export type Runtime = 'workers' | 'node'
+
+/**
+ * Check limits by runtime, as [default, min, max]. A Worker invocation allows 1000 subrequests and
+ * 6 simultaneous outbound connections; a Node process is limited only by its memory (about 500 MB
+ * for 500 checks in flight).
+ */
+export const RUNTIME_LIMITS = {
+  workers: { maxChecksPerTick: [35, 1, 1000], checkConcurrency: [5, 1, 6] },
+  node: { maxChecksPerTick: [1000, 1, 10_000], checkConcurrency: [50, 1, 500] },
+} as const
 /** Session length bounds, in hours: from one hour to 30 days. */
 export const SESSION_HOURS_BOUNDS = [1, 720] as const
 
@@ -1090,8 +1112,14 @@ export function normalizeConfig(config: StatusPingConfig, options: NormalizeOpti
   const limitsInput = config.limits && typeof config.limits === 'object' ? config.limits : undefined
   const bounded = (key: keyof typeof LIMIT_BOUNDS, fallback: number) =>
     boundedNumber(limitsInput?.[key], fallback, `limits.${key}`, LIMIT_BOUNDS[key], problems, save, true, options.warnings)
+  const runtimeLimits = RUNTIME_LIMITS[options.runtime ?? 'workers']
+  const byRuntime = (key: keyof typeof runtimeLimits) => {
+    const [fallback, min, max] = runtimeLimits[key]
+    return boundedNumber(limitsInput?.[key], fallback, `limits.${key}`, [min, max], problems, save, true, options.warnings)
+  }
   const limits = {
-    maxChecksPerTick: bounded('maxChecksPerTick', 35),
+    maxChecksPerTick: byRuntime('maxChecksPerTick'),
+    checkConcurrency: byRuntime('checkConcurrency'),
     tickBudgetMs: bounded('tickBudgetMs', 20_000),
     maxConfirmationsPerTick: bounded('maxConfirmationsPerTick', 6),
     pingPerIpPerMinute: bounded('pingPerIpPerMinute', 60),

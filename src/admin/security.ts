@@ -1,7 +1,7 @@
 import type { Context } from 'hono'
 import { getCookie } from 'hono/cookie'
 import { canAcknowledge, type Viewer } from '../auth/viewer.ts'
-import { type EnvGetter, type EnvRef, isReservedEnv, type NormalizedConfig, normalizeConfig, resolveConfigEnv, type StatusPingConfig } from '../config.ts'
+import { type EnvGetter, type EnvRef, isReservedEnv, type NormalizedConfig, normalizeConfig, resolveConfigEnv, type Runtime, type StatusPingConfig } from '../config.ts'
 import type { Db } from '../db/types.ts'
 import { randomToken, sha256Hex, timingSafeEqual } from '../util/crypto.ts'
 import { normalizeSchedule } from '../maintenance.ts'
@@ -218,7 +218,7 @@ function withLegacyHeaderValues(config: Record<string, unknown>): Record<string,
   return changed ? { ...config, groups } : config
 }
 
-export function validateAdminConfig(value: unknown, getEnv: EnvGetter, mode: 'save' | 'load' = 'save'): AdminConfigValidation {
+export function validateAdminConfig(value: unknown, getEnv: EnvGetter, mode: 'save' | 'load' = 'save', runtime: Runtime = 'workers'): AdminConfigValidation {
   const input = record(value)
   if (!input) throw new Error('config: must be an object')
   const config = mode === 'save' ? withNormalizedSchedules(input) : withLegacyHeaderValues(input)
@@ -241,7 +241,7 @@ export function validateAdminConfig(value: unknown, getEnv: EnvGetter, mode: 'sa
     // Environment-backed monitor URLs need a harmless placeholder during validation.  Their
     // actual value stays in the environment and is resolved only when the config becomes active.
     const warnings: string[] = []
-    const normalized = normalizeConfig(resolveConfigEnv(config as unknown as StatusPingConfig, getEnv, true), { save: mode === 'save', warnings })
+    const normalized = normalizeConfig(resolveConfigEnv(config as unknown as StatusPingConfig, getEnv, true), { save: mode === 'save', warnings, runtime })
     const tenant = parseTenantPolicy(getEnv(TENANT_ENV))
     if (!tenant) return { config: config as unknown as AdminConfig, normalized, warnings }
     if (mode === 'save') {

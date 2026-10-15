@@ -154,7 +154,7 @@ export function mountAdminRoutes(app: Hono, deps: Deps): void {
   const save = async (p: Post, next: AdminConfig, secrets: Array<{ name: string; value: string }> = [], opts: SaveOptions = {}): Promise<string | null> => {
     const viewer = p.viewer
     let normalized
-    try { normalized = validateAdminConfig({ ...next, admin: true }, deps.getEnv).normalized } catch (error) { return opts.yaml ? locateProblems(opts.yaml, (error as Error).message) : (error as Error).message }
+    try { normalized = validateAdminConfig({ ...next, admin: true }, deps.getEnv, 'save', deps.runtime).normalized } catch (error) { return opts.yaml ? locateProblems(opts.yaml, (error as Error).message) : (error as Error).message }
     if (!canAdmin(viewer, normalized)) return 'This change would remove your own access to Settings. Ask another administrator to make it.'
     const now = nowSeconds()
     if (p.base !== undefined) {
@@ -164,7 +164,7 @@ export function mountAdminRoutes(app: Hono, deps: Deps): void {
     try {
       // Entered credentials are stored in the same batch as the configuration, after the name and
       // binding checks, so a refused save leaves the stored credential and its binding untouched.
-      await saveAdminConfig(deps.db, { ...next, admin: true }, viewer.email, now, deps.getEnv, { ...opts, base: p.base, secrets, hasRealEnv: deps.hasRealEnv })
+      await saveAdminConfig(deps.db, { ...next, admin: true }, viewer.email, now, deps.getEnv, { ...opts, base: p.base, secrets, hasRealEnv: deps.hasRealEnv, runtime: deps.runtime })
     } catch (error) {
       if (error instanceof RevisionConflict) { formRevision.set(p.c.req.raw, error.current); return CONFLICT }
       return (error as Error).message
@@ -461,7 +461,7 @@ They are refused when saving, so fix them in <a href="/admin/configuration">Conf
       // Validate with the new values visible, so a just-entered credential counts as set.
       const pending = Object.fromEntries(secrets.map((s) => [s.name, s.value]))
       const getEnv = (env: string) => own(pending, env) ?? deps.getEnv(env)
-      try { validateAdminConfig({ ...putSink(p.config, channel, sink), admin: true }, getEnv) } catch (e) { throw new FormError((e as Error).message) }
+      try { validateAdminConfig({ ...putSink(p.config, channel, sink), admin: true }, getEnv, 'save', deps.runtime) } catch (e) { throw new FormError((e as Error).message) }
       const result = await save(p, putSink(p.config, channel, sink), secrets)
       if (!result) return done(c, '/admin/channels', name ? 'channel-saved' : 'channel-added')
       error = result
@@ -619,7 +619,7 @@ They are refused when saving, so fix them in <a href="/admin/configuration">Conf
       if (!yaml.trim()) throw new FormError('Paste a configuration or choose a YAML file.')
       const next = parseImport(yaml, p.config)
       let normalized
-      try { normalized = validateAdminConfig(next, deps.getEnv).normalized } catch (e) { throw new FormError(locateProblems(yaml, (e as Error).message)) }
+      try { normalized = validateAdminConfig(next, deps.getEnv, 'save', deps.runtime).normalized } catch (e) { throw new FormError(locateProblems(yaml, (e as Error).message)) }
       if (!canAdmin(p.viewer, normalized)) throw new FormError('This configuration would remove your own access to Settings.')
       const changes = describeChanges(p.config, next)
       if (JSON.stringify((parseAdminYaml(yaml) as AdminConfig).access?.provider ?? null) !== JSON.stringify(p.config.access?.provider ?? null)) {
@@ -775,7 +775,7 @@ They are refused when saving, so fix them in <a href="/admin/configuration">Conf
         const next = value as AdminConfig
         value = { ...next, access: { ...(next.access ?? {}), provider: current.provider } }
       }
-      const saved = await saveAdminConfig(deps.db, value, 'api-token', nowSeconds(), deps.getEnv, { base, yaml, action: 'config.api', hasRealEnv: deps.hasRealEnv })
+      const saved = await saveAdminConfig(deps.db, value, 'api-token', nowSeconds(), deps.getEnv, { base, yaml, action: 'config.api', hasRealEnv: deps.hasRealEnv, runtime: deps.runtime })
       await refreshAdminConfig(deps, nowSeconds())
       return c.json({ config: saved.config, updatedAt: saved.updatedAt, revision: saved.revision }, 200, { ...noStore, etag: etag(saved.revision) })
     } catch (error) {

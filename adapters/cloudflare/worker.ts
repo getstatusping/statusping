@@ -50,6 +50,7 @@ function init(env: Env) {
         const v = env[name]
         return typeof v === 'string' ? v : undefined
       },
+      runtime: 'workers',
       legacyConfig,
       tcpConnect: cloudflareTcpConnect,
       smtpConnect: cloudflareSmtpConnect,

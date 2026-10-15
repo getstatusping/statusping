@@ -184,16 +184,34 @@
       "type": "object",
       "properties": {
         "maxChecksPerTick": {
-          "type": "integer"
+          "type": "integer",
+          "description": "Most HTTP/TCP checks started in one tick. Default 35 on Cloudflare Workers (at most 1000); default 1000 on Node (at most 10000).",
+          "minimum": 1,
+          "maximum": 10000
+        },
+        "checkConcurrency": {
+          "type": "integer",
+          "description": "HTTP/TCP checks run at the same time. Default 5 on Cloudflare Workers (at most 6); default 50 on Node (at most 500).",
+          "minimum": 1,
+          "maximum": 500
         },
         "tickBudgetMs": {
-          "type": "integer"
+          "type": "integer",
+          "description": "Stop starting new checks after this many milliseconds in one tick. Default 20000.",
+          "minimum": 1000,
+          "maximum": 300000
         },
         "maxConfirmationsPerTick": {
-          "type": "integer"
+          "type": "integer",
+          "description": "Default 6.",
+          "minimum": 1,
+          "maximum": 35
         },
         "pingPerIpPerMinute": {
-          "type": "integer"
+          "type": "integer",
+          "description": "Default 60.",
+          "minimum": 1,
+          "maximum": 10000
         }
       },
       "additionalProperties": false

@@ -27,7 +27,7 @@ import { auditStatement, revisionStatements } from '../src/admin/service.ts'
 import { pruneLocalUsersStatement, storedPasswordAllowed } from '../src/auth/local-users.ts'
 import { rotateSignInEpochStatement } from '../src/auth/epoch.ts'
 import { locateProblems, parseAdminYaml } from '../src/admin/yaml.ts'
-import type { NormalizedConfig } from '../src/config.ts'
+import type { NormalizedConfig, Runtime } from '../src/config.ts'
 
 const [command, ...args] = process.argv.slice(2)
 const getEnv = (name: string) => (Object.hasOwn(process.env, name) ? process.env[name] : undefined)
@@ -78,11 +78,14 @@ async function configCommand(sub: string | undefined, rest: string[]): Promise<v
   }
   switch (sub) {
     case 'check': {
+      // The site's runtime sets the check limits; Workers are the stricter default.
+      const runtime = option(rest, '--runtime') ?? 'workers'
+      if (runtime !== 'workers' && runtime !== 'node') fail('--runtime must be "workers" or "node"')
       const yaml = await readYaml(rest[0])
       let parsed: unknown
       try { parsed = parseAdminYaml(yaml) } catch (error) { fail((error as Error).message) }
       const value = parsed && typeof parsed === 'object' && !('admin' in parsed) ? { ...parsed, admin: true } : parsed
-      try { describe(validateAdminConfig(value, getEnv).normalized) } catch (error) { fail(locateProblems(yaml, (error as Error).message)) }
+      try { describe(validateAdminConfig(value, getEnv, 'save', runtime as Runtime).normalized) } catch (error) { fail(locateProblems(yaml, (error as Error).message)) }
       return
     }
     case 'pull': {
@@ -109,7 +112,7 @@ async function configCommand(sub: string | undefined, rest: string[]): Promise<v
       return
     }
     default:
-      fail('usage: config <check <file.yaml> | pull [--url <site>] | push [--url <site>] [--revision <n>] <file.yaml>>')
+      fail('usage: config <check [--runtime <workers|node>] <file.yaml> | pull [--url <site>] | push [--url <site>] [--revision <n>] <file.yaml>>')
   }
 }
 
@@ -127,7 +130,7 @@ async function recover(email: string | undefined): Promise<void> {
   const next = { ...stored, admin: true, access: { ...(stored.access ?? {}), provider: { type: 'basic' }, admins: { ...(admins ?? {}), emails: [...new Set([address, ...(admins?.emails ?? [])])] } } } as AdminConfig
   let config: AdminConfig
   let normalized: NormalizedConfig
-  try { ({ config, normalized } = validateAdminConfig(next, getEnv, 'load')) } catch (error) { fail((error as Error).message) }
+  try { ({ config, normalized } = validateAdminConfig(next, getEnv, 'load', 'node')) } catch (error) { fail((error as Error).message) }
   const password = randomToken(24)
   const now = Math.floor(Date.now() / 1000)
   await db.batch([
@@ -160,7 +163,7 @@ async function removeUser(email: string | undefined): Promise<void> {
   const stillAdmin = async () => {
     const row = await db.first<{ config_json: string }>(`SELECT config_json FROM admin_config WHERE id = 1`)
     if (!row) return false
-    try { return storedPasswordAllowed(validateAdminConfig(JSON.parse(row.config_json), getEnv, 'load').normalized.access, address) } catch { return false }
+    try { return storedPasswordAllowed(validateAdminConfig(JSON.parse(row.config_json), getEnv, 'load', 'node').normalized.access, address) } catch { return false }
   }
   const envLists = basicAuthUsersLists(getEnv, address)
   if (!(await db.first(`SELECT email FROM local_users WHERE email = ?`, [address]))) {

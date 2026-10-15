@@ -3,6 +3,7 @@ import {
   type EnvGetter,
   type NormalizedConfig,
   type Role,
+  type Runtime,
   type StatusPingConfig,
   normalizeConfig,
   parseJsonConfig,
@@ -38,6 +39,8 @@ export interface Deps {
   /** The instance is in first-run setup mode: only /healthz and /setup respond, and ticks run no checks. */
   setupPending: boolean
   role: Role
+  /** Where the site runs: Workers keep the check limits their connection and subrequest caps allow. */
+  runtime: Runtime
   /** Environment first, then the values setup stored in the DB (see STORABLE_ENV). */
   getEnv: EnvGetter
   /** Whether a name is set in the real environment (not a stored value). */
@@ -124,6 +127,8 @@ export interface CreateDepsOptions {
   log?: Logger
   certificateExpiry?: CertificateExpiryProvider
   tcpConnect?: TcpConnector
+  /** Where the site runs: it sets the check limits (see RUNTIME_LIMITS). Default 'workers'. */
+  runtime?: Runtime
   /** Runtime DNS lookup (all addresses) used by the private-target guard. Workers omit it. */
   resolveHost?: HostResolver
   confirmationProbe?: ConfirmationProbe
@@ -154,7 +159,8 @@ export function createDeps(opts: CreateDepsOptions): Deps {
   // Read from the real environment only: a tenant can never store or override its own policy.
   const tenant = parseTenantPolicy(opts.getEnv(TENANT_ENV))
   const input = opts.config ?? UNCONFIGURED
-  const normalized = normalizeConfig(resolveConfigEnv(input, opts.getEnv))
+  const runtime = opts.runtime ?? 'workers'
+  const normalized = normalizeConfig(resolveConfigEnv(input, opts.getEnv), { runtime })
   const config = tenant ? clampToTenantPolicy(normalized, tenant) : normalized
   // Escalation needs no ACK_SECRET: acknowledgement links fall back to a key the site generates
   // and stores (acknowledgeSecret), the same way for an injected and a stored configuration.
@@ -170,6 +176,7 @@ export function createDeps(opts: CreateDepsOptions): Deps {
     legacyConfig: opts.legacyConfig,
     setupPending: false,
     role: roleEnv,
+    runtime,
     // A Worker secret or env var always wins over a value stored by setup.
     getEnv: (name) => opts.getEnv(name) ?? (isStorableEnv(name) ? own(deps.storedEnv, name) : undefined),
     hasRealEnv: (name) => opts.getEnv(name) !== undefined,
@@ -261,7 +268,7 @@ async function firstRun(deps: Deps, now: number): Promise<void> {
       const raw = saved ? JSON.parse(saved)
         : (await deps.legacyConfig?.().catch(() => undefined))
           ?? (deps.hasRealEnv('STATUSPING_CONFIG') ? parseJsonConfig(deps.getEnv('STATUSPING_CONFIG')!) : undefined)
-      if (raw) legacy = validateAdminConfig({ ...raw, admin: true }, deps.getEnv, 'load').config
+      if (raw) legacy = validateAdminConfig({ ...raw, admin: true }, deps.getEnv, 'load', deps.runtime).config
     } catch (error) {
       deps.log('warn', 'The old configuration could not be moved to the database; starting setup instead. Import it in the setup wizard after fixing it.', { problem: (error as Error).message })
     }
@@ -308,7 +315,7 @@ async function loadAdminState(deps: Deps, now: number, origin?: string): Promise
   let stored = await loadAdminConfig(deps.db)
   if (!stored) {
     // Validate before persisting: literal credentials never enter admin_config or audit_log.
-    const validated = validateAdminConfig({ ...deps.configInput, admin: true }, deps.getEnv, 'load')
+    const validated = validateAdminConfig({ ...deps.configInput, admin: true }, deps.getEnv, 'load', deps.runtime)
     await seedAdminConfig(deps.db, validated.config, 'config-seed', now)
     stored = await loadAdminConfig(deps.db)
     wrote = true
@@ -321,7 +328,7 @@ async function loadAdminState(deps: Deps, now: number, origin?: string): Promise
   try {
     // A row that is not a JSON object loads as null (and the seed above cannot replace it).
     if (!stored) throw new Error('The stored configuration is not a JSON object.')
-    validated = validateAdminConfig(stored.config, deps.getEnv, 'load')
+    validated = validateAdminConfig(stored.config, deps.getEnv, 'load', deps.runtime)
   } catch (error) {
     // Never let a stored configuration take the whole site down (this runs in front of every
     // request and at the top of every tick): fall back, and keep Settings and reset reachable.
@@ -524,8 +531,8 @@ async function loadFallback(deps: Deps, stored: AdminConfig | undefined, problem
       let revision: AdminConfigValidation
       let validated: AdminConfigValidation
       try {
-        revision = validateAdminConfig(JSON.parse(row.config_json), deps.getEnv, 'load')
-        validated = validateAdminConfig(fallbackFromRevision(revision.config, current), deps.getEnv, 'load')
+        revision = validateAdminConfig(JSON.parse(row.config_json), deps.getEnv, 'load', deps.runtime)
+        validated = validateAdminConfig(fallbackFromRevision(revision.config, current), deps.getEnv, 'load', deps.runtime)
       } catch { continue }
       useConfig(deps, validated)
       deps.configFallback = { problem, revision: row.id }
@@ -549,7 +556,7 @@ async function loadFallback(deps: Deps, stored: AdminConfig | undefined, problem
   let lastProblem = 'The stored configuration is not a JSON object.'
   for (const rescue of attempts) {
     try {
-      useConfig(deps, validateAdminConfig(rescue, deps.getEnv, 'load'))
+      useConfig(deps, validateAdminConfig(rescue, deps.getEnv, 'load', deps.runtime))
       return
     } catch (error) {
       lastProblem = (error as Error).message
@@ -560,5 +567,5 @@ async function loadFallback(deps: Deps, stored: AdminConfig | undefined, problem
   // recovery session change the sign-in method on top of a configuration that does not load.
   deps.log('error', 'The sign-in settings could not be loaded either, so nobody can sign in and /setup/recover cannot be used. Reset the site at /setup/reset, or repair the stored configuration in the database.', { problem: lastProblem })
   // Fail closed: no sign-in method, no monitors, nothing from an earlier configuration.
-  useConfig(deps, validateAdminConfig({ title: UNCONFIGURED.title, baseUrl: safeBaseUrl, groups: [], admin: true }, deps.getEnv, 'load'))
+  useConfig(deps, validateAdminConfig({ title: UNCONFIGURED.title, baseUrl: safeBaseUrl, groups: [], admin: true }, deps.getEnv, 'load', deps.runtime))
 }

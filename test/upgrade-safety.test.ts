@@ -107,7 +107,7 @@ describe('stored configurations from earlier releases still load', () => {
     const limits = { maxChecksPerTick: 0, tickBudgetMs: 10, maxConfirmationsPerTick: 99, pingPerIpPerMinute: 0 }
     const warnings: string[] = []
     const loaded = normalizeConfig(testConfig({ limits }), { warnings })
-    expect(loaded.limits).toEqual({ maxChecksPerTick: 1, tickBudgetMs: 1000, maxConfirmationsPerTick: 35, pingPerIpPerMinute: 1 })
+    expect(loaded.limits).toEqual({ maxChecksPerTick: 1, checkConcurrency: 5, tickBudgetMs: 1000, maxConfirmationsPerTick: 35, pingPerIpPerMinute: 1 })
     expect(warnings).toHaveLength(4)
     expect(normalizeConfig(testConfig({ limits: { maxConfirmationsPerTick: 2.5 as never, pingPerIpPerMinute: 'many' as never } })).limits)
       .toMatchObject({ maxConfirmationsPerTick: 6, pingPerIpPerMinute: 60 })

@@ -1,4 +1,4 @@
-import type { StatusPingConfig } from '../config.ts'
+import type { Runtime, StatusPingConfig } from '../config.ts'
 import type { Db, Statement } from '../db/types.ts'
 import { createSink, type SinkRuntime } from '../notify/sinks.ts'
 import { randomToken, sha256Hex } from '../util/crypto.ts'
@@ -186,6 +186,8 @@ export interface SaveOptions {
   secrets?: ReadonlyArray<{ name: string; value: string }>
   /** More statements that must be written in the same transaction as the configuration. */
   extra?: readonly Statement[]
+  /** Where the site runs; it sets the check limits a save may use. Default 'workers'. */
+  runtime?: Runtime
 }
 
 /** Atomically validates, records, and stores an admin-managed config as a new revision. */
@@ -205,7 +207,7 @@ export async function saveAdminConfig(
   const env = pending.size
     ? (name: string) => (opts.hasRealEnv?.(name) ? getEnv(name) : pending.get(name) ?? getEnv(name))
     : getEnv
-  const { config, normalized } = validateAdminConfig(value, env)
+  const { config, normalized } = validateAdminConfig(value, env, 'save', opts.runtime)
   if (config.admin !== true) throw new Error('admin: cannot disable admin mode through the admin API')
   const before = await loadAdminConfig(db)
   const nameProblems = channelNameProblems(config, before?.config)
